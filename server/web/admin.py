@@ -865,6 +865,9 @@ def _reward_record(sender, message, specs, results, summary):
 
     名单里**每个人**都留一行，包括发失败和被跳过的 —— 记录要回答的是
     「那一次到底谁拿到了什么」，只留成功的等于把最该查的那几行抹掉。
+
+    ★ **发送者只存账号名，不存昵称**（用户 2026-09-13 拍板，D96）——
+    昵称是读记录时**现查最新**的那一份，见 `_admin_reward_history`。
     """
     return {
         "sender": sender,
@@ -972,6 +975,28 @@ class AdminRoutes:
         """当前登录的是谁；没登录返回 `None`。"""
         return self._admin_identity()[0]
 
+    def _nickname(self, name):
+        """`name` 那个**同名玩家账号**的昵称；没有同名号回 `""`（用户 2026-09-13）。
+
+        管理员档里没有昵称这一格 —— 昵称是玩家自己在注册页填的，管理员表
+        只有口令和权限。而管理员名和玩家名在同一个命名空间里（「装备卖出」
+        页就是靠这一条认人的，见 `_sell_target`），所以「他的昵称」= 同名
+        游戏账号的昵称，**每次现查**：他随时可能在注册页把昵称改掉。
+
+        ★ 玩家档登录的人走的是同一条路 —— 那个名字本来就是游戏账号名，
+          查出来的就是他自己的昵称。三档身份只有这一个口径。
+        """
+        return self.accounts.nickname_of(name)
+
+    def _who(self, name):
+        """审计日志里的「谁」：`'账号名'（昵称）`，没有同名玩家账号就只写账号名。
+
+        ★ **账号名永远留着**：昵称会改、也不保证唯一，几个月后回头查一次
+        事故，能对上号的只有账号名。昵称是加在旁边让人认得出是谁，不是替代。
+        """
+        nickname = self._nickname(name)
+        return f"{name!r}（{nickname}）" if nickname else repr(name)
+
     def _require_admin(self):
         """没登录就回 401 并返回 `None`；登录了就返回名字。
 
@@ -1053,6 +1078,9 @@ class AdminRoutes:
             name, role = self._admin_identity()
             self._send_json({"ok": True, "name": name,
                              "logged_in": name is not None,
+                             # 顶栏那句「已登录：…」要写的昵称（用户
+                             # 2026-09-13）。没登录 / 没有同名游戏账号都是空串。
+                             "nickname": self._nickname(name) if name else "",
                              "role": role})
             return True
         if path.startswith("/admin/api/config/"):
@@ -1254,10 +1282,17 @@ class AdminRoutes:
         token = self.admin_sessions.issue(name, kind)
         role = (ROLE_PLAYER if kind == SESSION_KIND_PLAYER
                 else self.accounts.admin_role(name))
-        eventlog.online(f"[admin] 登录成功 {name!r}"
-                        f"（{ROLE_ZH.get(role, role)}）"
+        # ★ 身份写成 `身份=…` 而不是再套一对括号：`_who()` 自己就带一对
+        #   （昵称），连着两对就成了「'alice'（爱丽丝）（玩家（只读））」。
+        eventlog.online(f"[admin] 登录成功 {self._who(name)}"
+                        f" 身份={ROLE_ZH.get(role, role)}"
                         f" 来自 {self.client_label()}")
         body = json.dumps({"ok": True, "message": "登录成功", "name": name,
+                           # 顶栏那句「已登录：…」（用户 2026-09-13）。登录
+                           # 回执和 `/session` 回同一组键 —— 刷新页面走的是
+                           # 后者，少回一个键的症状是「登进来有昵称、一刷新
+                           # 就没了」。
+                           "nickname": self._nickname(name),
                            "role": role},
                           ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -1273,7 +1308,7 @@ class AdminRoutes:
         name = self.admin_sessions.resolve(token)
         self.admin_sessions.drop(token)
         if name:
-            eventlog.online(f"[admin] 退出登录 {name!r}")
+            eventlog.online(f"[admin] 退出登录 {self._who(name)}")
         body = json.dumps({"ok": True, "message": "已退出登录"},
                           ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -1397,7 +1432,7 @@ class AdminRoutes:
             # —— 存完直接把缓存丢掉，下一次读一定是新的。
             shopcfg.invalidate()
 
-        eventlog.online(f"[admin] {name!r} 保存了 {filename}")
+        eventlog.online(f"[admin] {self._who(name)} 保存了 {filename}")
         message = f"已保存 {filename}，即刻生效（不用重启）"
         if adopted:
             # ★ 自动合并**不用弹框**（用户 2026-09-06），但得说一声 ——
@@ -1460,7 +1495,7 @@ class AdminRoutes:
             # ★ 打**存下来的**那个权限，不是请求里那个 —— 没传时存的是
             #   系统管理员，日志里写「None」谁也看不懂。
             added = self.accounts.admin_role(target)
-            eventlog.online(f"[admin] {name!r} 添加了管理员 {target!r}"
+            eventlog.online(f"[admin] {self._who(name)} 添加了管理员 {target!r}"
                             f"（{account_store.ADMIN_ROLE_ZH.get(added, added)}）")
             self._send_json({"ok": True, "message": f"已添加管理员 {target}",
                              "names": names,
@@ -1471,7 +1506,7 @@ class AdminRoutes:
             # ★ 改完口令要把那个人**已有的会话全部作废** —— 否则「我把密码
             #   改了」和「拿着旧密码登进来的人还在操作」会同时成立。
             self.admin_sessions.drop_admin(target)
-            eventlog.online(f"[admin] {name!r} 改了 {target!r} 的密码")
+            eventlog.online(f"[admin] {self._who(name)} 改了 {target!r} 的密码")
             logged_out = (target == name)
             self._send_json({
                 "ok": True, "logged_out": logged_out,
@@ -1484,7 +1519,8 @@ class AdminRoutes:
             #   （`_require_system_admin`），降完立刻生效，没必要踢他重登。
             role = self.accounts.admin_set_role(target, data.get("role"))
             zh = account_store.ADMIN_ROLE_ZH.get(role, role)
-            eventlog.online(f"[admin] {name!r} 把 {target!r} 的权限改成了 {zh}")
+            eventlog.online(f"[admin] {self._who(name)} 把 {target!r} "
+                            f"的权限改成了 {zh}")
             self._send_json({
                 "ok": True, "admins": self.accounts.admin_list(),
                 # 把自己降成运营 ⇒ 前台要立刻把那两个标签收起来。
@@ -1498,7 +1534,7 @@ class AdminRoutes:
             #   也不经过这里的任何一个变量（铁律 9）。
             names = self.accounts.admin_add_from_player(
                 target, account_store.ADMIN_ROLE_OPERATOR)
-            eventlog.online(f"[admin] {name!r} 把玩家 {target!r} 设成了运营")
+            eventlog.online(f"[admin] {self._who(name)} 把玩家 {target!r} 设成了运营")
             self._send_json({
                 "ok": True,
                 "message": f"已把玩家 {target} 设为管理员（运营）",
@@ -1509,7 +1545,7 @@ class AdminRoutes:
             # 这里直接让它抛 `AccountError`，宿主的 `do_POST` 会转成友好提示。
             names = self.accounts.admin_remove(target)
             self.admin_sessions.drop_admin(target)
-            eventlog.online(f"[admin] {name!r} 删除了管理员 {target!r}")
+            eventlog.online(f"[admin] {self._who(name)} 删除了管理员 {target!r}")
             self._send_json({"ok": True, "message": f"已删除管理员 {target}",
                              "names": names,
                              "admins": self.accounts.admin_list(),
@@ -1578,7 +1614,7 @@ class AdminRoutes:
             self._as_bool(data.get("enabled"), default=True),
             data.get("time"), data.get("keep_days"))
         zh = "开" if settings["enabled"] else "关"
-        eventlog.online(f"[admin] {name!r} 改了数据备份设置：自动备份={zh} "
+        eventlog.online(f"[admin] {self._who(name)} 改了数据备份设置：自动备份={zh} "
                         f"时刻={settings['time']} 保留={settings['keep_days']} 天")
         message = "已保存，即刻生效（不用重启）"
         if removed:
@@ -1590,7 +1626,7 @@ class AdminRoutes:
     def _backup_create(self, service, name, data):
         manifest = service.create(databackup.KIND_MANUAL, data.get("label"),
                                   created_by=name)
-        eventlog.online(f"[admin] {name!r} 手动备份了 {manifest['id']}"
+        eventlog.online(f"[admin] {self._who(name)} 手动备份了 {manifest['id']}"
                         f"（{manifest['label']}）")
         self._backup_reply(service, f"已备份 {manifest['id']}"
                                     f"（{len(manifest['files'])} 个文件）",
@@ -1599,7 +1635,7 @@ class AdminRoutes:
     def _backup_remove(self, service, name, data):
         backup_id = str(data.get("id") or "")
         service.remove(backup_id)
-        eventlog.online(f"[admin] {name!r} 删掉了备份 {backup_id}")
+        eventlog.online(f"[admin] {self._who(name)} 删掉了备份 {backup_id}")
         self._backup_reply(service, f"已删除备份 {backup_id}")
 
     def _backup_restore(self, service, name, data):
@@ -1648,7 +1684,8 @@ class AdminRoutes:
                 notes.append(f"在线 {pushed} 人已即时推送")
             if kicked:
                 notes.append(f"备份里不存在的账号已踢下线：{'、'.join(kicked)}")
-        eventlog.online(f"[admin] {name!r} 回滚到 {backup_id}（{'、'.join(restored)}）"
+        eventlog.online(f"[admin] {self._who(name)} 回滚到 {backup_id}"
+                        f"（{'、'.join(restored)}）"
                         f"，回滚前留了 {result['pre_backup_id']}"
                         + (f"，没回滚成：{'、'.join(n for n, _e in result['failed'])}"
                            if result["failed"] else ""))
@@ -1812,7 +1849,7 @@ class AdminRoutes:
             materials=materials, inventory=inventory)
         pushed = _push_account(username)
         if changes:
-            eventlog.online(f"[admin] {admin!r} 改了玩家 {username!r}: "
+            eventlog.online(f"[admin] {self._who(admin)} 改了玩家 {username!r}: "
                             + "；".join(changes))
         if not changes:
             message = "没有任何改动"
@@ -1909,8 +1946,8 @@ class AdminRoutes:
                             "gifts": len(created), "skipped": skipped,
                             "pushed": told})
         summary = _reward_summary(results, total, pushed)
-        eventlog.online(f"[admin] {admin!r} 发奖励 {[s for s in specs]} 留言={message!r}："
-                        f"{summary}")
+        eventlog.online(f"[admin] {self._who(admin)} 发奖励 {[s for s in specs]}"
+                        f" 留言={message!r}：{summary}")
         # 发奖记录（用户 2026-09-10 第二轮）：礼物已经进了别人的礼物盒，
         # 这一条**追记**下来即可 —— 记不下来不该让已经发出去的奖励算失败，
         # 所以只警告一行，回执照常是成功。
@@ -1933,6 +1970,11 @@ class AdminRoutes:
         for row in gifthistory.load(log=eventlog.online):
             row = dict(row)
             row["time_text"] = databackup.format_time(row.get("time") or 0)
+            # 发送者的昵称（用户 2026-09-13 拍板，D96）：和 `time_text` 一样是
+            # **回包里现填的展示字段**，记录文件里没有它。★ 无条件覆盖 ——
+            # 早一版曾经把它写进过 `gift_history.json`，那种老记录里带着一个
+            # 过期的值，不盖掉就会漏出来。
+            row["sender_nickname"] = self._nickname(row.get("sender") or "")
             records.append(row)
         self._send_json({"ok": True, "max": gifthistory.HISTORY_MAX,
                          "records": records})
@@ -1946,7 +1988,7 @@ class AdminRoutes:
         if admin is None:
             return
         count = gifthistory.clear(log=eventlog.online)
-        eventlog.online(f"[admin] {admin!r} 清空发奖记录，删掉 {count} 条")
+        eventlog.online(f"[admin] {self._who(admin)} 清空发奖记录，删掉 {count} 条")
         self._reply(True, f"已清空发送记录（{count} 条）" if count else "本来就没有记录",
                     count=count)
 
@@ -2085,8 +2127,8 @@ class AdminRoutes:
             "%s×%d" % (shopcfg.item_name(item_id), count)
             for item_id, count in receipt["returned"].items())
         eventlog.online(
-            "[sell] %r 卖出 %s，得 %d 金币（%d -> %d）%s%s" % (
-                username, sold_text or "（空）", receipt["gained"],
+            "[sell] %s 卖出 %s，得 %d 金币（%d -> %d）%s%s" % (
+                self._who(username), sold_text or "（空）", receipt["gained"],
                 receipt["money_before"], receipt["money_after"],
                 "，返还 " + back_text if back_text else "",
                 "，已推给在线客户端" if pushed else "（不在线）"))
@@ -2166,5 +2208,5 @@ class AdminRoutes:
         except ValueError as error:
             self._reply(False, str(error), status=400)
             return
-        eventlog.online(f"[admin] {admin!r} 改了卖出价格")
+        eventlog.online(f"[admin] {self._who(admin)} 改了卖出价格")
         self._reply(True, "卖出价格已保存", prices=saved)

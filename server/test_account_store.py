@@ -1864,11 +1864,47 @@ class AdminRoleTests(unittest.TestCase):
         self.store.admin_add("carol", "SecretPw", self.OPERATOR)
         self.assertEqual({"password": "SecretPw", "role": self.OPERATOR},
                          self.saved()[ADMIN_ACCOUNTS_KEY]["carol"])
-        self.assertEqual([{"name": DEFAULT_ADMIN_NAME, "role": self.SYSTEM},
-                          {"name": "carol", "role": self.OPERATOR}],
+        # `nickname` 是**同名玩家账号**的昵称；一个玩家号都没有 ⇒ 全是空串。
+        self.assertEqual([{"name": DEFAULT_ADMIN_NAME, "role": self.SYSTEM,
+                           "nickname": ""},
+                          {"name": "carol", "role": self.OPERATOR,
+                           "nickname": ""}],
                          self.store.admin_list())
         self.assertEqual(self.OPERATOR, self.store.admin_role("carol"))
         self.assertIsNone(self.store.admin_role("nobody"))
+
+    def test_the_list_carries_the_same_named_player_s_nickname(self):
+        """管理员账号页那一列「昵称」（用户 2026-09-13）：管理员档里没有昵称，
+        拿**同名玩家账号**的；没有同名号就是空串（页面画 `-`）。"""
+        self.store.register("carol", "SecretPw", "大炮")
+        self.store.admin_add("carol", "SecretPw", self.OPERATOR)
+        self.store.admin_add("ghost", "SecretPw", self.OPERATOR)
+        self.assertEqual(
+            {DEFAULT_ADMIN_NAME: "", "carol": "大炮", "ghost": ""},
+            {row["name"]: row["nickname"] for row in self.store.admin_list()})
+
+    def test_an_old_account_without_a_nickname_falls_back_to_its_username(self):
+        """★ 老存档里 `display_name` 可能是空的，那时**用户名自己就是昵称**
+        —— `admin_list` 必须和 `get_account` 同一个口径，不能直接读原始字典
+        （读原始字典的话这一格是空的，页面上会画成「没有同名号」的 `-`）。"""
+        self.store.register("carol", "SecretPw", "大炮")
+        data = self.saved()
+        data["accounts"]["carol"]["display_name"] = ""
+        with open(self.path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        self.store.admin_add("carol", "SecretPw", self.OPERATOR)
+        self.assertEqual("carol", self.store.nickname_of("carol"))
+        self.assertEqual(
+            "carol",
+            {row["name"]: row["nickname"]
+             for row in self.store.admin_list()}["carol"])
+
+    def test_nickname_of_is_empty_when_there_is_no_such_player(self):
+        self.store.register("carol", "SecretPw", "大炮")
+        self.assertEqual("大炮", self.store.nickname_of("carol"))
+        self.assertEqual("", self.store.nickname_of("nobody"))
+        self.assertEqual("", self.store.nickname_of(""))
+        self.assertEqual("", self.store.nickname_of(None))
 
     def test_add_refuses_a_role_it_does_not_know(self):
         with self.assertRaises(AccountError) as caught:

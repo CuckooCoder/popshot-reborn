@@ -356,9 +356,13 @@
             看不到「玩家仓库」和「管理员账号」。</span></li>
           <li>改权限<b>立刻生效</b>，对方不用重新登录。</li>
         </ul>
+        <!-- ★ 「昵称」这一列是**同名玩家账号**的昵称（用户 2026-09-13）：
+             管理员档本身不存昵称，服务端每一发现查一次同名游戏账号
+             （`account_store.admin_list()`）。没有同名号的画一个 `-`。 -->
         <table>
           <thead><tr>
             <th>管理员</th>
+            <th style="width:200px">昵称</th>
             <th style="width:170px">权限</th>
             <th style="width:90px"></th>
           </tr></thead>

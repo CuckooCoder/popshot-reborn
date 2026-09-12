@@ -133,6 +133,18 @@ class _AdminCase(unittest.TestCase):
                          else account_store.DEFAULT_ADMIN_PASSWORD)},
             opener=opener)
 
+    def capture_log(self):
+        """接下来写进审计日志（`eventlog.online`）的每一行，返回那个列表。
+
+        管理页的「操作记录」就是这些行 —— 要验「日志里写没写昵称」只能拦
+        这一发。用例结束自动还原。
+        """
+        lines = []
+        real = web_admin.eventlog.online
+        web_admin.eventlog.online = lines.append
+        self.addCleanup(setattr, web_admin.eventlog, "online", real)
+        return lines
+
 
 class AdminAuthTests(_AdminCase):
 
@@ -1117,14 +1129,82 @@ class AdminAccountApiTests(_AdminCase):
                      {"name": "carol", "password": "SecretPw",
                       "role": "operator"})
         result = self.request("/admin/api/admins")[1]
-        self.assertEqual([{"name": "admin", "role": "system"},
-                          {"name": "carol", "role": "operator"}],
+        self.assertEqual([{"name": "admin", "role": "system", "nickname": ""},
+                          {"name": "carol", "role": "operator",
+                           "nickname": ""}],
                          result["admins"])
 
     def test_login_and_session_report_the_role(self):
         # 前台靠它决定藏哪两个标签页。
         self.assertEqual("system", self.login()[1]["role"])
         self.assertEqual("system", self.request("/admin/api/session")[1]["role"])
+
+    # -------------------------------------------- 同名玩家账号的昵称（2026-09-13）
+    def test_the_list_carries_the_same_named_player_s_nickname(self):
+        """管理员账号页那一列「昵称」：有同名游戏账号的写他的昵称，
+        没有的给空串（前台画 `-`）。"""
+        self.accounts.register("carol", "SecretPw", display_name="大炮")
+        self.request("/admin/api/admins/add",
+                     {"name": "carol", "password": "SecretPw",
+                      "role": "operator"})
+        rows = {row["name"]: row["nickname"]
+                for row in self.request("/admin/api/admins")[1]["admins"]}
+        self.assertEqual({"admin": "", "carol": "大炮"}, rows)
+
+    def test_login_and_session_report_the_same_named_player_s_nickname(self):
+        """顶栏那句「已登录：…」要写的昵称（用户 2026-09-13）。
+
+        ★ **两发都要回** —— 刷新页面走的是 `/session`，只在登录回执里带的话
+          症状是「登进来有昵称、一刷新就没了」。
+        """
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.assertEqual("大炮", self.login()[1]["nickname"])
+        self.assertEqual("大炮",
+                         self.request("/admin/api/session")[1]["nickname"])
+
+    def test_an_admin_without_a_game_account_has_no_nickname(self):
+        """没有同名游戏账号的管理员就只写账号名 —— 空串，前台自己兜底。"""
+        self.assertEqual("", self.login()[1]["nickname"])
+        self.assertEqual("", self.request("/admin/api/session")[1]["nickname"])
+        # 没登录的时候也要有这个键（前台那一发是整份赋值）。
+        self.request("/admin/api/logout", {})
+        session = self.request("/admin/api/session")[1]
+        self.assertFalse(session["logged_in"])
+        self.assertEqual("", session["nickname"])
+
+    def test_the_nickname_follows_the_player_account_without_a_relogin(self):
+        """★ 昵称**每一发现查**：玩家在注册页改完昵称，管理页刷新一下就该跟上，
+        不该等他重新登录（同 `admin_role` 那条「现查不缓存」）。"""
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.login()
+        self.accounts.change_nickname("admin", "SecretPw", "小炮")
+        self.assertEqual("小炮",
+                         self.request("/admin/api/session")[1]["nickname"])
+
+    def test_the_audit_log_writes_the_nickname_next_to_the_account_name(self):
+        """「操作记录」里也要认得出人是谁（用户 2026-09-13）。
+
+        ★ 账号名**不能**被昵称顶掉：昵称会改、也不保证唯一，几个月后
+          回头查事故，能对上号的只有账号名。
+        """
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        lines = self.capture_log()
+        self.assertTrue(self.login()[1]["ok"])
+        self.request("/admin/api/admins/add",
+                     {"name": "carol", "password": "SecretPw",
+                      "role": "operator"})
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertIn("'admin'（大炮）", line)
+
+    def test_the_audit_log_falls_back_to_the_account_name_alone(self):
+        """没有同名游戏账号 ⇒ 日志还是原来那句，不多一对空括号。"""
+        lines = self.capture_log()
+        self.assertTrue(self.login()[1]["ok"])
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertIn("'admin'", line)
+            self.assertNotIn("（）", line)
 
     def test_changing_a_role_takes_effect_without_a_relogin(self):
         """★ 权限是**每一发请求现查**的：把一个人降成运营，他手里那个令牌
@@ -2243,6 +2323,51 @@ class AdminRewardTests(_AdminCase):
                           ("bob", "小明", True, 4, False)],
                          [(p["username"], p["nickname"], p["ok"], p["gifts"],
                            p["pushed"]) for p in row["players"]])
+
+    def test_the_record_carries_the_sender_s_nickname(self):
+        """发送者那一栏也要认得出人是谁（用户 2026-09-13）：管理员档没有昵称，
+        写他那个**同名玩家账号**的。"""
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.assertTrue(self.send(players=["alice"], exp=1)[1]["ok"])
+        row = self.history()["records"][0]
+        self.assertEqual("admin", row["sender"])
+        self.assertEqual("大炮", row["sender_nickname"])
+
+    def test_a_sender_without_a_game_account_gets_an_empty_nickname(self):
+        self.assertTrue(self.send(players=["alice"], exp=1)[1]["ok"])
+        self.assertEqual("", self.history()["records"][0]["sender_nickname"])
+
+    def test_the_nickname_is_never_written_into_the_history_file(self):
+        """★★ 文件里**只存账号名**（用户 2026-09-13 拍板，D96）。
+        存一份昵称进去就等于存了一个会过期的副本。"""
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.assertTrue(self.send(players=["alice"], exp=1)[1]["ok"])
+        with open(os.path.join(self.data_dir, gifthistory.FILENAME),
+                  encoding="utf-8") as fp:
+            raw = json.load(fp)["records"][0]
+        self.assertEqual("admin", raw["sender"])
+        self.assertNotIn("sender_nickname", raw)
+
+    def test_the_history_always_shows_the_latest_nickname(self):
+        """★ 改了昵称，**旧记录也跟着变** —— 这一栏回答的是「这是谁」，
+        而人今天叫什么才认得出来（和名单里那份快照故意不一样）。"""
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.assertTrue(self.send(players=["alice"], exp=1)[1]["ok"])
+        self.accounts.change_nickname("admin", "SecretPw", "小炮")
+        self.assertEqual("小炮", self.history()["records"][0]["sender_nickname"])
+
+    def test_a_stale_nickname_left_in_an_old_file_is_overwritten(self):
+        """早一版曾经把昵称写进过 `gift_history.json`。那种记录里带着一个
+        过期的值，**读的时候必须盖掉**，否则它会原样漏到页面上。"""
+        self.accounts.register("admin", "SecretPw", display_name="大炮")
+        self.assertTrue(self.send(players=["alice"], exp=1)[1]["ok"])
+        target = os.path.join(self.data_dir, gifthistory.FILENAME)
+        with open(target, encoding="utf-8") as fp:
+            raw = json.load(fp)
+        raw["records"][0]["sender_nickname"] = "很久以前那个名字"
+        with open(target, "w", encoding="utf-8") as fp:
+            json.dump(raw, fp)
+        self.assertEqual("大炮", self.history()["records"][0]["sender_nickname"])
 
     def test_the_newest_record_comes_first(self):
         for money in (100, 200, 300):

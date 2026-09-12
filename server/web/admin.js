@@ -2525,6 +2525,12 @@ function renderAdmins(admins) {
     var tr = document.createElement("tr");
     tr.appendChild(el("td", null, name));
 
+    // 昵称 = 同名玩家账号的昵称（用户 2026-09-13）。没有同名号 ⇒ 空串 ⇒
+    // 画一个 `-`：这一格空着和「昵称读失败了」长得一模一样，写个 `-` 才说
+    // 得清「他就是没有游戏账号」。
+    tr.appendChild(el("td", row.nickname ? "nick" : "nick none",
+                      row.nickname || "-"));
+
     // 权限下拉：改了当场提交（这一格只有两个值，再加一个「保存」按钮
     // 只会让人忘了按）。服务端会拦「最后一个系统管理员降成运营」。
     var td = el("td");
@@ -2564,10 +2570,10 @@ async function setAdminRole(name, role) {
   else { loadAdmins(); }
   if (result.ok && result.self_demoted) {
     // 把自己降成运营 ⇒ 这一页和「玩家仓库」当场就该消失。
-    // ★ 括号里那句话走 `ROLE_BADGE_ZH`，别在这儿再写一遍「（运营）」——
-    //   三档身份的说法只该有一个出处（D74）。
+    // ★ 顶栏那行字走 `paintWho()`，别在这儿再拼一遍 —— 三档身份的说法
+    //   （D74）和昵称怎么摆（2026-09-13）都只该有一个出处。
     ROLE = "operator";
-    $("who").textContent = "已登录：" + name + "（" + ROLE_BADGE_ZH[ROLE] + "）";
+    paintWho();
     applyRoleToTabs();
   }
 }
@@ -3797,6 +3803,19 @@ async function loadHistory(keep) {
   return true;
 }
 
+/** 一条记录的「发送者」写成什么（用户 2026-09-13）。
+ *
+ * 有昵称（= 他有同名玩家账号）写「大炮（admin）」，没有就只写账号名。
+ * ★ 昵称是服务端**读记录时现查的最新那一份**，记录文件里没存它（D96）——
+ *   同一条记录今天和明天可能写着不同的昵称，那是对的：它回答的是
+ *   「这是谁」，而人今天叫什么才认得出来。
+ */
+function historySender(row) {
+  var name = row.sender || "";
+  if (!name) { return "（不详）"; }
+  return row.sender_nickname ? row.sender_nickname + "（" + name + "）" : name;
+}
+
 function historyById(id) {
   var found = null;
   (HISTORY.records || []).forEach(function (row) {
@@ -3816,7 +3835,7 @@ function renderHistoryList() {
   HISTORY.records.forEach(function (row) {
     var line = el("div", "history-row" + (row.id === HISTORY.picked ? " on" : ""));
     line.appendChild(el("div", "when", row.time_text || row.id));
-    line.appendChild(el("div", "who", "发送者：" + (row.sender || "（不详）")));
+    line.appendChild(el("div", "who", "发送者：" + historySender(row)));
     line.appendChild(el("div", "what", historyGist(row)));
     line.onclick = function () {
       HISTORY.picked = row.id;
@@ -3896,7 +3915,7 @@ function renderHistoryDetail() {
   }
   var meta = el("dl", "history-meta");
   [["发送时间", row.time_text || row.id],
-   ["发送者", row.sender || "（不详）"],
+   ["发送者", historySender(row)],
    ["留言", row.message || ""],
    ["结果", row.summary || ""]].forEach(function (pair) {
     if (!pair[1]) { return; }
@@ -4649,6 +4668,15 @@ async function saveSellPrices() {
    ------------------------------------------------------------------- */
 var ROLE = null;              // "system" / "operator" / "player" / null（没登录）
 
+//: 顶栏那句「已登录：…」要写的两样东西（用户 2026-09-13）。
+//  `ME.name` 是账号名，`ME.nickname` 是**同名玩家账号**的昵称 ——
+//  管理员表里没有昵称，服务端每次现查（`web/admin.py` 的 `_nickname`），
+//  没有同名游戏账号就是空串。
+//  ★ 存下来是因为顶栏那行字**有两个出处**：登进来时画一次，把自己降成运营
+//    之后还要再画一次。那一处原来只手里有个 `name`，昵称不存的话一降权就
+//    掉了（同 D74 那句「三档身份的说法只该有一个出处」）。
+var ME = {name: "", nickname: ""};
+
 //: 现在停在哪个标签页。★ 和 `CURRENT` 不是一回事 —— `CURRENT` 只记那几个
 //  **配置**页（渲染要用），「玩家仓库」「数据备份」「管理员账号」不在里面。
 var TAB = "items";
@@ -4700,10 +4728,26 @@ function applyRoleToTabs() {
 var ROLE_BADGE_ZH = {system: "系统管理员", operator: "运营",
                      player: "玩家 · 只读"};
 
-function showLoggedIn(name, role) {
+/** 顶栏那行「已登录：…」。
+ *
+ * 有昵称（= 有同名玩家账号）写成「已登录：大炮（admin，系统管理员）」，
+ * 没有就还是原来那句「已登录：admin（系统管理员）」（用户 2026-09-13）。
+ * ★ 昵称摆在最前面、账号名留在括号里：管理员认自己靠昵称，而**能对上号的
+ *   只有账号名**（昵称能改、也不保证唯一），两个都得在。
+ * ★ 账号名和身份之间用的是中文逗号，不是 ` · ` —— 玩家那一档的说法本身
+ *   就带一个 `·`（「玩家 · 只读」），再用它分隔就成了三段看不出层次的东西。
+ */
+function paintWho() {
+  var badge = ROLE_BADGE_ZH[ROLE] || ROLE;
+  $("who").textContent = ME.nickname
+    ? "已登录：" + ME.nickname + "（" + ME.name + "，" + badge + "）"
+    : "已登录：" + ME.name + "（" + badge + "）";
+}
+
+function showLoggedIn(name, role, nickname) {
   ROLE = role || null;
-  $("who").textContent = "已登录：" + name
-    + "（" + (ROLE_BADGE_ZH[ROLE] || ROLE) + "）";
+  ME = {name: name, nickname: nickname || ""};
+  paintWho();
   $("logout").classList.remove("hidden");
   $("loginView").classList.add("hidden");
   $("mainView").classList.remove("hidden");
@@ -4737,6 +4781,9 @@ function applyReadOnly() {
 function showLoggedOut(message) {
   CAT = null;
   ROLE = null;
+  // 下一个登进来的是另一个人 —— 名字和昵称跟他无关（顶栏那行下面会清掉，
+  // 但留着脏数据的话，登录失败又重试时会一闪而过地写着上一个人的昵称）。
+  ME = {name: "", nickname: ""};
   // 下一个登进来的可能是管理员 —— 把只读那身衣服脱干净（D74）。
   applyReadOnly();
   // 下一个登进来的人可能权限不同 —— 停在哪一页得跟着回到起点。
@@ -4860,7 +4907,7 @@ function wire() {
     if (!result.ok) { say($("loginMsg"), result.message, false); return; }
     $("loginPass").value = "";
     say($("loginMsg"), "");
-    showLoggedIn(result.name, result.role);
+    showLoggedIn(result.name, result.role, result.nickname);
   };
   $("loginPass").addEventListener("keydown", function (event) {
     if (event.key === "Enter") { $("loginBtn").click(); }
@@ -5176,6 +5223,8 @@ function nextRecipeId() {
   wire();
   wireTips();
   var session = await api("/admin/api/session");
-  if (session.logged_in) { showLoggedIn(session.name, session.role); }
+  if (session.logged_in) {
+    showLoggedIn(session.name, session.role, session.nickname);
+  }
   else { showLoggedOut(""); }
 }());

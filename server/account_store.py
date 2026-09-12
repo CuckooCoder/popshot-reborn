@@ -1722,11 +1722,37 @@ class AccountStore:
             return sorted(admin_accounts(self._read_unlocked()))
 
     def admin_list(self):
-        """`[{"name", "role"}, …]`（按名字排序）—— 管理员账号页用它画表。"""
+        """`[{"name", "role", "nickname"}, …]`（按名字排序）—— 管理员账号页用它画表。
+
+        `nickname` = **同名玩家账号**的昵称（用户 2026-09-13）；没有同名号
+        就是空串，页面画 `-`。管理员名和玩家名在同一个命名空间里，所以
+        「同名」就是「他自己那个号」—— 和「装备卖出」页认人的口径同一条。
+
+        ★ 两张表在**同一把锁里一次读出来**：分两发读的话，中间那一下删号 /
+          改昵称会让名单和昵称对不上（画面上一行写着另一个人的昵称，
+          比干脆不写更糟）。
+        ★ 走 `_merged_account` 而不是直接读原始字典里的 `display_name` ——
+          老存档里那个键可能是空的，那时**用户名自己就是昵称**，只有
+          `_merged_account` 知道这条规矩。
+        """
         with self._lock:
-            table = admin_accounts(self._read_unlocked())
-        return [{"name": name, "role": admin_role_of(table[name])}
-                for name in sorted(table)]
+            data = self._read_unlocked()
+            table = admin_accounts(data)
+            players = data["accounts"]
+            return [{"name": name, "role": admin_role_of(table[name]),
+                     "nickname": (display_name(
+                         self._merged_account(name, players[name]))
+                         if name in players else "")}
+                    for name in sorted(table)]
+
+    def nickname_of(self, username):
+        """这个名字对应的**玩家账号**昵称；查无此号回 `""`（用户 2026-09-13）。
+
+        管理页拿它把「管理员」翻成「他那个同名游戏账号的昵称」—— 管理员表
+        里没有昵称这一格（也不该有：昵称是玩家自己在注册页改的），所以只能
+        每次现查。查无此号 = 这个管理员没有同名游戏账号 ⇒ 调用方只写账号名。
+        """
+        return display_name(self.get_account(username)[1])
 
     def admin_role(self, name):
         """这个管理员是什么权限；没有这个人返回 `None`。

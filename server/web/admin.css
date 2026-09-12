@@ -699,6 +699,11 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 table { border-collapse: collapse; width: 100%; max-width: 520px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 2px solid var(--line); }
 th { color: var(--cocoa-soft); font-weight: 700; background: var(--paper-2); }
+/* 管理员账号那张表 2026-09-13 多了一列「昵称」——520 px 里塞不下
+   「名字 + 昵称 200 + 权限下拉 170 + 删除钮 90」，名字那列会被挤到换行。 */
+#adminsPanel table { max-width: 720px; }
+/* 没有同名玩家账号的那一格画 `-`：灰一点，别让它看着像一个真昵称。 */
+#adminsPanel td.nick.none { color: var(--cocoa-soft); }
 code {
   background: var(--paper-2); padding: 1px 5px; border-radius: 4px;
   font-family: Consolas, "Cascadia Mono", monospace;
