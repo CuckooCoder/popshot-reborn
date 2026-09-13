@@ -335,6 +335,7 @@ def _report_shop_config():
                 + f"（在 {shopcfg.DATA_DIR}；改完保存即刻生效，不用重启）")
         log(head)
         eventlog.online(head)
+    _report_first_run_upgrades(created)
     _report_character_shelf()
 
 
@@ -360,6 +361,43 @@ def _report_character_shelf():
             "`tools/gen_listing.py --apply --all` 把 11 张卡补上")
     log(head)
     eventlog.online(head)
+
+
+def _report_first_run_upgrades(created):
+    """★ 一次性升级（`shopcfg.apply_first_run_upgrades`）的**日志那一半**。
+
+    判断和写盘都在 `shopcfg` 里（那儿才是数据层，而且**单测碰不得 `app`**
+    —— 本模块 import 时就 `asynclog.start()` 了，把日志切成异步写会让
+    `test_logs` 那几条断言 stdout 的用例集体翻）。这儿只负责说话。
+
+    ★ 失败不拦着开服：最坏是「合成面板的称号标签空着」，一眼看得出不对。
+    ★ **按状态翻转说话**：补完之后每次启动都是空结果，一行都不打。
+    """
+    renamed = []
+    try:
+        # ★ 「有没有名字要刷」先单独算一遍 —— `apply_first_run_upgrades`
+        #   把它顺手做掉了，但回执里只有「补了哪些条目」，说不出改了谁的名字。
+        renamed = shopcfg.refresh_stale_names(apply=False)
+        added = shopcfg.apply_first_run_upgrades(created)
+    except Exception as error:              # noqa: BLE001 —— 见 docstring
+        log(f"⚠ 一次性升级失败（{error!r}）；合成面板的「称号」标签可能是空的，"
+            f"其余照常。补法：`tools/gen_listing.py --apply` / `--refresh-names`，"
+            f"或者管理页那几页手工改")
+        return
+    if created and shopcfg.CARDS_FILENAME in created and renamed:
+        log("一次性升级: 刷新了 %d 个还是旧出厂名的物品（%s）"
+            % (len(renamed),
+               "、".join("%s → %s" % (was, now) for _i, was, now in renamed)))
+        eventlog.online("一次性升级: 刷新了 %d 个还是旧出厂名的物品"
+                        % len(renamed))
+    for filename, rows in sorted(added.items()):
+        if not rows:
+            continue
+        head = ("一次性升级: 给%s补上了 %d 条默认值"
+                "（只增不改，原有的一个字没动；原件留在 %s.bak-* 里）"
+                % (shopcfg.config_title(filename), len(rows), filename))
+        log(head)
+        eventlog.online(head)
 
 
 def main(argv=None):

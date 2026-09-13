@@ -49,7 +49,11 @@ import os
 #: ★ 11（会话 44 二次复审）：quest 节是主表的**增量覆盖**（重号 id 只带
 #:   数值那几格）—— 提取时在原始字段层和主表那节合并成完整记录。
 #:   查询顺序：**quest（关卡+难度）优先，主表兜底**。
-FORMAT = 11
+#: ★ 12（V0.3商店 · 称号卡片）：新增 `roh`（武器族号 = 武器卡片的 id）。
+#:   ⚠ 这个数和 `tools/weapondata.py` 的那一份**必须一起改**，
+#:   而且要和重新生成的 `bot_weapons.json` 在同一个提交里 —— 对不上时
+#:   `_read()` 返回空表，症状是 **bot 全房间不开枪**，一句报错都没有。
+FORMAT = 12
 
 DATA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                          "bot_weapons.json")
@@ -280,6 +284,20 @@ class Weapon(object):
         return self.raw.get("splash_range")
 
     @property
+    def roh(self):
+        """**武器族号** —— 就是 9 张武器卡片的 id（`110001`~`130003`）；没有返回 `None`。
+
+        客户端 `GetLastBulletROHIdx()` 返回的就是它，9 个武器称号的 Lua 拿它
+        比「你现在用的是不是本系武器」（`shopcfg.BONUS_LUA_ZH`）。
+        称号卡片的 `weapon_*` 指标按它归账，口径和客户端完全一致。
+
+        ⚠ **商城角色自带的枪没有 ROH**（原版如此，见 `tools/weapondata.py`
+        的 `_FIELDS`）⇒ 用商城角色打，`weapon_*` 那几个指标记不上。
+        """
+        value = self.raw.get("roh")
+        return None if not value else int(value)
+
+    @property
     def fuse_ticks(self):
         """★ **引信**：这颗弹体最多飞几个 tick，没有引信返回 `None`（§72）。
 
@@ -494,3 +512,23 @@ def usable():
 
 def count():
     return STORE.count()
+
+
+#: `roh_of()` 认得的全部族号 —— 就是 9 张武器卡片的 id。
+#: ★ 写死在这儿只是**给校验器和管理页下拉当选项**（和 `shopcfg.WEAPON_CARDS`
+#:   由测试钉着相等）；`roh_of()` 自己一个字都不查它，取的是武器表里那一格。
+WEAPON_ROH = (110001, 110002, 110003,
+              120001, 120002, 120003,
+              130001, 130002, 130003)
+
+
+def roh_of(ammo_id):
+    """这发子弹属于哪个**武器族**（= 武器卡片的 id）；查不到返回 `None`。
+
+    ★ 称号卡片的 `weapon_*` 指标全靠它归账。**查不到是常态，不是错**：
+    突击技、地上捡的枪、教学武器、商城角色自带的枪都没有 ROH
+    （原版数据就没写，见 `tools/weapondata.py` 的 `_FIELDS`）⇒
+    调用方必须能接受 `None`，不能拿它当 key 往字典里塞。
+    """
+    weapon = STORE.get(ammo_id)
+    return None if weapon is None else weapon.roh

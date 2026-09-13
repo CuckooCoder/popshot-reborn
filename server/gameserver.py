@@ -87,10 +87,19 @@ import roomclock
 #: 这里做「解包 -> 调它 -> 组包 -> 发」。
 import shop
 import shopcfg
+#: 称号卡片的判定（V0.3商店）：纯函数，「这一局该发谁几张卡」。
+#: `account_store` 那边是它的存储面 —— 本模块已经 `from account_store import …`
+#: 了一批函数，累计战绩那两个读取器按模块名取，省得再往那张导入清单里塞。
+import account_store
+import cards
 import shopdata
 from tickets import TicketStore, short as short_ticket
 import udpsync
 import versioning
+#: ★ 武器表（`bot_weapons.json`）。这里只用它一件事：把 `rpFire` 里那个
+#: 弹药 id 翻成**武器族号**，给称号卡片的 `weapon_*` 指标归账（V0.3商店）。
+#: `weapondata` 只依赖标准库，不会把 bot 那一摊拖进来（§14 的导入方向仍成立）。
+import weapondata
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -2797,6 +2806,11 @@ MAGAZINE_STATUS = {
 #:     捡这种币时累计数字才按 5 跳。
 COIN_ITEM_VALUES = {10101: 1, 10102: 5}
 
+#: 地上那颗「心」（回血道具）。★ 称号卡片里「红心卡片」那条规则数的就是它
+#: —— 而且它和称号 `560006 [红心达人]`（捡心时 15% 概率全队回血）是同一件
+#: 东西，卡片 → 称号这条线因此是自洽的（V0.3商店）。
+HEART_ITEM_ID = 10100
+
 
 def coin_value(item_id):
     """这件东西捡起来值几个金币？不是金币就是 0。"""
@@ -3815,6 +3829,68 @@ PEER_OP_CROUCH = 0x000B
 PEER_OP_FIRE = 0x0002
 PEER_OP_EXPLODE = 0x0003
 
+#: 称号卡片的战绩统计要认的另外三个内层 opcode（V0.3商店）。
+#: 组包点和 body 布局见 `re/packet_api.md` §5.4b / §5.4c 和 `0x4936e6`。
+PEER_OP_SPLASH_DAMAGED = 0x0004
+PEER_OP_DASH = 0x0007
+PEER_OP_GUARD = 0x0018
+
+#: ★ `note_battle_stats()` 只认这五个。**心跳（`0x4001`）占绝大部分流量**，
+#: 让它在第一句就掉头走 —— 这是整条热路径上唯一要在意的事。
+STAT_PEER_OPCODES = frozenset((PEER_OP_FIRE, PEER_OP_EXPLODE,
+                               PEER_OP_SPLASH_DAMAGED, PEER_OP_DASH,
+                               PEER_OP_GUARD))
+
+#: 战绩要用到的 body 布局（`re/packet_api.md` §5.2 / §5.4b / §5.4c）。
+#: 只解前面用得着的那几格，后面的原样不管。
+_STAT_FIRE = struct.Struct("<BBi")       # 源 / 碰撞组 / ★弹药 id
+_STAT_EXPLODE = struct.Struct("<iiffiif")  # 弹体 / ★目标 / x / y / kind / ★flags / ★伤害
+_STAT_SPLASH = struct.Struct("<iif")     # 伤害源 / ★目标 / ★伤害
+_STAT_GUARD = struct.Struct("<BB")       # 座位 / ★开关
+
+#: ★★ `rpExplode` 的 `flags`（`+20`）里「**攻击加成那一下触发了**」的位。
+#:
+#: 玩家嘴里的「暴击」就是它（用户 2026-09-13）：穿了加攻击力的装备之后，
+#: 每一发有 **15% 概率**让加成生效，生效时 `伤害 = 伤害 × (100+攻击加成)/100`
+#: —— 也就是「暴击伤害 = 攻击力加成」（§2）。
+#:
+#: 逐指令的出处（伤害函数 `0x4806bf`，返回值就是这个 flags 字，V0.3商店 §102）：
+#:
+#:     0x4806f9  and [ebp-4], 0        入口清零
+#:     0x4807f0  fcomp [0x6938cc]      ★ 掷 0.15
+#:     0x480800  test edi,edi / jle    攻击加成 > 0 吗
+#:     0x48080d  mov [ebp-4], 0x10     ★★ 就是这一位
+#:     0x4809b7  mov eax, [ebp-4]      原样返回 -> 0x47e631 -> rpExplode 的 flags
+#:
+#: 同一个字里 `0x1` = 防御加成触发、`0x4`/`0x8` = 那两条 ×0.75、
+#: `0x100` = 幸运幸存者免伤（收方画「LUCKY!」，§53 实证过这条链）、
+#: `0x800` = **负**攻击加成触发。
+#:
+#: ⚠ **溅射那一下看不到**：`rpSplashDamaged` 根本没有 flags 字段（§5.4c）。
+EXPLODE_FLAG_ATTACK_BONUS = 0x10
+
+#: 角色句柄那一族的公式：`座位 × 100000 + 100001`（`0x405f02`）。
+#:
+#: ⚠ **这是 `botsync.handle_seat()` 的第二份**。之所以重抄一遍而不是 import：
+#: `botsync` 是 bot 那一摊的模块，而 §14 的导入方向是「bot 可以 import
+#: gameserver，反过来不行」。两处漂了会让「命中数」把砸箱子也算进去 ——
+#: `test_gameserver` 里有一条用例拿 `botsync` 逐个座位对过来钉着。
+_HANDLE_BASE_SEAT = 100001
+_HANDLE_SPAN = 100000
+
+
+def peer_target_seat(handle):
+    """`rpExplode` / `rpSplashDamaged` 的「打中了谁」→ 座位号；不是角色就 `None`。
+
+    ★ 怪的句柄、可破坏物（冰块 / 木箱）的世界句柄、弹体句柄都不落在这一族上
+    —— 砸箱子不该算进「命中玩家」（packet_api §5.4c）。
+    只判「是不是这一族」，**不判座位在不在房里**。
+    """
+    value = int(handle) - _HANDLE_BASE_SEAT
+    if value < 0 or value % _HANDLE_SPAN:
+        return None
+    return value // _HANDLE_SPAN
+
 #: `UdpPacket` 的内层 `0x4005` —— **加载进度**（body = 一个 int32，0..100，V0.3 §30）。
 #:
 #: ★ 服务端**不记**真人报的这个数了（D26：bot 的条一次性报满，不跟随真人）。
@@ -4051,6 +4127,42 @@ class RoomQuest:
         #: （`[char+0x158]`，由 `0x4fedee` 写成开火者的座位），所以服务端不用
         #: 客户端另外上报分数就能数出对战成绩（§167）。
         self.kills = [0] * ROOM_SEAT_COUNT
+        # ---- 本局战绩（称号卡片系统，V0.3商店）--------------------------
+        #: ★★ 这一组和 `kills` / `deaths` / `coins` 同一档：**`begin_map_change()`
+        #: 不清它们**，一整轮（含换图）算一份。结算时 `cards.match_stats()`
+        #: 把它们读走，回房间连 `RoomQuest` 一起丢掉。
+        #:
+        #: ★ `kills` 是**净分**（自杀 / 误伤会倒扣、且扣不出负数），所以
+        #: 「杀了几个敌人」必须另记 —— 两个数天生不一样，别想着从 `kills` 反推。
+        self.enemy_kills = [0] * ROOM_SEAT_COUNT    # 杀掉的**别队玩家**
+        self.mob_kills = [0] * ROOM_SEAT_COUNT      # 杀掉的怪（闯关）
+        self.team_kills = [0] * ROOM_SEAT_COUNT     # 误伤队友
+        self.suicides = [0] * ROOM_SEAT_COUNT       # 自己把自己炸死
+        self.shots = [0] * ROOM_SEAT_COUNT          # 开枪次数（rpFire）
+        self.hits = [0] * ROOM_SEAT_COUNT           # 直接命中（rpExplode）
+        self.splash_hits = [0] * ROOM_SEAT_COUNT    # 溅射 / 近身命中
+        self.damage_out = [0] * ROOM_SEAT_COUNT     # 打出去的伤害（取整累加）
+        #: ★ 暴击 = **攻击加成那 15% 掷点过了**的那几发（`rpExplode` 的
+        #: `flags & 0x10`，见 `EXPLODE_FLAG_ATTACK_BONUS`）。没穿加攻击的装备
+        #: 就永远是 0 —— 那不是坏了，是他身上没有可触发的加成。
+        self.crits = [0] * ROOM_SEAT_COUNT
+        self.guards = [0] * ROOM_SEAT_COUNT         # 格挡次数（rpGuard 的翻转）
+        self.dashes = [0] * ROOM_SEAT_COUNT         # 突击技次数（rpDash）
+        self.hearts = [0] * ROOM_SEAT_COUNT         # 捡到「心」的次数
+        #: ★ `rpGuard` 报的是**状态**（开 / 关）不是次数（组包点 `0x4936e6`，
+        #: body 2 字节 = 座位 + 开关）⇒ 按**状态翻转**数，不按包数数
+        #: （铁律 10）。按住不放的客户端只发一发，连点的发很多发，
+        #: 只有翻转次数在两种行为下都等于「格挡了几次」。
+        self.guard_on = [False] * ROOM_SEAT_COUNT
+        #: ★ 每个座位**最近一发 `rpFire` 的武器族号**（`weapondata.roh_of()`）。
+        #: 客户端算武器称号加成时用的就是这个口径
+        #: （`GetLastBulletROHIdx()`，见 `shopcfg.BONUS_LUA_ZH`），
+        #: 所以「用哪把枪打死的 / 打出的伤害」照着它归账**不是近似，是原版语义**。
+        #: 查不到 ROH 的（突击技、地上捡的枪、商城角色自带的枪）留 `None`。
+        self.last_roh = [None] * ROOM_SEAT_COUNT
+        #: `{(座位, ROH): {"shots": n, "kills": n, "damage": n}}`。
+        #: **懒建**：没用过那把枪就没有这一格，别预先铺 6×9 个空字典。
+        self.weapon_stats = {}
         #: 对战已经判过胜负了（只判一次，日志里也只写一行）。
         self.pvp_reason = None
         #: ★ **开局那一刻**在座的座位号（升序）。§220：客户端所有「按人数
@@ -4189,7 +4301,12 @@ class RoomQuest:
         # ★ 金币在**这里**入账，不在 `grant_picked_item` 里 —— 那个函数只管
         #   「要不要补一发 0x040b」，金币根本不进道具槽、会被它提前 return 掉。
         #   仲裁这一步才是「这一件确定归这个座位了」的唯一判定点。
-        self.add_coins(seat_id, coin_value(self.item_id_of(handle)))
+        item_id = self.item_id_of(handle)
+        self.add_coins(seat_id, coin_value(item_id))
+        # ★ 捡「心」的次数（V0.3商店）：和金币同一个判定点，同一个理由 ——
+        #   这里是全服务端唯一知道「这一件归谁」的地方。
+        if item_id == HEART_ITEM_ID:
+            self.add_heart(seat_id)
         return True
 
     def add_coins(self, seat_id, amount):
@@ -4467,6 +4584,11 @@ class RoomQuest:
             # 怪 / 环境（0xff）。客户端 `0x404ff6` 查不到角色，一分不动。
             return 0
         if not 0 <= victim < ROOM_SEAT_COUNT:
+            # ★ 受害者不是座位 = **打死了一只怪**（闯关那一路）。客户端
+            #   这一支一分不加（对战分数只算人），但「杀了几只怪」是闯关
+            #   那几张卡片的判据，所以在这儿记一笔再走（V0.3商店）。
+            self.mob_kills[killer] += 1
+            self.note_weapon_kill(killer)
             return 0
         if teams is not None and killer not in teams:
             # 凶手已经退房了 —— 客户端那边 `0x4045f9` 判定这个座位没人，
@@ -4477,12 +4599,94 @@ class RoomQuest:
             penalty = (int(teams.get(killer, TEAM_NONE)) ==
                        int(teams.get(victim, TEAM_NONE)))
         if penalty:
+            # ★★ 战绩必须记在下面那条**早退**前面：分数已经扣到 0 的人
+            #    再自爆 / 再误伤一次，客户端那边确实「什么都不做」，
+            #    但「他这一局炸死了自己几次」照样是事实（V0.3商店）。
+            if killer == victim:
+                self.suicides[killer] += 1
+            else:
+                self.team_kills[killer] += 1
             if self.kills[killer] <= 0:
                 return 0
             self.kills[killer] -= 1
             return -1
+        self.enemy_kills[killer] += 1
+        self.note_weapon_kill(killer)
         self.kills[killer] += 1
         return 1
+
+    def note_weapon_kill(self, seat):
+        """这一杀记在「他最近开火用的那把枪」头上（V0.3商店）。
+
+        ★ 口径**照抄客户端**：武器称号的 Lua 比的就是 `GetLastBulletROHIdx()`
+        （`shopcfg.BONUS_LUA_ZH`），而那正是「最后一发子弹的武器族号」。
+        所以这不是近似 —— 它和玩家穿上称号时实际吃到的加成是同一个判据。
+
+        查不到 ROH 就不记（突击技、地上捡的枪、商城角色自带的枪都没有 ROH，
+        原版数据就没写）—— **不要拿 `None` 当 key 往字典里塞**。
+        """
+        roh = self.last_roh[seat] if 0 <= seat < ROOM_SEAT_COUNT else None
+        if roh is not None:
+            self.weapon_stat(seat, roh)["kills"] += 1
+
+    def weapon_stat(self, seat, roh):
+        """`{(座位, ROH): {...}}` 里那一格，**懒建**。"""
+        key = (int(seat), int(roh))
+        cell = self.weapon_stats.get(key)
+        if cell is None:
+            cell = self.weapon_stats[key] = {"shots": 0, "kills": 0,
+                                             "damage": 0}
+        return cell
+
+    def add_heart(self, seat_id):
+        """这个座位捡到一颗「心」（`10100 HeartItem`）。座位越界就当没发生。"""
+        seat = int(seat_id)
+        if 0 <= seat < ROOM_SEAT_COUNT:
+            self.hearts[seat] += 1
+
+    def note_damage_out(self, seat, target, damage, *, splash, crit=False):
+        """射手打出去的一下：记命中数、伤害、暴击（V0.3商店）。
+
+        `crit` = 这一发的**攻击加成那 15% 掷点过了**（`rpExplode` 的
+        `flags & 0x10`，见 `EXPLODE_FLAG_ATTACK_BONUS`）—— 玩家嘴里的「暴击」。
+        溅射那一路恒 `False`：`rpSplashDamaged` 没有 flags 字段。
+
+        ★ **「命中」只算打到角色的那些**（`peer_target_seat`）——
+        怪和可破坏物（冰块 / 木箱）的句柄也会出现在这一格（packet_api §5.4c），
+        砸箱子算命中的话「命中率」这个指标就没意义了。
+        ⇒ 闯关那一路 `hits` 天然偏小（打的全是怪），所以闯关别拿命中率当门槛。
+
+        ★ **伤害不挑对象**：打怪、打破坏物、打人都算他打出去的伤害。
+        """
+        if not 0 <= seat < ROOM_SEAT_COUNT:
+            return
+        if damage <= 0:
+            return                              # 打空 / 被反射：不是命中
+        self.damage_out[seat] += int(damage)
+        if crit:
+            self.crits[seat] += 1
+        roh = self.last_roh[seat]
+        if roh is not None:
+            self.weapon_stat(seat, roh)["damage"] += int(damage)
+        if peer_target_seat(target) is None:
+            return                              # 打中的是怪 / 破坏物
+        if splash:
+            self.splash_hits[seat] += 1
+        else:
+            self.hits[seat] += 1
+
+    def note_guard(self, seat, on):
+        """`rpGuard` 报的是**状态**，这里按**翻转**数次数（铁律 10）。
+
+        按住不放的客户端只发一发「开」，连点的发很多发；只有
+        「从没格挡 → 正在格挡」这个**翻转**在两种行为下都等于「格挡了几次」。
+        按包数数会让连点的人一局刷出几百次。
+        """
+        if not 0 <= seat < ROOM_SEAT_COUNT:
+            return
+        if on and not self.guard_on[seat]:
+            self.guards[seat] += 1
+        self.guard_on[seat] = on
 
     def score_limit(self, seats, team_mode):
         """夺分模式这一局要拿几分才算赢 —— **客户端右上角那个「MAX N」**。
@@ -8436,10 +8640,15 @@ class Conn:
         # ---- ① 每个人先入账，并把「他那一份 0x0309 / 0x0411」备好 --------
         results = {}     # 座位 -> 0x0309 的载荷
         end_games = {}   # 座位 -> (0x0411 的载荷, 日志用的数)
-        rewards = {}     # 座位 -> [0x041c 的载荷…]（合成材料，V0.3商店 M6）
+        rewards = {}     # 座位 -> [0x041c 的载荷…]（合成材料 + 称号卡片）
         # ★ 闯关的关卡 id / 难度：房里每个人读到的是同一份（`current_quest()`
         #   先看大厅那一份），所以在循环外取一次就够。
         quest_info = self.current_quest() if quest_mode else None
+        # ★ 称号卡片的规则表（V0.3商店）：房间级读一次。
+        #   **绝不在转发热路径上读盘**，那边只管数数（`note_battle_stats`）。
+        card_rules, card_cfg_warnings = shopcfg.cards()
+        for warning in card_cfg_warnings:
+            self.log(f"   ⚠ cards.json: {warning}")
         for seat, conn in sorted(seats.items()):
             score = scores[seat]
             # `0x0411` 的 success 跟着尾部数组走，两个包才不会自相矛盾。
@@ -8481,36 +8690,65 @@ class Conn:
                     0, 0, seat_cleared, mode="pvp")
             for warning in drop_warnings:
                 conn.log(f"   ⚠ drops.json: {warning}")
+            # ★★ 称号卡片（V0.3商店）：先把本局战绩算出来，再问规则该发几张。
+            #    `cards.py` 是纯函数 —— 不读盘、不发包，只做「达标没有」这件事。
+            stat_mode = "quest" if quest_mode else "pvp"
+            seat_won = tail[seat] == GAME_RESULT_CLEARED \
+                if 0 <= seat < GAME_RESULT_TAIL_COUNT else cleared
+            gained_stats = cards.match_stats(
+                quest, seat, won=seat_won, quest_mode=quest_mode, score=score)
+            conn.log("   本局战绩 座位%d: %s" % (seat, _stats_line(gained_stats)))
+            before_stats = account_store.battle_stats(conn.account)
+            after_stats = cards.merge_stats(before_stats, stat_mode,
+                                            gained_stats)
+            give_cards, card_targets, card_warnings = cards.due_grants(
+                card_rules, mode=stat_mode,
+                stage=quest_info[0] if quest_info else None,
+                difficulty=quest_info[1] if quest_info else None,
+                won=seat_won, match=gained_stats, total=after_stats,
+                granted=account_store.card_grants(conn.account))
+            for warning in card_warnings:
+                conn.log(f"   ⚠ cards.json: {warning}")
+            granted = {}
+            # ★★ 经验 / 金币 / 材料 / 战绩 / 卡片**一把锁、一次写盘**（V0.3商店）。
+            #    以前这里是 `add_quest_reward` + `add_materials` 两发，
+            #    合成一发之后每人每局反而少写一次盘，而且不再有
+            #    「经验加了、材料没加上」那种中间态。
             if conn.account_name:
                 try:
-                    conn.account = conn.accounts.add_quest_reward(
+                    conn.account, skipped, granted = conn.accounts.apply_battle(
                         conn.account_name,
-                        experience=gained_exp, money=gained_money)
-                except KeyError:
-                    conn.log(f"   存档里没有账号 {conn.account_name!r}；奖励未入账")
-            # ★ 材料单独入账（`add_materials` 是「跳过不抛」的，D12）——
-            #   一条配错的掉落规则不该让整局的结算包发不出去。
-            if dropped and conn.account_name:
-                try:
-                    conn.account, skipped = conn.accounts.add_materials(
-                        conn.account_name, dropped)
+                        experience=gained_exp, money=gained_money,
+                        materials=dropped, stats_mode=stat_mode,
+                        stats_gained=gained_stats, cards=give_cards,
+                        card_targets=card_targets)
                 except KeyError:
                     skipped = []
-                    conn.log(f"   存档里没有账号 {conn.account_name!r}；材料未入账")
+                    conn.log(f"   存档里没有账号 {conn.account_name!r}；本局所得未入账")
                 if skipped:
                     conn.log(f"   ⚠ 掉落里有客户端不认识的 id，已跳过: {skipped}")
                     for item_id in skipped:
                         dropped.pop(item_id, None)
-            # ★ 每种材料**发一发就够**：`0x493f24` 是 `add [entry], count`，
+                        granted.pop(item_id, None)
+            # ★ 每种材料 / 卡片**发一发就够**：`0x493f24` 是 `add [entry], count`，
             #   同一个 itemId 发两次客户端会累加（§3 约束 2）。
+            #   ★ 卡片走**槽 1**（`[GameContext + 0xec + seat*20]`）——
+            #     结算界面「合成材料」下面那一栏就是它。
             rewards[seat] = [
                 build_reward_received(seat, REWARD_SLOT_MATERIAL,
                                       item_id, count)
-                for item_id, count in sorted(dropped.items())]
+                for item_id, count in sorted(dropped.items())
+            ] + [
+                build_reward_received(seat, REWARD_SLOT_TITLE, item_id, count)
+                for item_id, count in sorted(granted.items())]
             if dropped:
                 conn.log("   掉落材料 座位%d: %s"
                          % (seat, "、".join("%s ×%d" % (_item_label(i), n)
                                             for i, n in sorted(dropped.items()))))
+            if granted:
+                conn.log("   获得卡片 座位%d: %s"
+                         % (seat, "、".join("%s ×%d" % (_item_label(i), n)
+                                            for i, n in sorted(granted.items()))))
             experience = int((conn.account or {}).get("experience", 0))
             level_start_exp, next_level_exp = experience_bounds(experience)
             #   · 业务值 9/10/11 = 界面上「经验值 / 金币 / 竞技场分数」三行的 +N
@@ -9298,6 +9536,70 @@ class Conn:
         self.log(f"   ★真人{name}: 头 座位{seat} 目标{target} 局号{epoch} "
                  f"序号{seq}；body({len(body)}) {body.hex()}{detail}")
 
+    def note_battle_stats(self, payload):
+        """把这一发同步包记进**本局战绩**（称号卡片系统，V0.3商店）。
+
+        挂在 `forward_peer_data()` 上 —— 那是 UDP 旁路和原版 TCP 中继两条路
+        合流之后**唯一**的转发出口，所以中继开着也统计得到
+        （`relayserver.RelayConn.on_data()` 回调的就是 `on_peer_data`）。
+
+        ★ **热路径**：第一句就按内层 opcode 过滤掉心跳（占绝大部分流量），
+        剩下五种各做一次定长 `unpack_from`，和隔壁 `note_sync_position()`
+        同一个量级。**这里绝不读盘** —— `shopcfg.cards()` 只在结算时读一次。
+
+        ★ **发送方座位取包头 `+1`**（和 `note_human_fire` 同一口径），不是
+        body 里那一格：body 的第一格各包含义不同（`rpFire` 是「碰撞排除组的
+        源」、`rpDash` 才是座位），而包头那一格是 `UdpPacket` 构造函数
+        `0x5bbe1b` 统一填的「我的座位」。
+
+        ★ **伤害按射手记**（`damage_out`）—— 挨打那一侧另有一本账
+        （`bothp.Ledger.taken`），两本不要混。
+        """
+        opcode = udpsync.peer_opcode(payload)
+        if opcode not in STAT_PEER_OPCODES:
+            return
+        quest = self.quest_state()
+        seat = payload[1] if len(payload) > 1 else -1
+        if seat > 127:
+            seat -= 256                       # 包头那一格是有符号的
+        if not 0 <= seat < ROOM_SEAT_COUNT:
+            return
+        body = payload[PEER_HEADER_SIZE:]
+        if opcode == PEER_OP_FIRE:
+            if len(body) < _STAT_FIRE.size:
+                return
+            _src, _group, ammo = _STAT_FIRE.unpack_from(body, 0)
+            quest.shots[seat] += 1
+            # ★ 记下「他现在用的是哪一族的枪」—— 击杀和伤害都靠它归账，
+            #   而这正是客户端 `GetLastBulletROHIdx()` 的口径。
+            roh = weapondata.roh_of(ammo)
+            quest.last_roh[seat] = roh
+            if roh is not None:
+                quest.weapon_stat(seat, roh)["shots"] += 1
+            return
+        if opcode == PEER_OP_EXPLODE:
+            if len(body) < _STAT_EXPLODE.size:
+                return
+            _proj, target, _x, _y, _kind, flags, damage = \
+                _STAT_EXPLODE.unpack_from(body, 0)
+            quest.note_damage_out(seat, target, damage, splash=False,
+                                  crit=bool(flags & EXPLODE_FLAG_ATTACK_BONUS))
+            return
+        if opcode == PEER_OP_SPLASH_DAMAGED:
+            if len(body) < _STAT_SPLASH.size:
+                return
+            _source, target, damage = _STAT_SPLASH.unpack_from(body, 0)
+            quest.note_damage_out(seat, target, damage, splash=True)
+            return
+        if opcode == PEER_OP_DASH:
+            quest.dashes[seat] += 1
+            return
+        # rpGuard：body 2 字节 = 座位 + 开 / 关。**按状态翻转数**（铁律 10）。
+        if len(body) < _STAT_GUARD.size:
+            return
+        _seat, flag = _STAT_GUARD.unpack_from(body, 0)
+        quest.note_guard(seat, bool(flag))
+
     def note_sync_position(self, payload):
         """把这一发同步数据里的**位置**记进轨迹（V0.3 M3）。
 
@@ -9432,6 +9734,12 @@ class Conn:
             with room.sim_lock:
                 self.note_sync_position(payload)
                 self.note_human_fire(payload)
+                # ★ 本局战绩（称号卡片，V0.3商店）。★ 和下面那发钩子同一个
+                #   道理：**统计坏了不该拖垮同步**，所以整段吞异常。
+                try:
+                    self.note_battle_stats(payload)
+                except Exception as error:      # noqa: BLE001 —— 见上
+                    self.log(f"   ⚠ 记本局战绩时出错，已跳过: {error!r}")
                 # ★★ 打到 bot 身上的那一下**击退**归服务端算（V0.3 §92）——
                 #   bot 没有本机，客户端那边顶飞的模型会被下一发心跳拽回去。
                 #   ★ 出错不能连累真人的同步（D1），所以整段吞异常。
@@ -11005,6 +11313,24 @@ CONTROL_HELP = """命令（一行一条，大小写不敏感）：
                                   ⚠ 合成**不看等级**（D27），所以没有等级参数
   help                            这段
 """
+
+
+def _stats_line(stats):
+    """本局战绩打成一行人话（V0.3商店）。**只写不为零的那些**。
+
+    ★ 结算日志里能一眼对上「为什么发了 / 为什么没发这张卡」——
+    实机验证时全靠它，不用去猜客户端那一栏画的是什么。
+    """
+    if not stats:
+        return "（一格都没动）"
+    bits = []
+    for key in sorted(stats):
+        name, _weapon, roh = key.partition(cards.WEAPON_SEP)
+        label = shopcfg.CARD_METRIC_ZH.get(name, name)
+        if roh:
+            label = label.replace("某武器", shopcfg.weapon_roh_label(int(roh)))
+        bits.append("%s %s" % (label, stats[key]))
+    return " ".join(bits)
 
 
 def _item_label(item_id):

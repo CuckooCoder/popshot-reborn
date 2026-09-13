@@ -36,6 +36,34 @@ function el(tag, cls, text) {
   return node;
 }
 
+/** 把 `**这样**` 画成粗体，其余原样。★ **只给页面说明**（`SCHEMA` 的 `help`）用。
+ *
+ * 那几段说明是写在服务端 `shopcfg.SCHEMA` 里的，作者一直按 Markdown 的习惯
+ * 标重点；而这边是 `textContent` 画的 ⇒ 星号原样显示在画面上
+ * （V0.3商店之前物品库 / 商店货架 / 合成配方三页都有，7 行）。
+ *
+ * ★ **不引入 Markdown**：只认这一种记号，而且**逐段 `textContent`** 塞进去
+ * —— 说明文是运营看得到、但改不了的服务端常量，不过这条路本来也不该有
+ * `innerHTML`。
+ * ★ 星号**没配对**（个数是奇数）时整行按原样画，一个星号都不吃 ——
+ *   宁可显示一个星号，也不要把半句话吞掉。
+ */
+function emphasised(node, text) {
+  var line = String(text === undefined || text === null ? "" : text);
+  var parts = line.split("**");
+  if (parts.length % 2 === 0) {          // 星号个数是奇数 = 没配对
+    node.textContent = line;
+    return node;
+  }
+  parts.forEach(function (chunk, at) {
+    if (!chunk) { return; }
+    // 偶数段是正文、奇数段是重点。
+    node.appendChild(at % 2 === 1 ? el("b", null, chunk)
+                                  : document.createTextNode(chunk));
+  });
+  return node;
+}
+
 /** 嵌在页面里的那条 `.msg`。★ **只剩登录页**在用（用户 2026-09-09：
  *  「管理员账号」页原来把回执写在面板最底下，那儿离「删除」「添加」
  *  「改密码」三个钮都隔着好几栏，删完人根本看不见 —— 全改成右上角浮条了）。
@@ -245,7 +273,7 @@ var FILTER = {};            // 每个标签页各自的筛选条件
 //: 走 `#cfgPanel` 那套壳的标签页（读 / 存 / 脏标记 / 三方合并全共用）。
 //  ★ `rewards` 也在里面 —— 它画的是两张二维表格而不是卡片列表，但
 //    「读一份 json、改、保存、撞车了合并」这一整条链一个字都不用改（D72）。
-var CONFIGS = ["items", "shop", "recipe", "drops", "rewards"];
+var CONFIGS = ["items", "shop", "recipe", "drops", "cards", "rewards"];
 
 /** 一共几份运营配置 / 分别叫什么。
  *
@@ -755,6 +783,9 @@ function choiceNode(spec, entry, onChange) {
 function toggleNode(spec, entry, onChange) {
   var wrap = el("label", "toggle" + (entry[spec.key] ? " on" : "")
                          + (spec.unknown ? " unknown" : ""));
+  // 哪个字段 —— 和 `fieldNode` 那一句一样。`restFields` 的调用方按它找格子
+  // （`cardRow` 要锁 / 要联动的就是这几个）。
+  wrap.setAttribute("data-key", spec.key);
   wrap.appendChild(el("span", "track"));
   wrap.appendChild(el("span", "lab", spec.label || spec.key));
   if (spec.help) { wrap.title = spec.help; }
@@ -845,6 +876,7 @@ function adoptConfig(which, text, warnings, path) {
     reindexItems();
   }
   if (which === "rewards") { fillRewards(); }
+  if (which === "cards") { fillCards(); }
   CFG[which].snapshot = snapshot(which);
   return true;
 }
@@ -915,6 +947,31 @@ function fillRewards() {
     Object.keys(row).forEach(function (name) { copy[name] = row[name]; });
     CFG.rewards.entries.push(copy);
     have[key] = true;
+  });
+}
+
+/** 称号卡片页**永远列全 17 张卡片**：文件里缺的那几张现补一条默认规则。
+ *
+ * ★ 和 `fillItems` / `fillRewards` 一个道理（也一个理由）：服务端**从不回写
+ *   配置**（D10），而这一页少一行就等于「那张卡片不存在」—— 运营根本不会
+ *   想到去别处找它。缺的这一段在前台补齐，等用户按保存时一起落盘。
+ * ★ 补出来的那一条**默认是关着的吗？** 不是 —— `card_defaults` 是设计表那份
+ *   （`listed: true`），和「新开一台服务器拿到的」完全一致。这一页要是
+ *   补出一堆关着的行，运营会以为默认就不发卡片。
+ * ★ 在 `snapshot()` **之前**做完 ⇒ 一进页面不会莫名其妙显示「有未保存的修改」。
+ */
+function fillCards() {
+  var have = {};
+  CFG.cards.entries.forEach(function (entry) {
+    if (entry && entry.card !== undefined) { have[entry.card] = true; }
+  });
+  (CAT.card_defaults || []).forEach(function (row) {
+    if (have[row.card]) { return; }
+    // ★ 拷一份：`CAT.card_defaults` 是全页共用的那一份（同 `fillRewards`）。
+    var copy = {};
+    Object.keys(row).forEach(function (name) { copy[name] = row[name]; });
+    CFG.cards.entries.push(copy);
+    have[row.card] = true;
   });
 }
 
@@ -1106,7 +1163,11 @@ async function refreshConfigs(force) {
     if (!go) { return; }
   }
   toast("刷新中……", true);
-  var ok = true;
+  // ★ 物品表也重取一遍（V0.3商店）：称号卡片的**说明**是从 `cards.json` /
+  //   `recipe.json` 现算的（`shopcfg.item_desc_zh`），改完条件不重取的话，
+  //   浮窗里那句「获得条件：……」会一直停在登录那一刻的版本 ——
+  //   而且**不会有任何报错**，人只会以为没保存上。
+  var ok = await loadCatalog();
   for (var i = 0; i < CONFIGS.length; i += 1) {
     ok = (await loadConfig(CONFIGS[i])) && ok;
   }
@@ -1266,7 +1327,7 @@ function renderCurrent() {
                         + "（要能改请联系系统管理员开权限）。"));
   }
   (schema.help || []).forEach(function (line) {
-    help.appendChild(el("li", null, line));
+    help.appendChild(emphasised(el("li"), line));
   });
 
   var notes = [];
@@ -1284,8 +1345,11 @@ function renderCurrent() {
   // ★ 物品库没有「添加」：条目由 `shop_items.json` 定死，加不出新物品。
   //   「金币 / 经验获取」也没有：档位是 8 + 21 + 1 三十格固定的表格，
   //   加一条出来在画面上根本没有位置放（D72）。
-  $("cfgAdd").classList.toggle("hidden",
-                               which === "items" || which === "rewards");
+  //   ★ 「称号卡片掉落」同理（V0.3商店）：卡片是原版那 17 张，加不出新的，
+  //     而且**一张卡片只能有一条规则** —— 有「添加」就等于请人去造重复主键。
+  $("cfgAdd").classList.toggle(
+    "hidden",
+    which === "items" || which === "rewards" || which === "cards");
 
   renderToolbar(which);
   repaintList();
@@ -1316,7 +1380,9 @@ function renderToolbar(which) {
     bar.appendChild(search);
   }
 
-  if (which !== "drops" && which !== "rewards") {
+  // ★ 称号卡片页也不画「角色」下拉：17 张卡片一张都不限角色，
+  //   那个下拉只会一选就空。
+  if (which !== "drops" && which !== "rewards" && which !== "cards") {
     // ★ 角色 / 上架状态两个下拉（用户 2026-09-09，D68）：和「选择物品」弹窗、
     //   「修改仓库」弹窗**同一份选项、同一条判据**（`characterOptions` /
     //   `LISTING_FILTER_OPTIONS` / `dropdownsMatch`）。「类别」下拉（shopdata 的
@@ -1363,6 +1429,47 @@ function renderToolbar(which) {
       repaintList();
     });
     lockForPvp();
+  }
+  if (which === "cards") {
+    // 分组切换（成就 / 武器）排最左 —— 和「金币 / 经验」那个切换一个位置。
+    bar.appendChild(cardGroupSwitch());
+    var cardMode = selectFilter(filter, "mode", "全部模式",
+      [{value: "none", label: "不限"}].concat(cardSpec("mode").options || []));
+    bar.appendChild(cardMode);
+    // 关卡 / 难度：选项照 `SCHEMA.cards` 现取，和行内那两个下拉一个出处。
+    var cardScoped = ["stage", "difficulty"].map(function (key) {
+      var spec = cardSpec(key);
+      var options = [{value: "none", label: spec.empty_label || "不限"}];
+      (spec.options || []).forEach(function (option) { options.push(option); });
+      var select = selectFilter(filter, key, "全部" + (spec.label || key),
+                                options);
+      bar.appendChild(select);
+      return select;
+    });
+    bar.appendChild(selectFilter(filter, "scope", "全部统计范围",
+                                 cardSpec("scope").options || []));
+    bar.appendChild(selectFilter(filter, "gettable", "全部状态",
+      [{value: "on", label: "能获得"}, {value: "off", label: "关着的"}]));
+    // 对战没有关卡和难度（同 `dropRow` 的 `PVP_LOCKED_KEYS`）⇒ 筛成对战时
+    // 这两个下拉清空并锁住，和规则行上的表现一致。
+    var lockCardScope = function () {
+      var pvp = filter.mode === "pvp";
+      cardScoped.forEach(function (select, at) {
+        if (pvp) {
+          filter[["stage", "difficulty"][at]] = "";
+          select.value = "";
+        }
+        select.disabled = pvp;
+        select.title = pvp ? "对战没有关卡和难度" : "";
+      });
+    };
+    // `selectFilter` 自己的 onchange 先跑（写 `filter.mode` + 重画），
+    // 这一发排在它后面（和 `renderToolbar` 里掉落页那一段同款）。
+    cardMode.addEventListener("change", function () {
+      lockCardScope();
+      repaintList();
+    });
+    lockCardScope();
   }
   if (which === "rewards") {
     // ★ 「金币 / 经验」切换挪进工具条、放**最左边**（用户 2026-09-10，D72b）。
@@ -1451,6 +1558,8 @@ function dropdownsMatch(itemId, want) {
 function emptyFilter() {
   return {q: "", character: "", listing: "", big: -1, sub: null,
           mode: "", stage: "", difficulty: "",
+          // 称号卡片页：统计范围 / 能不能获得 / 看哪一组（成就 · 武器 · 全部）。
+          scope: "", gettable: "", group: CARD_GROUPS[0].id,
           // 「金币 / 经验获取」页当前看的是哪一半（`REWARD_VIEWS`）。
           view: REWARD_VIEWS[0].id};
 }
@@ -1462,6 +1571,16 @@ function dropSpec(key) {
     if (spec.key === key) { found = spec; }
   });
   return found || {key: key};
+}
+
+/** 称号卡片页的模式 / 关卡 / 难度筛选。和 `dropFieldMatches` 同一套口径
+ *  （`""` 不筛 / `"none"` 只看「不限」的 / 其余相等），单独一份是因为这一页的
+ *  值可能是字符串（`mode`）也可能是数字（`stage`），比较一律转成字符串。 */
+function cardFieldMatches(value, wanted) {
+  if (!wanted) { return true; }
+  var unset = (value === undefined || value === null || value === "");
+  if (wanted === "none") { return unset; }
+  return !unset && String(value) === String(wanted);
 }
 
 /** 掉落页的关卡 / 难度筛选：`""` = 不筛；`"none"` = 只看没指定的
@@ -1477,7 +1596,7 @@ function dropFieldMatches(value, wanted) {
 //  （函数声明会被提升，所以写在它们前面没问题。）
 var RENDERERS = {items: renderItems, shop: renderShop,
                  recipe: renderRecipe, drops: renderDrops,
-                 rewards: renderRewards};
+                 cards: renderCards, rewards: renderRewards};
 
 function repaintList() {
   var list = $("cfgList");
@@ -1508,9 +1627,11 @@ function repaintList() {
   var total = CFG[CURRENT].entries.length;
   var label = $("cfgShown");
   if (label) {
-    // ★ 「筛出 x / y」**只有掉落页写**（用户 2026-09-09，D68a）：另外三页的
-    //   分类标签上已经带着件数，再写一遍是重复的。一样多就什么都不写。
-    label.textContent = (CURRENT === "drops" && rows.length !== total)
+    // ★ 「筛出 x / y」只有**没有分类标签**的那几页写（用户 2026-09-09，D68a）：
+    //   另外几页的分类标签上已经带着件数，再写一遍是重复的。一样多就不写。
+    //   ★ 称号卡片页的分组切换只数「这一组有几张」，不数筛完还剩几张 ⇒ 它也要。
+    var wantsCount = (CURRENT === "drops" || CURRENT === "cards");
+    label.textContent = (wantsCount && rows.length !== total)
       ? ("筛出 " + rows.length + " / " + total) : "";
   }
   if (!rows.length) {
@@ -1576,7 +1697,10 @@ function paintCfgTabs(which, filtered) {
   var subHost = $("cfgSubCats");
   // ★ 奖励页两行都藏起来：它不按物品分类，而「金币 / 经验」那个切换
   //   2026-09-10 挪进工具条了（D72b，见 `rewardViewSwitch`）。
-  var hide = (which === "drops" || which === "rewards");
+  // ★ 称号卡片页也藏：17 张卡片在仓库树里全归「收集品 → 卡片」一格，
+  //   画出来是「全部(17) / 收集品(17) / 卡片(17)」三个一模一样的钮
+  //   —— 两行版面换零信息。分组切换在工具条上（`CARD_GROUPS`）。
+  var hide = (which === "drops" || which === "rewards" || which === "cards");
   bigHost.classList.toggle("hidden", hide);
   if (hide) {
     bigHost.textContent = "";
@@ -1611,7 +1735,24 @@ function revealIfHidden(card) {
  */
 function entryItemId(which, entry) {
   if (which === "recipe") { return entry.result; }
+  // 称号卡片那一页的物品在 `card` 上（同配方的 `result`，道理一样）。
+  if (which === "cards") { return entry.card; }
   return (entry.id === undefined) ? entry.material : entry.id;
+}
+
+//: 称号卡片页顶上那个分组切换。★ 判据从 catalog 现取（`CAT.weapon_cards`），
+//  **不在这儿写死 id 段** —— 那是服务端 `shopcfg.WEAPON_CARDS` 的事。
+//  ★ 为什么不用 `paintCatTabs` 那棵仓库树：17 张卡片在树里全归
+//    「收集品 → 卡片」一格，画出来是三个一模一样的钮。
+var CARD_GROUPS = [
+  {id: "all", label: "全部"},
+  {id: "deed", label: "成就卡片"},
+  {id: "weapon", label: "武器卡片"}
+];
+
+function cardGroupOf(cardId) {
+  var weapons = CAT.weapon_cards || [];
+  return (weapons.indexOf(Number(cardId)) >= 0) ? "weapon" : "deed";
 }
 
 /** 一条记录过不过**筛选条**（搜索串 / 下拉；分类标签另算，见 `narrowToTab`）。 */
@@ -1622,7 +1763,26 @@ function matches(which, entry) {
   // ★ 拿 `entryItemId` 不拿 `entry.id`：合成配方的 `id` 是配方号。以前这一句
   //   写的是 `entry.id`，那时只有物品库有「上架状态」筛选，没暴露出来。
   if (!dropdownsMatch(itemId, filter)) { return false; }
-  if (filter.mode && (entry.mode || "quest") !== filter.mode) { return false; }
+  // ★ 两页的 `mode` 语义不一样，别共用这一句：掉落页的模式是**必填**
+  //   （不写 = 闯关），称号卡片页是**可选**（不写 = 不限，两种模式都算）。
+  //   共用的话「筛对战」会把所有「不限」的卡片当成闯关藏起来。
+  if (which === "cards") {
+    if (!cardFieldMatches(entry.mode, filter.mode)) { return false; }
+    if (!cardFieldMatches(entry.stage, filter.stage)) { return false; }
+    if (!cardFieldMatches(entry.difficulty, filter.difficulty)) { return false; }
+    if (filter.scope && (entry.scope || "match") !== filter.scope) {
+      return false;
+    }
+    if (filter.gettable) {
+      if ((filter.gettable === "on") !== !!entry.listed) { return false; }
+    }
+    if (filter.group && filter.group !== "all"
+        && cardGroupOf(itemId) !== filter.group) {
+      return false;
+    }
+  } else if (filter.mode && (entry.mode || "quest") !== filter.mode) {
+    return false;
+  }
   if (which === "drops") {
     if (!dropFieldMatches(entry.stage, filter.stage)) { return false; }
     if (!dropFieldMatches(entry.difficulty, filter.difficulty)) { return false; }
@@ -1657,6 +1817,16 @@ function narrowToTab(which, rows) {
   if (which === "drops") {
     out.sort(function (a, b) {
       return (dropRank(a.entry) - dropRank(b.entry)) || (a.index - b.index);
+    });
+  }
+  if (which === "cards") {
+    // ★ 按卡片 id 排：成就卡（6xxxx）在前、武器卡（1x0xxx）在后，
+    //   和物品表、和游戏仓库里的顺序一致。**每次都排**是安全的 ——
+    //   这一页的顺序只看 `card`，而 `card` 是只读的，改哪一格都不会让行乱跳
+    //   （`dropRank` 那套 WeakMap 是因为掉落页的排序键自己可编辑）。
+    out.sort(function (a, b) {
+      return (Number(a.entry.card) - Number(b.entry.card))
+             || (a.index - b.index);
     });
   }
   return out;
@@ -2072,6 +2242,132 @@ function dropRow(entry, index) {
     }
   });
   if (!placed) { row.appendChild(who); }
+  return row;
+}
+
+/* ------------------------------------------------ 称号卡片掉落：一卡一行
+   用户 2026-09-13 点的题（V0.3商店）。和「材料掉落」的三处刻意不同：
+
+     · **卡片格不可点** —— 一张卡片只能有一条规则，让它可点等于请人去造
+       重复主键。这条约束靠画面本身兜住，不靠保存时报错。
+     · **没有删除、没有「添加」** —— 17 张是原版定死的，删一行会被
+       `fillCards()` 立刻补回来。「这一版不给」= 把「能获得」关掉。
+     · **「能获得」排在最前**，紧挨卡片名：这一页多半时间是在看
+       「哪些开着」，开关得一眼看得见。关着的行整行淡下去（`.off`）。
+   -------------------------------------------------------------------- */
+
+/** `SCHEMA.cards` 里某个字段的描述（下拉选项从这儿取，不另抄一份）。 */
+function cardSpec(key) {
+  var found = null;
+  (((CAT.schema || {}).cards || {}).fields || []).forEach(function (spec) {
+    if (spec.key === key) { found = spec; }
+  });
+  return found || {key: key, label: key, type: "int", options: []};
+}
+
+/** 工具条最左那个「全部 / 成就卡片 / 武器卡片」分段切换。 */
+function cardGroupSwitch() {
+  var filter = FILTER.cards || (FILTER.cards = emptyFilter());
+  var counts = {all: 0, deed: 0, weapon: 0};
+  CFG.cards.entries.forEach(function (entry) {
+    counts.all += 1;
+    counts[cardGroupOf(entry.card)] += 1;
+  });
+  var seg = el("span", "seg");
+  CARD_GROUPS.forEach(function (group) {
+    var on = (filter.group || "all") === group.id;
+    var button = el("button", "cat" + (on ? " on" : ""), group.label);
+    button.appendChild(el("span", "n", String(counts[group.id])));
+    button.onclick = function () {
+      filter.group = group.id;
+      // 选中态在按钮自己身上 ⇒ 整条工具条重画（同 `rewardViewSwitch`）。
+      renderToolbar("cards");
+      repaintList();
+    };
+    seg.appendChild(button);
+  });
+  return seg;
+}
+
+function renderCards(list, rows) {
+  rows.forEach(function (line) {
+    list.appendChild(cardRow(line.entry, line.index));
+  });
+}
+
+/** 改了「模式」或「统计指标」就把整行重画一遍 —— 哪几格该锁只在这一处
+ *  决定，别在别处再写一份（同 `dropRow`）。 */
+function cardRow(entry, index) {
+  var row = el("div", "rule-row card-row" + (entry.listed ? "" : " off"));
+  row.setAttribute("data-index", index);
+
+  // 卡片那一格：**不可点**（见本节开头）。整块挂浮窗，名字太长截成省略号。
+  var who = tipFor(el("div", "who"), entry.card);
+  var slot = slotNode(entry.card, 36, !!entry.listed, false);
+  who.appendChild(slot);
+  who.appendChild(el("div", "nmz", itemName(entry.card)));
+  row.appendChild(who);
+
+  // 「能获得」一翻，整行跟着淡 / 亮，图标的上架底也跟着变（同 `renderRecipe`
+  // 的 `relist`）—— 开关是 `label` 不是 `input`，收不到 `change` 事件。
+  var mark = function () {
+    row.classList.toggle("off", !entry.listed);
+    slot.classList.toggle("on", !!entry.listed);
+    touched();
+  };
+
+  var pvp = entry.mode === "pvp";
+  var metric = entry.metric;
+  var info = (CAT.card_metrics || {})[metric] || {};
+  var lockedKeys = [];
+  if (pvp) { lockedKeys = lockedKeys.concat(["stage", "difficulty"]); }
+  if (!info.weapon) { lockedKeys.push("weapon"); }
+  if (!info.ratio) { lockedKeys.push("min_shots"); }
+  // ★ 指标只在一种模式下有意义时（击杀怪物数只有闯关、零击杀获胜只有对战），
+  //   模式那一格也锁上。不锁的话人能点开另一档，一松手又被弹回来 ——
+  //   「点了没反应」比「点不动」难受得多。
+  //   ★ 只在**已经对上**的时候锁：磁盘上手改出来的「击杀怪物数 + 对战」
+  //     要留一条能自己改回来的路（同「只锁不改」那条规矩）。
+  var onlyMode = (info.modes && info.modes.length === 1) ? info.modes[0] : null;
+  if (onlyMode && entry.mode === onlyMode) { lockedKeys.push("mode"); }
+  var lockReason = {
+    mode: "指标「" + (info.label || entry.metric) + "」只有这一种模式下有意义",
+    stage: "对战没有关卡和难度 —— 模式改成「闯关」才能选",
+    difficulty: "对战没有关卡和难度 —— 模式改成「闯关」才能选",
+    weapon: "这个指标和武器无关",
+    min_shots: "只有命中率那种比率指标才用得上"
+  };
+
+  restFields("cards", entry, ["card"], mark).forEach(function (node) {
+    var key = node.getAttribute("data-key");
+    var control = node.querySelector
+      ? node.querySelector("select, input") : null;
+    if ((key === "mode" || key === "metric") && control) {
+      control.addEventListener("change", function () {
+        // `choiceNode` 自己的 onchange 先跑（写进 `entry`），这一发排在后面：
+        // 把这一档下没有意义的格子清掉，然后整行按新状态重画。
+        if (entry.mode === "pvp") {
+          delete entry.stage;
+          delete entry.difficulty;
+        }
+        var now = (CAT.card_metrics || {})[entry.metric] || {};
+        if (!now.weapon) { delete entry.weapon; }
+        if (!now.ratio) { delete entry.min_shots; }
+        // 指标只在一种模式下有意义时（击杀怪物数 / 零击杀获胜），
+        // 模式跟着钉过去 —— 否则保存时服务端会拒，而人看不出为什么。
+        if (now.modes && now.modes.length === 1) { entry.mode = now.modes[0]; }
+        row.parentNode.replaceChild(cardRow(entry, index), row);
+        touched();
+      });
+    }
+    if (control && lockedKeys.indexOf(key) >= 0) {
+      // ★ 只锁不改：磁盘上手改出来的值照实显示（锁着），切一次模式 /
+      //   指标它才清掉。渲染时悄悄删会让页面一打开就「有未保存的修改」。
+      control.disabled = true;
+      control.title = lockReason[key] || "";
+    }
+    row.appendChild(node);
+  });
   return row;
 }
 
@@ -5118,6 +5414,7 @@ async function boot() {
     ok = (await loadConfig(CONFIGS[i])) && ok;
   }
   if (!CFG[CURRENT]) { return; }
+  // ★ 哪几页有默认值要补 —— 算完才画工具条（那颗钮只在真有得补时才画）。
   renderCurrent();
   paintOperatorPages();
   // ★ 运营根本进不去这一页，也别去要那份名单（服务端会回 403）。

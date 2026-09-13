@@ -1090,24 +1090,33 @@ class RealDefaultsTests(unittest.TestCase):
         for recipe in recipes:
             self.assertLessEqual(len(recipe["materials"]), shopcfg.MAX_MATERIALS)
             self.assertGreater(recipe["cost"], 0)
+            # ★ 称号不在这条限制里（V0.3商店）：它换的是**成就卡片**，
+            #   一张卡片要打一整局才拿一张，「500 张幸运卡片」正是用户要的难度。
+            #   30 这个数是给「一件装备要几块矿」定的。
+            if shopdata.kind(recipe["result"]) == "title":
+                continue
             # 一件装备的材料总量得在「刷十几局能凑齐」的量级，别劝退。
             total = sum(m["count"] for m in recipe["materials"])
             self.assertLessEqual(total, 30, "配方 #%d 要 %d 个材料，太肝了"
                                  % (recipe["id"], total))
 
     def test_recipe_results_are_equippable(self):
-        """产物都占装备槽（铠甲 / 戒指 / 宠物）；铠甲和戒指还得有加成 ——
-        宠物里有纯外观的（熊猫），那是原版数据，不是我们漏了。"""
+        """产物都占装备槽（铠甲 / 戒指 / 宠物 / 称号）；铠甲和戒指还得有加成 ——
+        宠物里有纯外观的（熊猫）、称号里有只带 Lua 条件加成的，
+        那是原版数据，不是我们漏了。"""
         recipes = shopcfg.validate_recipes(shopcfg.default_recipes())
-        self.assertEqual(122, len(recipes), "配方条数变了 —— 改了 shopdefaults 的表就把这个数跟着改")
+        self.assertEqual(139, len(recipes), "配方条数变了 —— 改了 shopdefaults 的表就把这个数跟着改")
         kinds = collections.Counter()
         for recipe in recipes:
             item = shopdata.get(recipe["result"])
             kinds[item.kind] += 1
             self.assertTrue(item.equippable, "%d 不占装备槽" % item.id)
-            if item.kind != "pet":
+            if item.kind not in ("pet", "title"):
                 self.assertTrue(item.bonus, "%d 一点加成都没有，合它干嘛" % item.id)
-        self.assertEqual({"armor": 109, "ring": 6, "pet": 7}, dict(kinds))
+        # ★ 17 个称号 = 8 个成就称号 + 9 个武器称号。三个活动称号
+        #   （560010~560012）**故意没有配方**：原版就没给它们卡片。
+        self.assertEqual({"armor": 109, "ring": 6, "pet": 7, "title": 17},
+                         dict(kinds))
 
     def test_drops_include_the_original_baseline(self):
         rules = shopcfg.validate_drops(shopcfg.default_drops())
@@ -1184,13 +1193,22 @@ class RealDefaultsTests(unittest.TestCase):
                           % (recipe["id"], category))
 
     def test_every_recipe_material_can_actually_drop(self):
-        """★ 配方要的材料必须有地方掉，否则那条配方永远合不出来。"""
+        """★ 配方要的材料必须有地方**拿得到**，否则那条配方永远合不出来。
+
+        ★ 「拿得到」有两条来路（V0.3商店）：材料走 `drops.json` 的掉落表，
+        **称号卡片走 `cards.json` 的获得规则** —— 卡片是成就不是概率掉落
+        （D44a），所以它一条掉落规则都没有，两张表要一起看。
+        """
         droppable = {r["material"] for r in
                      shopcfg.validate_drops(shopcfg.default_drops())}
+        droppable |= {r["card"] for r in
+                      shopcfg.validate_cards(shopcfg.default_cards())
+                      if r.get("listed")}
         for recipe in shopcfg.validate_recipes(shopcfg.default_recipes()):
             for material in recipe["materials"]:
                 self.assertIn(material["id"], droppable,
-                              "配方 #%d 要 %d，但 drops.json 里没有任何规则掉它"
+                              "配方 #%d 要 %d，但 drops.json / cards.json 里"
+                              "都没有让人拿到它的规则"
                               % (recipe["id"], material["id"]))
 
 

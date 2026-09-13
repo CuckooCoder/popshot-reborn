@@ -30,6 +30,10 @@
     <button data-tab="shop">商店货架</button>
     <button data-tab="recipe">合成配方</button>
     <button data-tab="drops">材料掉落</button>
+    <!-- ★ 一张卡片一行，17 行定死（V0.3商店）：卡片是原版物品表里就有的
+         那 17 件，加不出新的 ⇒ 没有「添加」也没有删除，「这一版不给」
+         就是把「能获得」关掉。渲染器是 admin.js 的 `renderCards`。 -->
+    <button data-tab="cards">称号卡片掉落</button>
     <!-- ★ 这一页不是卡片列表，是两张二维表格（用户 2026-09-10，D72）——
          对战 = 模式 × 个人/组队，闯关 = 关卡 × 难度，顶上一个「金币 / 经验」
          切换让两张表复用同一套行列。渲染器是 admin.js 的 `renderRewards`。 -->
@@ -299,8 +303,11 @@
       </div>
       <div class="panel-body">
         <ul class="help fit-help">
+          <!-- ★ 这儿**不再逐个点名**运营配置（V0.3商店）：每加一份配置就得
+               回来改一次，而漏改**不报错、只会一直骗人**。回滚对话框里那一行
+               本来就是照 `shopcfg.config_filenames()` 现拼的，看那儿最准。 -->
           <li>备份的是 <code>server/data/</code> 下的<b>全部 json</b>
-            （物品库 / 商店货架 / 合成配方 / 材料掉落 / 金币经验 + 玩家存档
+            （上面那几页的运营配置 + 玩家存档
             <code>accounts.json</code>，以后新加的也算），存在
             <code>server/data/backups/</code> 里，一份一个目录，可以直接打开看。</li>
           <li><b>自动备份</b>每天到设定时刻做一次（服务器本地时间）；服务端那时没开着

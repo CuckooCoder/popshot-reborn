@@ -31,6 +31,12 @@ import shopdata
 #: 其余字段由它封成一段改不动的密文。同样只依赖标准库，不绕回来 import 本模块。
 import savecrypt
 
+#: 称号卡片的**指标表**（V0.3商店）。存档层要它只为回答一个**存储完整性**
+#: 问题：「累计战绩里这个键认不认得」。业务规则（达标没有 / 该发几张）
+#: 在 `cards.py`，不在这儿。
+#: ★ `shopcfg` 顶层只 import `shopdata` + 标准库，不绕回来 import 本模块。
+import shopcfg
+
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PATH = os.path.join(SERVER_DIR, "data", "accounts.json")
@@ -95,6 +101,29 @@ NEW_ACCOUNT_DEFAULTS = {
     #:   `gift_seq` 只增不减，客户端手里可能还捏着一份已经领走的旧清单。
     "gifts": [],
     "gift_seq": 0,
+    #: ★★ **累计战绩**（V0.3商店 · 称号卡片）：`{模式: {指标: 累计值}}`，
+    #: 模式是 `"pvp"` / `"quest"` 两个之一，指标键见 `shopcfg.CARD_METRICS`。
+    #:
+    #:     {"pvp": {"kills": 431, "shots": 12040, "hits": 3118,
+    #:              "games": 88, "kills@110001": 210}, "quest": {...}}
+    #:
+    #: ★ **只存非零项**：一个只打过三局的号大概只有五六个键，
+    #:   不为「运营以后可能会用的指标」白白把 `accounts.json` 撑大一圈。
+    #: ★ 武器维度**折进键里**（`指标@族号`，`cards.stat_key()`）而不是多一层
+    #:   字典 —— 多一层会让洗表 / 累加 / 读取三处各多一段分支。
+    #: ★★ **命中率这种比率不许存**：只存 `shots` / `hits` 两个分量，
+    #:   累计命中率是读的时候现算（`cards.stat_of`）。存比率的话两局
+    #:   50% 和 100% 加起来会变成 150%。
+    "battle_stats": {},
+    #: ★ 每张卡片**规则引擎一共发过几张** `{卡片 id 字符串: 张数}`。
+    #:
+    #: 和「玩家手上有几张」（`materials`）**是两回事**：合成掉之后手上归零，
+    #: 但里程碑不能因此重发。累计档的发放量就是
+    #: `应发总数 − 这个数`（`cards.due_grants`），所以它只增不减。
+    #:
+    #: ⚠ **不要**按「规则表里还有没有这条规则」去洗它 —— 那会把历史抹掉，
+    #:   运营把规则关掉再打开就重发一轮。
+    "card_grants": {},
 }
 
 #: 管理页 / 控制通道发的礼物统一用这个发送人。★ 客户端拿它判「是不是 GM 送的」：
@@ -531,9 +560,10 @@ class AccountStore:
         不写盘，所以每次启动都可以跑，不需要 schema 版本号；以后有人手工丢一份
         旧 JSON 进来也会被自动补上。
 
-        管五件事：
+        管六件事：
 
-        1. 老账号缺 `inventory` / `equipped` / `materials` 时补空的。
+        1. 老账号缺 `inventory` / `equipped` / `materials` / `battle_stats` /
+           `card_grants` 时补空的。
            逻辑上 `_merged_account()` 每次读都会补，但**磁盘上**那三个键要等
            该账号下次被写才出现 —— 中间人去翻存档会以为功能根本没生效。
         2. 洗掉脏条目：数量 <= 0 的、id 解析不出来的、客户端不认识的。
@@ -544,6 +574,10 @@ class AccountStore:
            留着会让翻存档的人以为「全开」还管用。
         5. 顶层的 `admin_accounts`：**键不存在**时建一个默认管理员。
            键在但是空字典 = 用户主动关掉了管理页，**不碰**（D13）。
+        6. 累计战绩里认不出的指标键丢掉（V0.3商店）——
+           服务端删掉一个指标之后，线上存档在这儿自动收敛。
+           ⚠ `card_grants` 只洗「键不是数字 / 值不是正整数」，
+           **绝不**按「现在还有没有这条规则」删（那会让关掉再打开的规则重发一轮）。
 
         返回 ``{"accounts": [{"username", "notes"}, ...],
                 "admin_created": 名字 or None, "admin_broken": bool}``。
@@ -561,12 +595,17 @@ class AccountStore:
                 # 礼物盒（D76）同一条路：缺了补空的、坏条目洗掉、计数器不小于最大号。
                 gifts, seq, gift_notes = normalize_gift_fields(raw)
                 notes = notes + gift_notes
+                # 累计战绩 + 卡片发放计数（V0.3商店）同一条路。
+                stats, grants, stat_notes = normalize_battle_fields(raw)
+                notes = notes + stat_notes
                 legacy = [key for key in LEGACY_CHARACTER_KEYS if key in raw]
                 if (raw.get("inventory") == inventory
                         and raw.get("equipped") == equipped
                         and raw.get("materials") == materials
                         and raw.get("gifts") == gifts
                         and raw.get("gift_seq") == seq
+                        and raw.get("battle_stats") == stats
+                        and raw.get("card_grants") == grants
                         and not legacy):
                     continue
                 raw["inventory"] = inventory
@@ -574,6 +613,8 @@ class AccountStore:
                 raw["materials"] = materials
                 raw["gifts"] = gifts
                 raw["gift_seq"] = seq
+                raw["battle_stats"] = stats
+                raw["card_grants"] = grants
                 for key in legacy:
                     del raw[key]
                 changed.append({
@@ -1021,6 +1062,98 @@ class AccountStore:
             data["accounts"][username] = account
             self._write_unlocked(data)
             return copy.deepcopy(account)
+
+    def apply_battle(self, username, *, experience=0, money=0, materials=None,
+                     stats_mode=None, stats_gained=None, cards=None,
+                     card_targets=None):
+        """打完一局的**全部所得，一把锁、一次写盘**（V0.3商店 · 称号卡片）。
+
+        经验 / 金币 + 掉落材料 + 累计战绩 + 卡片，四样一起落。
+        返回 ``(更新后的账号, 被跳过的 id 列表, 实际发出的卡片 {id: 张数})``。
+
+        ★ **为什么要合成一发**：以前结算是 `add_quest_reward` + `add_materials`
+        两次读盘写盘，现在再加战绩和卡片就成了四次。合成一发之后每人每局
+        **反而少写一次盘**，而且「经验加了、材料没加上」这种中间态不存在了。
+        `add_quest_reward` / `add_materials` 照旧留着 —— 礼物领取、
+        管理页发奖还在用它们。
+
+        ★★ **卡片的里程碑减法在这儿做**（`card_targets`）：调用方
+        （`cards.due_grants`）算出「这个账号从这条规则一共该拿几张」，
+        存档层拿它减掉「已经发过几张」。规则长什么样存档层一概不知道 ——
+        所以这儿没有回调、没有重入，也就没有竞态。
+        一个账号同一时刻只可能在一局里（一个账号一条连接），
+        所以外面算目标用的「累计 + 本局」和锁里存下去的必然一致。
+
+        ★ 材料和卡片走**同一条** `ownable` 过滤（卡片的 `kind` 就是 `material`，
+        住的也是同一个桶）—— 客户端表里没有的 id 发下去会让结算界面画空格子。
+        """
+        experience = max(0, int(experience))
+        money = max(0, int(money))
+        stats_gained = stats_gained or {}
+        with self._lock:
+            data = self._read_unlocked()
+            account = self._account_unlocked(data, username)
+            # ---- ① 经验 / 金币（和 `add_quest_reward` 同一段算法）----
+            account["experience"] = max(
+                0, int(account.get("experience", 0))) + experience
+            account["money"] = max(0, int(account.get("money", 0))) + money
+            account["level"] = level_for_experience(account["experience"])
+            # ---- ② 累计战绩 ----
+            if stats_mode and stats_gained:
+                import cards as cards_module
+                account["battle_stats"] = cards_module.merge_stats(
+                    battle_stats(account), stats_mode, stats_gained)
+            # ---- ③ 卡片：先算实发几张，再和材料并到一起 ----
+            grants = dict((str(k), int(v))
+                          for k, v in card_grants(account).items())
+            give = {}
+            for card, count in (cards or {}).items():
+                count = max(0, int(count))
+                if count:
+                    give[int(card)] = give.get(int(card), 0) + count
+            for card, target in (card_targets or {}).items():
+                short = max(0, int(target) - int(grants.get(str(card), 0)))
+                # ★ 累计档的实发量**以锁里这一刻的已发数为准**，
+                #   把调用方算的那一份覆盖掉（它可能是几毫秒前算的）。
+                if short:
+                    give[int(card)] = short
+                else:
+                    give.pop(int(card), None)
+            # ---- ④ 材料 + 卡片一起入库（同一条 `ownable` 过滤）----
+            wanted = {}
+            skipped = []
+            for source in ((materials or {}), give):
+                for key, value in source.items():
+                    try:
+                        item_id, count = int(key), int(value)
+                    except (TypeError, ValueError):
+                        skipped.append(key)
+                        continue
+                    if count <= 0:
+                        continue
+                    if not shopdata.ownable(item_id):
+                        skipped.append(item_id)
+                        continue
+                    wanted[item_id] = wanted.get(item_id, 0) + count
+            given = dict((card, n) for card, n in give.items()
+                         if card not in skipped)
+            if wanted:
+                records = _material_records(account)
+                for item_id, count in wanted.items():
+                    records[item_id] = records.get(item_id, 0) + count
+                account["materials"] = {str(i): records[i]
+                                        for i in sorted(records)}
+            # ---- ⑤ 发放计数只增不减 ----
+            for card, count in given.items():
+                key = str(card)
+                grants[key] = grants.get(key, 0) + int(count)
+            if grants:
+                account["card_grants"] = dict(
+                    sorted(((k, v) for k, v in grants.items() if v > 0),
+                           key=lambda kv: int(kv[0])))
+            data["accounts"][username] = account
+            self._write_unlocked(data)
+            return copy.deepcopy(account), skipped, given
 
     # ------------------------------------------------- 仓库 / 装备 / 材料
     def _account_unlocked(self, data, username):
@@ -2443,6 +2576,94 @@ def normalize_gift_fields(raw):
     if had > len(gifts):
         notes.append("丢掉礼物盒里坏掉的 %d 份礼物" % (had - len(gifts)))
     return gifts, gift_seq(raw), notes
+
+
+def battle_stats(account):
+    """累计战绩 `{模式: {指标: 值}}`，**已洗干净**（V0.3商店）。
+
+    ★ 只留认得的模式（`shopcfg.CARD_MODES`）和认得的指标键
+    （`shopcfg.CARD_METRICS`，武器维度是 `指标@族号`），值必须是正整数。
+    ★ 不认识的原样丢掉 —— 服务端删掉一个指标之后，线上存档在下一次
+    `ensure_item_fields()` 时自动收敛，不会一直背着一格死数据。
+    """
+    out = {}
+    raw = (account or {}).get("battle_stats")
+    if not isinstance(raw, dict):
+        return out
+    for mode, bucket in raw.items():
+        if mode not in shopcfg.CARD_MODES or not isinstance(bucket, dict):
+            continue
+        clean = {}
+        for key, value in bucket.items():
+            if not _known_stat_key(key):
+                continue
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                clean[str(key)] = number
+        if clean:
+            out[mode] = dict(sorted(clean.items()))
+    return out
+
+
+def _known_stat_key(key):
+    """`"kills"` / `"kills@110001"` —— 指标认不认得。"""
+    name = str(key).split("@")[0]
+    if name not in shopcfg.CARD_METRICS:
+        return False
+    parts = str(key).split("@")
+    if len(parts) == 1:
+        return True
+    if len(parts) != 2:
+        return False
+    try:
+        return int(parts[1]) in shopcfg.WEAPON_CARDS
+    except (TypeError, ValueError):
+        return False
+
+
+def card_grants(account):
+    """每张卡片**规则引擎一共发过几张** `{卡片 id 字符串: 张数}`，已洗干净。
+
+    ⚠ 洗的只有「键不是数字 / 值不是正整数」这两条 —— **绝不**按「现在还有没有
+    这条规则」去删：那会把历史抹掉，运营把规则关掉再打开就重发一轮。
+    """
+    out = {}
+    raw = (account or {}).get("card_grants")
+    if not isinstance(raw, dict):
+        return out
+    for key, value in raw.items():
+        try:
+            card = int(key)
+            number = int(value)
+        except (TypeError, ValueError):
+            continue
+        if card > 0 and number > 0:
+            out[str(card)] = number
+    return dict(sorted(out.items(), key=lambda kv: int(kv[0])))
+
+
+def normalize_battle_fields(raw):
+    """原始账号字典里的战绩两件套 → 可以直接写回 JSON 的形态。
+
+    返回 ``(battle_stats, card_grants, notes)``，脾气和
+    `normalize_item_fields` / `normalize_gift_fields` 完全一样。
+    """
+    notes = []
+    for field in ("battle_stats", "card_grants"):
+        if field not in raw:
+            notes.append("补上 " + field)
+    stats = battle_stats(raw)
+    grants = card_grants(raw)
+    before = raw.get("battle_stats")
+    if isinstance(before, dict):
+        had = sum(len(v) for v in before.values() if isinstance(v, dict))
+        now = sum(len(v) for v in stats.values())
+        if had > now:
+            notes.append("丢掉战绩里 %d 个认不出的指标" % (had - now))
+    return stats, grants, notes
 
 
 def equipped_items(account):

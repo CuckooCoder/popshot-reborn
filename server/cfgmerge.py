@@ -59,6 +59,10 @@ KEY_FIELDS = {
     #:   （`stage` / `difficulty`）互斥地各出现一半，缺的那半是 `None`，
     #:   `mode:"bonus"` 那一条六个全 `None` —— 全表唯一，正好当它的身份。
     "rewards": ("mode", "pvp_mode", "item_mode", "team", "stage", "difficulty"),
+    #: ★ 称号卡片按**卡片**认身份 —— 一张卡片只有一条规则
+    #:   （`shopcfg.validate_cards` 拦着重复），所以它是天然主键，
+    #:   和 `items` / `shop` 一样干净。
+    "cards": ("card",),
 }
 
 #: 商店 ⇄ 合成互斥时，「这条记录说的是哪件物品」看哪个字段。
@@ -326,6 +330,14 @@ def label_of(which, key, entry=None):
         result = (entry or {}).get("result")
         head = _item_label(result) if result is not None else "（产物未知）"
         return "%s　配方 #%s" % (head, nat[0])
+    if which == "cards":
+        # 「幸运卡片（#60004）　对战 · 一局内格挡次数 达到 30 · 且获胜 → …」
+        # ★ 条件那半句走 `shopcfg.describe_card_rule()`，**全项目唯一的出处**
+        #   —— 管理页浮窗、游戏里的物品提示框念的是同一句。
+        head = _item_label(nat[0])
+        rule = entry or {}
+        detail = shopcfg.describe_card_rule(rule, shopcfg.item_name(nat[0]))
+        return "%s　%s" % (head, detail) if detail else head
     if which == "rewards":
         # 「对战 · 生存模式 · 道具战 · 组队战」/「闯关 · 关卡3 神秘岛 · 困难」
         mode, pvp_mode, item_mode, team, stage, difficulty = nat

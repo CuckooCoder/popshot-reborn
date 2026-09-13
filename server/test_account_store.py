@@ -556,6 +556,11 @@ class AccountStoreTests(unittest.TestCase):
                        "money": 0, "sender": "GM", "message": "导入测试",
                        "sent": "2026-09-10 12:00:00", "unread": True}],
             "gift_seq": 3,
+            # 累计战绩两件套（V0.3商店）同样写规范形态：认得的模式 + 认得的
+            # 指标键（武器维度是 `指标@族号`），值都是正整数。
+            "battle_stats": {"pvp": {"games": 4, "kills": 9,
+                                     "kills@110001": 5}},
+            "card_grants": {"60004": 2},
         }
         self.assertEqual(sorted(changed), sorted(NEW_ACCOUNT_DEFAULTS),
                          "存档新增字段了？这条用例要跟着补")

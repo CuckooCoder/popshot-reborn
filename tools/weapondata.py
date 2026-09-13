@@ -69,7 +69,14 @@ ROOT = os.path.dirname(HERE)
 #:   只有数值那几格（436 份变体里 188 份缺 `CreatingClass`、84 份缺
 #:   `Velocity`），单独成记录弹速会变 0。提取时先按 `Id` 找到主表那节的
 #:   **原始字段**做底、quest 字段盖上去，再 `build_record`。
-FORMAT = 11
+#: ★ 12（V0.3商店 · 称号卡片）：新增 **`roh`（武器族号）** —— 称号卡片系统
+#:   要按「这一枪是哪一族的武器」记战绩，而 `ROH` 正是客户端
+#:   `GetLastBulletROHIdx()` 拿去和武器称号比的那个数（`shopcfg.BONUS_LUA_ZH`），
+#:   取值就是 9 张武器卡片的 id（`110001`~`130003`）。
+#:   ⚠⚠ **改这个数必须和重新生成 `server/bot_weapons.json` 在同一个提交里**：
+#:   `server/weapondata._Store._read()` 在 `format` 对不上时返回**空表**，
+#:   症状是 **bot 全房间当场不开枪**，而且一句报错都没有。
+FORMAT = 12
 
 #: 节名 `chNNN-MM…`：NNN = 角色 id，MM = 武器序号。
 #: ★ 后面还可能跟 `SE` / `D1` / `R1` / `F1` / `a` / `Classic` 之类的后缀 ——
@@ -88,6 +95,15 @@ _FIELDS = (
     ("Name",            "name",            str),
     ("Type",            "type",            str),
     ("CreatingClass",   "creating_class",  str),
+    # ★★ `ROH`：**武器族号**，取值就是 9 张武器卡片的 id（`110001`~`130003`）。
+    #   客户端的 `GetLastBulletROHIdx()` 返回的就是它 —— 9 个武器称号的 Lua
+    #   （`EquipBonus-Chn.ini`）拿它比「你现在用的是不是本系武器」。
+    #   称号卡片系统按它记「用哪把枪打的」（`cards.py` 的 `weapon_*` 指标）。
+    #   ⚠ **只有基础三角色（0/1/2）的枪有 ROH**，全表 228 节里 127 节有；
+    #     商城角色（`ch100`~`ch110`）自带的枪**一个都没有**（只有 `ch109-02` /
+    #     `ch109-03` 例外，挂在布洛克那两族上）⇒ **用商城角色打，武器卡片拿不到、
+    #     武器称号的加成也不触发** —— 这是原版就这样，不是我们的 bug（铁律 12）。
+    ("ROH",             "roh",             int),
     ("Damage",          "damage",          int),
     ("HeadDamage",      "head_damage",     int),
     ("LegsDamage",      "legs_damage",     int),

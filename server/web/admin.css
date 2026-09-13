@@ -633,6 +633,18 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* ---------------------------------------------- 称号卡片掉落：一卡一行
+   用户 2026-09-13（V0.3商店）。骨架就是 `.rule-row`，只多两件事：
+     · 关着的（拿不到的）那些整行淡下去 —— 这一页多半时间是在看「哪些开着」；
+     · 锁住的下拉 / 输入框要看得出是**锁着**而不是坏了。 */
+.card-row.off { opacity: .55; }
+/* ★ 只淡不隐：关着的规则照样要能改（不然怎么重新开）。开关自己不淡，
+   否则「怎么把它打开」这件事在画面上就没有落点了。 */
+.card-row.off .toggle { opacity: 1; }
+.card-row select:disabled, .card-row input:disabled {
+  background: var(--paper-2); color: var(--cocoa-soft); cursor: not-allowed;
+}
+
 /* ---------------------------------------- 金币 / 经验获取：两张表格
    用户 2026-09-10（D72）。别的配置页是一条一张卡，这一页是两张**固定的**
    二维表格：对战 = 模式 × 个人/组队，闯关 = 关卡 × 难度，一格里两个数

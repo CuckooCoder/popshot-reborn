@@ -83,6 +83,12 @@ REWARDS_FILENAME = "rewards.json"
 #:   所以它不在 `SCHEMA` / `web.admin.CONFIG_FILES` / `admin.js` 的 `CONFIGS` 里
 #:   （那三张表定义的是「配置页」那条链，`test_web_admin` 钉着它们一一对应）。
 SELL_PRICE_FILENAME = "sell_price.json"
+#: ★ **称号卡片怎么拿**（V0.3商店）：一张卡片一条「达标就给」的规则。
+#: 原版的卡片是按成就发的（击杀数 / 误伤次数…，§37），本版把那套成就统计
+#: 做出来之后，这份配置就是「哪个成就、达到多少、给几张」的唯一出处。
+#: ★ 它**有配置标签页**（`SCHEMA["cards"]` / 管理页「称号卡片」），
+#:   所以七份里只有 `sell_price.json` 没有页面。
+CARDS_FILENAME = "cards.json"
 
 #: ★ 合成界面只有 4 个材料槽（`ComposeItemNewUI.ui` 的 `ImgBar0~3`，§7）。
 #: 配方写第 5 种材料，玩家在界面上根本看不见 —— 校验时直接拒绝。
@@ -565,7 +571,11 @@ BONUS_LUA_ZH = {
     630002: "使用螺旋炮系武器时攻击 +5%%",     # ROH 130002
     630003: "使用火箭筒系武器时攻击 +3%%",     # ROH 130003
     560001: "生命 -10%%（按角色基础上限算）",
-    560002: "格斗模式对战时防御 +2%%",
+    # ⚠⚠ `560002` 要求 `GetPvpMode() == 2`（격투 모드），而**中国区客户端
+    #   选不到那个模式**（`PVP_MODE_ZH` 只有生存和夺分）⇒ 穿上去防御 +0。
+    #   照原版保留、照样上架（铁律 12：不发明原版没有的玩法），
+    #   但说明里必须写明白 —— 不然玩家攒 30 张卡换一个空壳（V0.3商店）。
+    560002: "格斗模式对战时防御 +2%%（⚠ 本版选不到格斗模式，不会触发）",
     560003: "射击模式对战时防御 +2%%",
 }
 
@@ -573,9 +583,13 @@ BONUS_LUA_ZH = {
 #: 留白分不清「真没有」和「漏写了」）。
 #:
 #: ⚠ 只收**占装备槽**的类别。材料 / 消耗品 / 钥匙 / 礼包**故意不收** ——
-#:   它们本来就不是装备，说明留白和以前一样（`test_web_admin` 钉着材料不带
-#:   `desc` 键）；`title`（称号）也不收，因为 `560005` / `560006` 在 exe 里
-#:   另有按 id 硬编码的行为、只是没查实，不能替它们断言「无属性加成」。
+#:   它们本来就不是装备，说明留白和以前一样（`test_web_admin` 钉着 10001
+#:   绿珠不带 `desc` 键）；`title`（称号）也不收，因为 `560005` / `560006`
+#:   在 exe 里另有按 id 硬编码的行为、只是没查实，不能替它们断言「无属性加成」。
+#: ★★ **称号卡片是「材料」里唯一的例外**（V0.3商店，用户 2026-09-13）：
+#:   它带说明，写的是「怎么拿 + 能合成什么称号」，出处是**运营配置**而不是
+#:   这张表（见 `item_desc_zh` 里那一支和 `_card_desc_lines`）。
+#:   在这儿写一句是因为下一个人看到「材料故意不收」会以为卡片那一段是回归。
 KIND_USAGE_ZH = {
     "spray": "染色剂，改变装备颜色。无属性加成。",
     "character": "角色卡，解锁该角色。无属性加成。",
@@ -584,6 +598,264 @@ KIND_USAGE_ZH = {
     "armor": "外观装备。无属性加成。",
     "ring": "戒指。无属性加成。",
 }
+
+# --------------------------------------------------------------------------
+# 称号卡片：统计指标表 + 「一条规则怎么念成人话」（V0.3商店）
+# --------------------------------------------------------------------------
+
+#: 9 张**武器卡片**的 id。★ 它同时是 `weapon.ini` 的 `ROH`（武器族号）——
+#: 客户端 `GetLastBulletROHIdx()` 返回的就是这个数，9 个武器称号的 Lua
+#: 拿它比「你现在用的是不是本系武器」（`BONUS_LUA_ZH`）。
+#: ⇒ 「用左轮打死 5 个人」这条判据和「穿上左轮称号能不能吃到加成」
+#:   是**同一个数**，两边天生对得上。
+#: ★ `test_weapondata` 钉着它和 `weapondata.WEAPON_ROH` 相等。
+WEAPON_CARDS = (110001, 110002, 110003,
+                120001, 120002, 120003,
+                130001, 130002, 130003)
+
+#: 8 张**成就卡片**的 id（`60001`~`60008`），一一对应称号 `560001`~`560008`。
+ACHIEVEMENT_CARDS = tuple(range(60001, 60009))
+
+#: 全部 17 张卡片。★ 只用来当**下拉选项**和自检的锚点；
+#: 「这个 id 是不是卡片」的**判据**是 `shop.warehouse_category_of()`
+#: （客户端仓库界面那棵树的分类规则），不是这张表 —— 原版哪天多一张卡片，
+#: 判据自动认得，这张表只是没跟上而已。
+ALL_CARDS = ACHIEVEMENT_CARDS + WEAPON_CARDS
+
+#: 统计范围。`match` = 这一局打到这个数就给；`total` = 账号累计，
+#: **每满一个阈值给一次**（里程碑，用户 2026-09-13 拍板）。
+CARD_SCOPE_MATCH = "match"
+CARD_SCOPE_TOTAL = "total"
+CARD_SCOPES = (CARD_SCOPE_MATCH, CARD_SCOPE_TOTAL)
+CARD_SCOPE_ZH = {CARD_SCOPE_MATCH: "一局内", CARD_SCOPE_TOTAL: "玩家累计"}
+
+#: 规则里的模式。空 = 不限（对战和闯关都算，累计时两边相加）。
+CARD_MODES = ("pvp", "quest")
+CARD_MODE_ZH = {"pvp": "对战", "quest": "闯关"}
+
+#: ★★ **统计指标表**。`key -> (中文名, 适用模式, 要不要武器, 是不是比率, 说明)`
+#:
+#: * **适用模式** = 这个指标在哪几种模式下有意义（`()` = 都有意义）。
+#:   管理页照它锁「模式」下拉，校验器照它拦「写了也永远不会成立」的组合。
+#: * **要不要武器** = 规则里那个「武器」下拉有没有用（`weapon_*` 那两条）。
+#: * **是不是比率** = 值域是 0..100 的百分比，样本太少时没意义 ⇒ 要配
+#:   「最少开枪数」一起用。
+#:
+#: ★ 数据全部来自 `RoomQuest`（`gameserver.py`）。加一个指标要同时动三处：
+#:   这张表、`RoomQuest` 的计数器、`cards.match_stats()` 的取值。
+#:
+#: ⚠ **别把「暴击」和 `EquipBonus` 的 `Critical` 搞混**（2026-09-13 差点搞错）：
+#:   `Critical`（idx 3）是**死属性** —— 名字表里有、三份 `EquipBonus` 里零条、
+#:   `GetEquipBonus` 零调用点（`DEAD_BONUS_KEYS`），原版永远不触发。
+#:   玩家嘴里的**「暴击」是另一回事**：攻击加成有 **15% 概率**生效（§2），
+#:   生效那一下伤害按加成放大 —— 服务端**看得到**（`rpExplode` 的
+#:   `flags & 0x10`，V0.3商店 §102），就是 `crits` 那一项。
+#: ⚠ **格斗 / 射击模式分不开**：中国区客户端只选得到生存(0) / 夺分(3)
+#:   （`PVP_MODE_ZH`），`PvpMode==2 격투` 根本进不去 ⇒ 不提供按对战子模式
+#:   细分的指标（同理 `560002 [格斗达人]` 那个称号穿上去也是 +0）。
+CARD_METRICS = {
+    "kills":        ("击杀敌人数", ("pvp",), False, False,
+                     "打死别队玩家的次数。自杀和误伤不算（那是另外两个指标）"),
+    "mob_kills":    ("击杀怪物数", ("quest",), False, False,
+                     "闯关里打死的怪。对战没有怪"),
+    "team_kills":   ("击杀队友数", (), False, False,
+                     "误伤队友致死的次数。组队战才可能不为 0"),
+    "suicides":     ("自杀次数", (), False, False, "把自己炸死的次数"),
+    "deaths":       ("死亡次数", (), False, False, "本局死了几次"),
+    "shots":        ("开枪次数", (), True, False, "发射的子弹数（散射按一次算）"),
+    "hits":         ("命中次数", (), True, False,
+                     "直接命中**玩家**的次数。打中怪和箱子不算"),
+    "splash_hits":  ("溅射命中数", (), True, False,
+                     "溅射 / 近身打中**玩家**的次数"),
+    "accuracy":     ("命中率（%）", (), True, True,
+                     "命中 ÷ 开枪。★ 开一枪中一枪也是 100%，"
+                     "所以要配「最少开枪数」一起用"),
+    "damage":       ("造成的伤害", (), True, False,
+                     "打出去的伤害总和（打怪和箱子也算）"),
+    "crits":        ("暴击次数", (), False, False,
+                     "攻击加成触发的那几发。穿了加攻击力的装备之后，"
+                     "每一发有 15% 概率让加成生效，生效时伤害按加成放大"
+                     "——身上没有加攻击的装备就永远是 0"),
+    "guards":       ("格挡次数", (), False, False,
+                     "按下格挡的次数（按住不放算一次）"),
+    "dashes":       ("突击技次数", (), False, False, "双击方向键的近身攻击次数"),
+    "hearts":       ("捡到「心」的次数", (), False, False, "捡起地上回血道具的次数"),
+    "coins":        ("捡到的金币", (), False, False, "本局在地上捡到的金币总额"),
+    "score":        ("本局得分", (), False, False,
+                     "对战是净杀敌数（自杀 / 误伤会倒扣），闯关是关卡分数"),
+    "win":          ("胜利 / 通关", (), False, False,
+                     "赢了 = 1，没赢 = 0。填 1 就是「赢了就给」"),
+    "perfect_win":  ("完美胜利（零死亡获胜）", (), False, False,
+                     "赢了而且一次都没死 = 1"),
+    "carried":      ("零击杀获胜", ("pvp",), False, False,
+                     "赢了但一个人都没打死 = 1"),
+    "games":        ("对局数", (), False, False,
+                     "打完一局 = 1。★ 只有「玩家累计」才有意义"),
+    "weapon_kills": ("某武器击杀数", (), True, False,
+                     "用选中的那一族武器打死的数量（口径同客户端的"
+                     "「最后一发子弹是哪一族」）"),
+    "weapon_damage": ("某武器造成伤害", (), True, False,
+                      "用选中的那一族武器打出的伤害。★ 弹体还在飞时换枪"
+                      "会算到新枪头上"),
+}
+
+#: 指标 key -> 中文名（给 `describe_card_rule` 和管理页用）。
+CARD_METRIC_ZH = dict((key, spec[0]) for key, spec in CARD_METRICS.items())
+
+#: 下拉里从上到下的顺序。★ **不是字母序**（同 `BONUS_ORDER` 的道理）——
+#: 按 key 排出来在中文下是乱的（「命中率 / 零击杀获胜 / 捡到的金币」挨着）。
+#: 这里按**运营找东西的思路**分四组：战果 → 输出 → 动作 → 结果 / 累计。
+#: ★ 表里有而这儿漏了的排在最后（加指标忘了登记也不会从画面上消失）。
+CARD_METRIC_ORDER = (
+    # 战果
+    "kills", "mob_kills", "team_kills", "suicides", "deaths",
+    # 输出
+    "shots", "hits", "splash_hits", "accuracy", "damage", "crits",
+    "weapon_kills", "weapon_damage",
+    # 局内动作
+    "guards", "dashes", "hearts", "coins",
+    # 一局的结果 / 只对累计有意义的
+    "score", "win", "perfect_win", "carried", "games",
+)
+
+
+def card_metric_keys():
+    """按画面顺序排好的指标 key。漏登记的排最后，不会消失。"""
+    known = [key for key in CARD_METRIC_ORDER if key in CARD_METRICS]
+    rest = [key for key in sorted(CARD_METRICS) if key not in CARD_METRIC_ORDER]
+    return known + rest
+
+#: **0 / 1 的旗标指标**。念人话时它们不说「达到 1」（那是废话），
+#: 只说事件本身：「完美胜利（零死亡获胜）」。
+#: ★ 它们也是本页不设「≤」比较符的原因：「零死亡」「零击杀」这类条件
+#: 全靠它们表达 —— 只有一个「达到」就没有「阈值填 0 时恒成立」那个坑。
+CARD_FLAG_METRICS = frozenset(("win", "perfect_win", "carried", "games"))
+
+#: 武器类指标的中文名里那三个字，念人话时换成具体武器名
+#: （「某武器击杀数」+ 左轮手枪 → 「左轮手枪击杀数」）。
+_CARD_ANY_WEAPON = "某武器"
+
+
+def card_metric_modes(metric):
+    """这个指标在哪几种模式下有意义；`()` = 都有意义。"""
+    spec = CARD_METRICS.get(metric)
+    return spec[1] if spec else ()
+
+
+def card_metric_needs_weapon(metric):
+    spec = CARD_METRICS.get(metric)
+    return bool(spec and spec[2])
+
+
+def card_metric_is_ratio(metric):
+    spec = CARD_METRICS.get(metric)
+    return bool(spec and spec[3])
+
+
+def card_metrics_for_admin():
+    """指标表发给管理页的样子（`/admin/api/catalog` 里那一格）。"""
+    return dict(
+        (key, {"label": spec[0], "modes": list(spec[1]),
+               "weapon": bool(spec[2]), "ratio": bool(spec[3]),
+               "help": spec[4]})
+        for key, spec in CARD_METRICS.items())
+
+
+#: 武器族号 → **武器**的中文名。
+#:
+#: ★ 这**不是** D31 说的那种「物品名」——「武器族」在物品库里根本没有条目
+#: （物品库里有的是「左轮手枪卡片」和一堆「左轮手枪 爆裂1/2/3」）。
+#: 它回答的是「哪一族」，所以名字只能写在这儿，和 `SERIES_ZH` / `CHARACTER_ZH`
+#: 一个待遇。★ `test_shopcfg` 钉着它和 `shopdefaults.WEAPON_BASE_ZH` 的值一致。
+WEAPON_ROH_ZH = {
+    110001: "左轮手枪", 110002: "苹果弹", 110003: "狙击枪T1",
+    120001: "复古短枪", 120002: "火焰弹", 120003: "华尔兹加农炮",
+    130001: "重机枪", 130002: "榴弹发射器", 130003: "火箭炮",
+}
+
+#: ★★ **每个武器族只属于一个角色** —— 族号的第 2~3 位就是角色
+#: （`11xxxx` 泰尔 / `12xxxx` 卡希尔 / `13xxxx` 布洛克，`BONUS_LUA_ZH` 的注释
+#: 里写着同一条）。所以「用左轮打死 5 个人」这条规则**不需要另外判角色**：
+#: 左轮只有泰尔拿得动，别的角色一辈子也打不出 `110001` 那个族号。
+#:
+#: ⇒ 但这有一个真实后果，页面上得让人看见：**一个玩家只拿得到自己那个角色
+#: 的 3 张武器卡**，也就只合得出那 3 个武器称号（想要别的要换角色去打）。
+#: 而且武器称号跨角色穿也没用 —— 它的 Lua 比的就是 `GetLastBulletROHIdx()`。
+#: ⚠ 商城角色自带的枪**没有 ROH**（§100）⇒ 用商城角色打，武器卡一张都拿不到。
+def weapon_roh_character(roh):
+    """这个武器族属于哪个角色（0/1/2）；认不出就 `None`。"""
+    try:
+        return int(roh) // 10000 % 10 - 1
+    except (TypeError, ValueError):
+        return None
+
+
+def weapon_roh_label(roh):
+    """「左轮手枪（泰尔）」—— 带上角色，免得运营配出「布洛克拿左轮」那种规则。"""
+    name = WEAPON_ROH_ZH.get(roh, str(roh))
+    who = CHARACTER_ZH.get(weapon_roh_character(roh))
+    return "%s（%s）" % (name, who) if who else name
+
+
+def weapon_card_options():
+    """「武器」下拉的选项：9 个族号 + 武器的中文名 + 它属于哪个角色。"""
+    return [{"value": roh, "label": weapon_roh_label(roh)}
+            for roh in WEAPON_CARDS]
+
+
+def describe_card_rule(rule, card_name=None):
+    """一条获得规则念成一句人话。**全项目唯一的出处**（V0.3商店）。
+
+    管理页的物品浮窗、游戏里的物品提示框（`item_desc_zh`）、
+    三方合并的冲突提示（`cfgmerge.label_of`）三处都念它 —— 三处各写一遍
+    的话，改了条件之后总有一处还在说旧话。
+
+    ⚠ **结果里绝不能出现 `|`** —— 客户端拿它当说明的分段符
+    （`wcstok`，`0x5fa904`），混进去会把一段说明拦腰切开。
+    """
+    if not isinstance(rule, dict):
+        return ""
+    if not rule.get("listed"):
+        return "暂时无法获得"
+    parts = []
+    mode = rule.get("mode")
+    parts.append(CARD_MODE_ZH.get(mode, "对战 / 闯关都算"))
+    stage = rule.get("stage")
+    if stage is not None:
+        parts.append("关卡%s %s" % (stage, QUEST_ZH.get(stage, "")).strip())
+    difficulty = rule.get("difficulty")
+    if difficulty is not None:
+        parts.append(DIFFICULTY_ZH.get(difficulty, "难度 %s" % difficulty))
+    metric = rule.get("metric")
+    label = CARD_METRIC_ZH.get(metric, str(metric))
+    weapon = rule.get("weapon")
+    if weapon is not None and card_metric_needs_weapon(metric):
+        # ★ 带上角色（「左轮手枪（泰尔）」）—— 武器族本来就绑角色，
+        #   说出来省得有人以为「用左轮」这条别的角色也够得着。
+        label = label.replace(_CARD_ANY_WEAPON, weapon_roh_label(weapon))
+    scope = CARD_SCOPE_ZH.get(rule.get("scope"), CARD_SCOPE_ZH[CARD_SCOPE_MATCH])
+    threshold = int(rule.get("threshold", 1))
+    if metric in CARD_FLAG_METRICS and threshold == 1:
+        # 「完美胜利 达到 1」是废话 —— 旗标指标只说事件本身。
+        parts.append("%s%s" % (scope, label))
+    else:
+        parts.append("%s%s 达到 %s" % (scope, label, threshold))
+    if rule.get("min_shots"):
+        parts.append("且开枪不少于 %d 次" % int(rule["min_shots"]))
+    if rule.get("win_only"):
+        parts.append("且获胜 / 通关")
+    head = " · ".join(parts)
+    count = int(rule.get("count", 1))
+    # ★ `card_name` 不给 = 调用方**已经知道说的是哪张卡**（物品提示框就是
+    #   停在那张卡上弹出来的）—— 再写一遍名字只会把那 234 px 挤满。
+    tail = ("获得 %s ×%d" % (card_name, count) if card_name
+            else "获得 %d 张" % count)
+    if rule.get("scope") == CARD_SCOPE_TOTAL:
+        tail += "（每满一次给一次）"
+    text = "%s → %s" % (head, tail)
+    # 段分隔符绝不能混进正文（见 docstring）。名字是运营改的，真有可能带。
+    return text.replace(DESC_SEPARATOR, "/")
+
 
 #: ★ 客户端把说明按 `|` 切开，**实际只画前 2 段**（`0x45c4c9` / `0x455534` /
 #: `0x45ff65` 都是循环**顶部**的 `cmp i,2 / je 出口`，`i` 只取 0 和 1；
@@ -670,7 +942,132 @@ def _effect_lines(item):
     return lines
 
 
-def item_desc_zh(item):
+#: 「现取」的记号：`item_desc_zh` 的可选参数留空时自己去读配置。
+#: ★ 默认现取而**不靠调用方记得传** —— 判据要落在结果上，不落在
+#:   「谁记得加那句」上（同 `admin.js` 的 `lockList()`）。漏传的症状是
+#:   「就是没人看得到，一句报错都没有」，正是铁律 13 说的那一类。
+#:   热路径想省掉重复 `os.stat` 的调用方可以把读好的表传进来 ——
+#:   那是**优化**，不是**契约**。
+_AUTO = object()
+
+
+def title_effect_zh(item_id):
+    """一个称号的**加成效果**压成一句话；查不到就空串（V0.3商店）。
+
+    ★ 出处仍旧是 `item_desc_zh()` 那一套（`_bonus_lines` 数值 +
+    `_effect_lines` 特效 / Lua / exe 硬编码的三条）—— 卡片提示框上
+    「合成出来是干什么的」和穿上身之后提示框里写的**必须是同一句话**。
+    """
+    item = shopdata.get(item_id)
+    if item is None:
+        return ""
+    bits = _bonus_lines(item.bonus or {}) + _effect_lines(item)
+    return "　".join(line.replace("\n", " ") for line in bits if line)
+
+
+def card_recipes(item_id, recipes_table):
+    """用得上这张卡片的**上架配方**，按产物 id 排好。
+
+    ★ 一张卡片**可以对应好几个称号**（运营配得出来），一个称号也**可以要
+    好几种卡片** —— 两种情况都要说得出来，所以这儿返回的是整条配方，
+    由调用方决定怎么念。
+    """
+    out = []
+    for recipe in recipes_table or ():
+        if not recipe.get("listed"):
+            continue
+        for slot in recipe.get("materials") or ():
+            try:
+                if int(slot.get("id", 0)) != int(item_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            out.append((recipe, int(slot.get("count", 1))))
+            break
+    out.sort(key=lambda pair: int(pair[0].get("result", 0)))
+    return out
+
+
+def _recipe_cost_zh(recipe, item_id):
+    """一条配方的代价念成一句：「幸运卡片×500 + 100000 金币」。
+
+    ★ **把每一种材料都写出来** —— 一个称号要好几种卡片时，只写「500 张」
+    会让人以为攒够这一种就合得出来（用户 2026-09-13 点的正是这一条）。
+    本卡片排在最前面，别的材料跟在后面。
+    """
+    bits = []
+    for slot in recipe.get("materials") or ():
+        try:
+            mid, count = int(slot.get("id", 0)), int(slot.get("count", 1))
+        except (TypeError, ValueError):
+            continue
+        name = item_name(mid) or ("#%d" % mid)
+        bits.append(("%s×%d" % (name, count), mid == int(item_id)))
+    bits.sort(key=lambda pair: 0 if pair[1] else 1)
+    text = " + ".join(name for name, _mine in bits)
+    cost = int(recipe.get("cost", 0) or 0)
+    if cost:
+        text = (text + " + " if text else "") + "%d 金币" % cost
+    return text
+
+
+def _card_desc_lines(item, card_rules, recipes_table):
+    """卡片提示框那两段：**怎么拿** + **合成出来是什么、要什么**（V0.3商店）。
+
+    返回 `(第1段的行, 第2段的行)`，不是卡片就是 `([], [])`。
+
+    ★ 游戏里和管理页**同一个出处** —— 这个函数的结果经 `item_desc_zh`
+    进 `ItemInfo +0x18`（客户端提示框下半）和管理页 catalog 的 `desc`
+    （`paintTip` 已经会按 `|` 分段、按 `\\n` 换行地画）。
+
+    ★★ **两段都是现算的** ⇒ 运营改完条件 / 改完配方，说明跟着变；
+    **没有配方就不写那一段**（用户 2026-09-13）。
+
+    ★ **两段是按行数预算分的**（第 1 段 ≈5 行、第 2 段 ≈3 行，§31）：
+
+        第 1 段  获得条件（1 行）+ 每个称号一行「➜ [叫什么] 要什么」
+        第 2 段  每个称号的**加成效果**，一行一个
+
+    一张卡片能合成好几个称号时两段一起长，各自按预算截断并在末尾写
+    「…另有 N 个」。默认的一一对应下是 2 行 + 1 行，很宽裕。
+    """
+    rule = None
+    for entry in card_rules or ():
+        if entry.get("card") == item.id:
+            rule = entry
+            break
+    if rule is None:
+        return [], []
+    # 名字不传 —— 提示框就是停在那张卡上弹出来的，再写一遍名字是废话。
+    how = describe_card_rule(rule)
+    stats = ["获得条件：" + how] if how else []
+    pairs = card_recipes(item.id, recipes_table)
+    if not pairs:
+        return stats, []
+    shown = []
+    room = max(1, ITEM_DESC_MAX_LINES - len(stats))
+    for recipe, _mine in pairs:
+        if len(shown) >= room:
+            break
+        title = item_name(recipe["result"]) or ("#%s" % recipe["result"])
+        shown.append((title, title_effect_zh(recipe["result"])))
+        stats.append("➜ %s　%s" % (title, _recipe_cost_zh(recipe, item.id)))
+    left = len(pairs) - len(shown)
+    if left > 0:
+        # 放不下的那些至少要说一声有 —— 不说的话玩家会以为只有这几个。
+        stats[-1] = "➜ …另有 %d 个称号用得上它（详见合成界面）" % (left + 1)
+        shown.pop()
+    notes = []
+    #: 只有一个称号时不重复写名字（上面那行刚写过）；好几个才要分得清是谁的。
+    for title, effect in shown[:ITEM_DESC_MAX_LINES_2]:
+        if not effect:
+            continue
+        notes.append(effect if len(shown) == 1
+                     else "%s　%s" % (title, effect))
+    return stats, notes
+
+
+def item_desc_zh(item, card_rules=_AUTO, recipes_table=_AUTO):
     """物品说明。**从本地数据现算**，原版那份说明随服务端 DB 一起没了。
 
     ⚠ 这不是「发明玩法」（铁律 12）—— 里面每个数都是客户端**自己也查得到**
@@ -684,6 +1081,12 @@ def item_desc_zh(item):
         第 2 段  特殊效果 / 条件加成 / 「无属性加成」
 
     两段都空就返回空串；只有第 2 段有内容时**不发 `|`**（省得切出一个空段）。
+
+    ★★ **称号卡片是唯一一类「材料」也带说明的**（V0.3商店，用户 2026-09-13）：
+    第 1 段写**获得条件**、第 2 段写**能合成什么称号** —— 两句都来自运营配置，
+    所以改完保存即刻生效。⚠ 已经在线的玩家要**重新登录**才看得到新说明：
+    客户端把物品定义缓存住了（「发过就记成已请求，不回就再也不问了」，
+    packet_api §3.9）。
     """
     if item is None:
         return ""
@@ -692,6 +1095,12 @@ def item_desc_zh(item):
         stats.extend(_weapon_lines(item.weapon))
     stats.extend(_bonus_lines(item.bonus or {}))
     notes = _effect_lines(item)
+    if not stats and not notes and item.kind == "material":
+        if card_rules is _AUTO:
+            card_rules = cards()[0]
+        if recipes_table is _AUTO:
+            recipes_table = recipes()[0]
+        stats, notes = _card_desc_lines(item, card_rules, recipes_table)
     if not stats and not notes:
         # 一条加成都查不到 —— 按类别写用途，让玩家分得清「真没有」和「漏写了」
         usage = KIND_USAGE_ZH.get(item.kind)
@@ -887,6 +1296,16 @@ def default_sell_price():
     """
     import shopdefaults
     return shopdefaults.default_sell_price()
+
+
+def default_cards():
+    """默认 `cards.json` = `shopdefaults.default_cards()`（V0.3商店）。
+
+    17 张卡片各一条规则，条件是**按韩文原名反推**的那一套
+    （무적승리자 = 零死亡获胜、팀킬쟁이 = 误伤队友…，见 `shopdefaults.CARD_RULES`）。
+    """
+    import shopdefaults
+    return shopdefaults.default_cards()
 
 
 # --------------------------------------------------------------------------
@@ -1177,6 +1596,124 @@ def validate_sell_price(raw):
         raise ConfigError(str(error)) from None
 
 
+#: 一条规则最多能给几张卡（和 `drops.count` / 配方材料数同一个上限）。
+MAX_CARD_COUNT = 800
+#: 阈值上限。累计指标（总伤害、总开枪数）够得着六位数，留一个数量级余量。
+MAX_CARD_THRESHOLD = 1000000
+#: 「一辈子最多从这条规则拿几张」的上限。`0` = 不限。
+MAX_CARD_LIMIT = 100000
+
+
+def is_card(item_id):
+    """这个 id 是不是**称号卡片**。
+
+    ★ 判据是**客户端仓库界面那棵树**（`shop.warehouse_category_of()` ==
+    `WAREHOUSE_CARD`），不是 `ALL_CARDS` 那张表 —— 那张表只是给下拉当选项的。
+    原版哪天多一张卡片，判据自动认得。
+    ★ `import` 写在函数里：`shop` 顶层 `import shopcfg`，加载阶段两边不能
+    互相依赖（和 `validate_sell_price` / `shopdefaults` 同一个办法）。
+    """
+    import shop
+    return shop.warehouse_category_of(item_id) == shop.WAREHOUSE_CARD
+
+
+def validate_cards(raw):
+    """`cards.json` → `[规则…]`；有一条不对就抛 `ConfigError`。
+
+    **一张卡片最多一条规则**（照「一个产物只能有一条配方」的先例）：
+    结算时每种卡片只发一发 `0x041c`（同 id 发两次客户端会累加，§3），
+    两条规则服务端说不清该按哪一条；而且「一张卡一条规则」让卡片 id
+    成了自然主键，三方合并、补齐默认值、发放去重才都有着落。
+    """
+    if not isinstance(raw, dict):
+        raise ConfigError("cards.json 的最外层必须是一个对象")
+    rules = raw.get("rules")
+    if not isinstance(rules, list):
+        raise ConfigError("cards.json 缺少 rules 列表")
+    out = []
+    seen = {}
+    for index, entry in enumerate(rules):
+        where = "rules[%d]" % index
+        if not isinstance(entry, dict):
+            raise ConfigError("%s 不是对象" % where)
+        card = _as_int(entry.get("card"), where + ".card", low=1)
+        _check_item_id(card, where)
+        if not is_card(card):
+            raise ConfigError("%s：%d 不是称号卡片" % (where, card))
+        if card in seen:
+            raise ConfigError(
+                "%s：卡片 %s 在 %s 里已经有一条规则了 —— "
+                "一张卡片只能有一条获得规则"
+                % (where, item_name(card) or card, seen[card]))
+        seen[card] = where
+        metric = entry.get("metric")
+        if metric not in CARD_METRICS:
+            raise ConfigError("%s.metric 不认识：%r（认得的有 %s）"
+                              % (where, metric, "、".join(sorted(CARD_METRICS))))
+        scope = entry.get("scope", CARD_SCOPE_MATCH)
+        if scope not in CARD_SCOPES:
+            raise ConfigError("%s.scope 只能是 %s：%r"
+                              % (where, " 或 ".join(CARD_SCOPES), scope))
+        rule = {
+            "card": card,
+            "listed": bool(entry.get("listed", False)),
+            "scope": scope,
+            "metric": metric,
+            # ★ 下限是 **1**，不是 0：这一页只有「达到」一种比较，
+            #   阈值 0 恒成立 ⇒ 那条规则每局白送一张，而且没人看得出为什么。
+            "threshold": _as_int(entry.get("threshold", 1),
+                                 where + ".threshold",
+                                 low=1, high=MAX_CARD_THRESHOLD),
+            "win_only": bool(entry.get("win_only", False)),
+            "count": _as_int(entry.get("count", 1), where + ".count",
+                             low=1, high=MAX_CARD_COUNT),
+            "limit": _as_int(entry.get("limit", 0), where + ".limit",
+                             low=0, high=MAX_CARD_LIMIT),
+        }
+        mode = entry.get("mode")
+        if mode is not None:
+            if mode not in CARD_MODES:
+                raise ConfigError("%s.mode 只能是 %s，或者整个不写（= 不限）：%r"
+                                  % (where, " / ".join(CARD_MODES), mode))
+            rule["mode"] = mode
+        # ★ 指标本身就只在某一种模式下有意义时，模式**必须**是那一种 ——
+        #   「闯关的杀怪数 + 对战」写得出来但永远不成立，那正是 D17a 说的
+        #   「配得出来却永远命中不了」的那种档。
+        limited = card_metric_modes(metric)
+        if limited and rule.get("mode") not in limited:
+            raise ConfigError(
+                "%s：指标「%s」只有%s才有意义，模式得选它"
+                % (where, CARD_METRIC_ZH[metric],
+                   " / ".join(CARD_MODE_ZH.get(m, m) for m in limited)))
+        for key, low, high in (("stage", 1, None),
+                               ("difficulty", 1, max(DIFFICULTY_ZH)),
+                               ("min_shots", 0, MAX_CARD_THRESHOLD)):
+            value = entry.get(key)
+            if value is not None:
+                rule[key] = _as_int(value, "%s.%s" % (where, key), low, high)
+        # 对战没有关卡和难度（同 `drops` 的口径，管理页那两个下拉也跟着锁）。
+        if rule.get("mode") == "pvp":
+            for key in ("stage", "difficulty"):
+                if rule.pop(key, None) is not None:
+                    raise ConfigError("%s：对战没有关卡和难度，%s 不该写"
+                                      % (where, key))
+        weapon = entry.get("weapon")
+        if weapon is not None:
+            weapon = _as_int(weapon, where + ".weapon", low=1)
+            if weapon not in WEAPON_CARDS:
+                raise ConfigError("%s.weapon 不是武器族号：%r（认得的是 %s）"
+                                  % (where, weapon,
+                                     "、".join(str(r) for r in WEAPON_CARDS)))
+            if not card_metric_needs_weapon(metric):
+                raise ConfigError("%s：指标「%s」和武器无关，不该写 weapon"
+                                  % (where, CARD_METRIC_ZH[metric]))
+            rule["weapon"] = weapon
+        if entry.get("note"):
+            rule["note"] = str(entry["note"])
+        out.append(rule)
+    return out
+
+
 # --------------------------------------------------------------------------
 # 字段描述表 —— 管理页照着它生成输入框
 # --------------------------------------------------------------------------
@@ -1327,6 +1864,76 @@ SCHEMA = {
              "help": "只给人看，服务端不读它"},
         ],
     },
+    # ------------------------------------------------------------- 称号卡片
+    # ★ 这一页是**一张卡片一行**，17 行定死（V0.3商店）：卡片是原版物品表里
+    #   就有的那 17 件，加不出新的，所以没有「添加」也没有删除 ——
+    #   「这一版不给」= 把「能获得」关掉。管理页一打开照 catalog 把文件里
+    #   缺的补齐（`fillCards`，同「金币 / 经验」那 30 格的套路）。
+    "cards": {
+        "list_key": "rules",
+        #: ★ 页名是用户 2026-09-13 点的名字，和「材料掉落」成对。
+        "title": "称号卡片掉落",
+        "unit": "张卡片",
+        # ★ 说明里只认一种记号：`**这样**` 画成粗体（`admin.js` 的
+        #   `emphasised()`，V0.3商店）。别的 Markdown 一律原样显示。
+        "help": [
+            "一张卡片只有一条获得规则 —— 结算时每种卡片只发一发包，"
+            "两条规则服务端说不清该按哪一条。",
+            "关掉「能获得」= 这一版拿不到这张卡；**17 张全关掉就是整个功能停掉**，"
+            "不用重启服务端、也不用发新版客户端。",
+            "「一局内」= 这一局打到这个数就给；「玩家累计」= 账号总数"
+            "每满一个阈值给一次 —— 把阈值调高不会收回已经发出去的，"
+            "调低会在玩家下一局结算时一次性补齐。",
+            "★ 卡片的提示框上会写着这里设的条件。改完保存即刻生效，"
+            "但**已经在线的玩家要重新登录**才看得到新说明"
+            "（客户端把物品说明缓存住了）。",
+            "称号本身在「合成配方」那一页上架，这一页只管卡片怎么掉。",
+        ],
+        "fields": [
+            {"key": "card", "label": "卡片", "type": "item",
+             "kinds": ["material"], "readonly": True,
+             "help": "17 张卡片是原版定死的，加不出新的"},
+            {"key": "listed", "label": "能获得", "type": "bool"},
+            {"key": "scope", "label": "统计范围", "type": "choice",
+             "options": [{"value": key, "label": CARD_SCOPE_ZH[key]}
+                         for key in CARD_SCOPES]},
+            {"key": "mode", "label": "模式", "type": "choice",
+             "optional": True, "empty_label": "不限",
+             "options": [{"value": key, "label": CARD_MODE_ZH[key]}
+                         for key in CARD_MODES]},
+            # 关卡 / 难度只有闯关才有意义；选了对战前台会清空并锁住
+            # （和「材料掉落」那一页同一套 `PVP_LOCKED_KEYS`）。
+            {"key": "stage", "label": "关卡", "type": "choice",
+             "optional": True, "empty_label": "不限",
+             "options": [{"value": qid, "label": "%d · %s" % (qid, name)}
+                         for qid, name in sorted(QUEST_ZH.items())]},
+            {"key": "difficulty", "label": "难度", "type": "choice",
+             "optional": True, "empty_label": "不限",
+             "options": [{"value": n, "label": "%d · %s" % (n, name)}
+                         for n, name in sorted(DIFFICULTY_ZH.items())]},
+            {"key": "metric", "label": "统计指标", "type": "choice",
+             "options": [{"value": key, "label": CARD_METRICS[key][0]}
+                         for key in card_metric_keys()]},
+            {"key": "weapon", "label": "武器", "type": "choice",
+             "optional": True, "empty_label": "不限",
+             "help": "只有「某武器…」那两个指标用得上",
+             "options": weapon_card_options()},
+            {"key": "threshold", "label": "达到", "type": "int",
+             "min": 1, "max": MAX_CARD_THRESHOLD,
+             "help": "不能填 0 —— 这一页只有「达到」一种比较，0 恒成立"},
+            {"key": "min_shots", "label": "最少开枪数", "type": "int",
+             "optional": True, "min": 0, "max": MAX_CARD_THRESHOLD,
+             "help": "命中率那种比率指标的样本下限；不填 = 不要求"},
+            {"key": "win_only", "label": "只有胜利 / 通关才给", "type": "bool"},
+            {"key": "count", "label": "获得数量", "type": "int",
+             "min": 1, "max": MAX_CARD_COUNT, "suffix": "张"},
+            {"key": "limit", "label": "累计上限", "type": "int",
+             "min": 0, "max": MAX_CARD_LIMIT, "suffix": "张",
+             "help": "这个账号一辈子最多从这条规则拿几张。0 = 不限"},
+            {"key": "note", "label": "备注", "type": "text", "optional": True,
+             "help": "只给人看，服务端不读它"},
+        ],
+    },
     # ----------------------------------------------------------------- 奖励
     # ★ 这一页**不是**卡片列表，是两张二维表格（用户 2026-09-10 点的题）：
     #   对战 = 模式 × 个人/组队，闯关 = 关卡 × 难度，格子里填输 / 赢两个数；
@@ -1433,6 +2040,12 @@ _SPECS = {
     #   「装备卖出」页上那个弹窗），所以不进 `SCHEMA` / `CONFIG_FILES`。
     SELL_PRICE_FILENAME: (validate_sell_price, default_sell_price,
                           _USE_DEFAULT),
+    # ★★ 称号卡片（V0.3商店）。**必须排在最末** —— `test_shopcfg` 和
+    #   `test_backup` 都拿 `list(_SPECS)[-1]` 当「最新加的那一份」，
+    #   插在中间会让那两条用例验错东西。
+    # ★ 读不到时给**空表**（不是内置默认值）：最坏是「这一版一张卡都不掉」，
+    #   一眼看得出不对；退回默认值反而会在运营明明关掉之后偷偷又开始发卡。
+    CARDS_FILENAME: (validate_cards, default_cards, []),
 }
 
 #: ★ 每份配置一把**写锁**，护住「读盘 → 合并 → 写盘」这一段（D36）。
@@ -1470,7 +2083,7 @@ def all_write_locks():
 #: 写成人话（「物品库 · 商店货架 · …」），不用把标题再抄一遍。
 _WHICH_OF = {ITEMS_FILENAME: "items", SHOP_FILENAME: "shop",
              RECIPE_FILENAME: "recipe", DROPS_FILENAME: "drops",
-             REWARDS_FILENAME: "rewards"}
+             REWARDS_FILENAME: "rewards", CARDS_FILENAME: "cards"}
 
 #: 没有配置标签页、因而不在 `SCHEMA` 里的那些的标题（D95）。
 _TITLE_OF = {SELL_PRICE_FILENAME: "卖出价格"}
@@ -1575,6 +2188,20 @@ def sell_price(data_dir=None, _reload=False):
     return _load(SELL_PRICE_FILENAME, data_dir, _reload)
 
 
+def cards(data_dir=None, _reload=False):
+    """`[称号卡片的获得规则…]`（V0.3商店）。读不到就是空表 = 这一版不掉卡片。"""
+    return _load(CARDS_FILENAME, data_dir, _reload)
+
+
+def card_rule_of(card_id, data_dir=None):
+    """某张卡片的那条规则；没有就 `None`。★ 一张卡最多一条，所以能这么查。"""
+    rules, _warnings = cards(data_dir)
+    for rule in rules:
+        if rule.get("card") == card_id:
+            return rule
+    return None
+
+
 def invalidate(data_dir=None):
     """丢掉缓存。管理页保存之后调一下，省得等 mtime 粒度。"""
     with _lock:
@@ -1657,11 +2284,130 @@ BACKFILL_KEYS = {
     #: ★ 配方按**产物**认身份，不是配方号 —— 一个产物只能有一条配方
     #:   （`0x0606` 只带产物 id，FINDINGS §27），配方号只是行号。
     RECIPE_FILENAME: ("recipes", "result"),
+    #: ★ 称号卡片按**卡片**认身份 —— 一张卡片只有一条规则（`validate_cards`
+    #:   拦着），所以补齐不会补出重复。以后原版物品表里多一张卡片，
+    #:   这一条会把它的默认规则补进已有的文件里。
+    CARDS_FILENAME: ("rules", "card"),
 }
 
 
-def backfill_defaults(data_dir=None, apply=False):
+def apply_first_run_upgrades(created, data_dir=None):
+    """★★ **一次性升级**：这一版新加的默认值，补进老服务器已有的配置里。
+
+    返回 `{文件名: [新补的条目]}`（空 = 什么都没做）。**只做判断和写盘，
+    不打日志** —— 日志归 `app.py`（那边才有 `eventlog`）。
+
+    ★★ **「一次性」的判据是一个事件，不是标记文件、更不是计数器**（铁律 10）：
+    `created` 里有没有 `cards.json` —— 那份配置是 V0.3商店·称号卡片这一版
+    才有的，它**从无到有**的那一刻，正好就是「这台服务器第一次跑这一版」。
+
+        全新装的     cards.json 和 recipe.json 同时被建 ⇒ recipe 本来就是全的
+                     ⇒ 这一发找不到东西补，空跑
+        老服务器升级 cards.json 新建、recipe.json 已存在且缺 17 条称号配方
+                     ⇒ 补上
+        第二次启动   cards.json 已经在了 ⇒ **整个跳过**
+                     ⇒ 运营后来删掉的配方**不会自己回来**（铁律 11）
+
+    ⚠ 最后那一条正是「一次性」和「每次开服都 backfill 一遍」的区别。
+    `backfill_defaults()` 是**幂等**的，但幂等不等于一次性 —— 每次启动都叫它，
+    运营删一条它回来一条，而且没人看得出为什么。
+
+    ★ 只碰 `recipe.json`（`only=`）—— 物品库 / 商店货架的补齐不是这一版的事，
+      别顺手替用户改他别的配置。
+    """
+    if CARDS_FILENAME not in (created or ()):
+        return {}
+    added = backfill_defaults(data_dir=data_dir, apply=True,
+                              only=[RECIPE_FILENAME])
+    # ★ 同一个事件下再做一件：把「出厂名改过、而运营没动过」的那几个刷新掉
+    #   （只改名字，不加不删，所以不进上面那个 `{文件名: [新条目]}` 的回执）。
+    refresh_stale_names(data_dir=data_dir, apply=True)
+    return added
+
+
+#: ★★ **出厂默认名改过的物品**：`{itemId: 我们当初发出去的那个名字}`。
+#:
+#: 新名字**不写在这儿** —— 从设计表 `shopdefaults.name_of()` 现取，
+#: 免得同一个名字在两处各写一遍、哪天改了只改一处（D31 的同一条道理）。
+#:
+#: 这一批（用户 2026-09-13 拍板「按韩文原意改」）：2007 新浪资料页那三个译名
+#: 和韩文原意对不上，而**卡片名就是它的获得条件**，对不上会让玩家看着
+#: 「信心卡片 ← 自杀 3 次」一脸茫然。
+#:
+#:     60005 빈대（蹭吃蹭喝的人）       厄运卡片 -> 蹭分卡片
+#:     60007 팀킬쟁이（杀队友的）       乌龙卡片 -> 误伤卡片
+#:     60008 제풀쟁이（自己把自己搞死的）信心卡片 -> 自爆卡片
+RENAMED_DEFAULT_NAMES = {
+    60005: "厄运卡片",
+    60007: "乌龙卡片",
+    60008: "信心卡片",
+}
+
+
+def refresh_stale_names(data_dir=None, apply=False):
+    """把**出厂名改过、而运营没动过**的那几件物品刷成新的出厂名。
+
+    返回 `[(itemId, 盘上的旧名, 新名)]`；`apply=False`（默认）只算不写。
+
+    ★★ **判据是「盘上那个名字还等于我们当初发出去的那个」** ——
+    运营自己改过的名字**一个都不碰**（铁律 11）。这不是「拿默认值盖掉用户的
+    设置」，是「这一格他从来没碰过，而我们换了出厂值，替他带过去」。
+
+    ★ 这条判据**自带幂等**：刷完之后盘上的名字已经不等于旧名了，
+    再跑一遍就是空的。⇒ 它不需要「跑过没有」的标记。
+    ⚠ 唯一的边角：运营**手工把名字改回旧的出厂名**，那下次还会被刷走。
+      真遇到了让他改成别的写法（比如「厄运卡片 」带个空格）——
+      为这种情况再养一份迁移记录不值当。
+
+    ★ 写盘那一路和别处完全一样：先留 `*.bak-<时刻>`、过 `validate_items`、
+      拿和管理页保存 / 数据备份**同一把写锁**。
+    """
+    path = path_of(ITEMS_FILENAME, data_dir)
+    if not os.path.exists(path):
+        return []                       # 没有就该由 `ensure_files` 去生成
+    try:
+        with open(path, "r", encoding="utf-8") as fp:
+            raw = json.load(fp)
+    except (OSError, ValueError):
+        return []                       # 读不懂就别动它（D10）
+    entries = raw.get("items")
+    if not isinstance(entries, list):
+        return []
+    import shopdefaults
+    changed = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            item_id = int(entry.get("id"))
+        except (TypeError, ValueError):
+            continue
+        was = RENAMED_DEFAULT_NAMES.get(item_id)
+        if was is None or entry.get("name") != was:
+            continue                    # 不在表里 / 运营改过了 -> 不碰
+        item = shopdata.get(item_id)
+        now = shopdefaults.name_of(item) if item is not None else None
+        if not now or now == was:
+            continue                    # 设计表里也没换 -> 没事可做
+        changed.append((item_id, was, now))
+        if apply:
+            entry["name"] = now
+    if not (apply and changed):
+        return changed
+    validate_items(raw)                 # 宁可什么都不写，也不写一份读不了的
+    with write_lock(ITEMS_FILENAME):
+        shutil.copyfile(path, "%s.bak-%s"
+                        % (path, time.strftime("%Y%m%d-%H%M%S")))
+        write_json(path, raw)
+    invalidate(data_dir)
+    return changed
+
+
+def backfill_defaults(data_dir=None, apply=False, only=None):
     """把默认表里有、现有文件里**没有**的条目补进去。返回 `{文件名: [新条目]}`。
+
+    `only` 给一组文件名时只看那几份（管理页上那颗「补齐默认值」按钮
+    是按页给的，一次只补当前这一页那一份）。
 
     ★ **只增不改**：已经在文件里的条目一个字节都不动（用户改过的价格 /
     花费 / 上架开关全部原样留着，铁律 11）。**幂等** —— 补完再跑一次是空的。
@@ -1676,6 +2422,8 @@ def backfill_defaults(data_dir=None, apply=False):
     """
     added = {}
     for filename, (list_key, id_key) in BACKFILL_KEYS.items():
+        if only is not None and filename not in only:
+            continue
         path = path_of(filename, data_dir)
         if not os.path.exists(path):
             continue                    # 没有就该由 `ensure_files` 去生成

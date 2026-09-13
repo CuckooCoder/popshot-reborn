@@ -3330,13 +3330,25 @@ class AdminSellTests(_AdminCase):
                              slot["id"])
 
     def test_an_item_with_no_price_anywhere_falls_back_to_the_other_price(self):
-        # 称号既没上架商店也没有配方（D44a）—— 走「其他物品」兜底价。
+        # 消耗品既没上架商店也没有配方 —— 走「其他物品」兜底价。
+        spare = sorted(shopdata.ids_of_kind("consumable"))[0]
+        self.accounts.admin_update_account("alice", inventory={spare: 1})
+        self.as_player()
+        _status, result = self.sell(self.line(spare))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(sellprice.DEFAULTS["other_price"], result["gained"])
+
+    def test_a_title_can_be_sold_like_anything_else(self):
+        """★ 称号照样卖得掉（用户 2026-09-13：不要擅自加限制）。
+
+        它有配方 ⇒ 走「合成品」那一档，和别的合成品一个待遇。
+        """
         title_id = sorted(shopdata.ids_of_kind("title"))[0]
         self.accounts.admin_update_account("alice", inventory={title_id: 1})
         self.as_player()
         _status, result = self.sell(self.line(title_id))
         self.assertTrue(result["ok"], result)
-        self.assertEqual(sellprice.DEFAULTS["other_price"], result["gained"])
+        self.assertGreater(result["gained"], 0)
 
     def test_an_item_the_client_does_not_know_is_refused(self):
         self.as_player()

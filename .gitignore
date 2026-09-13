@@ -132,7 +132,13 @@
 # 回滚时和它们同一个勾选项。所以和它们一样不进仓库。
 /server/data/sell_price.json
 /server/data/sell_price.json.*.tmp
-# `shop-backfill apply` 写盘前留下的那一份原件（shopcfg.backfill_defaults）。
+# cards.json：称号卡片的获得条件（管理页「称号卡片掉落」，V0.3商店）。
+# ★ 第七份运营配置，和上面六份同一个待遇 —— 出厂值住在设计表
+# `shopdefaults.CARD_RULES`、开服由 ensure_files() 生成、数据备份回滚时
+# 和它们同一个勾选项。所以和它们一样不进仓库。
+/server/data/cards.json
+/server/data/cards.json.*.tmp
+# 「补齐默认值」写盘前留下的那一份原件（shopcfg.backfill_defaults）。
 /server/data/*.bak-*
 # 管理页「数据备份」的备份目录（databackup.py）：每份一个子目录，里面是
 # server/data/*.json 的原样拷贝 —— 含 accounts.json 的明文口令，和它同等敏感。

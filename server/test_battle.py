@@ -125,6 +125,40 @@ class FakeAccounts:
         account["materials"] = table
         return dict(account), []
 
+    def apply_battle(self, username, *, experience=0, money=0, materials=None,
+                     stats_mode=None, stats_gained=None, cards=None,
+                     card_targets=None):
+        """打完一局的全部所得（V0.3商店）。★ 真的加进去，理由同上。
+
+        形状和 `AccountStore.apply_battle` 一样：
+        `(账号, 被跳过的 id, 实际发出的卡片)`。累计档那个「目标 − 已发」的
+        减法也照做一遍 —— `test_battle` 里跨局的用例验的正是它。
+        """
+        import cards as cards_module
+        account = self.saved[username]
+        self.add_quest_reward(username, experience=experience, money=money)
+        if stats_mode and stats_gained:
+            account["battle_stats"] = cards_module.merge_stats(
+                account.get("battle_stats") or {}, stats_mode, stats_gained)
+        grants = dict(account.get("card_grants") or {})
+        give = dict((int(k), int(v)) for k, v in (cards or {}).items()
+                    if int(v) > 0)
+        for card, target in (card_targets or {}).items():
+            short = max(0, int(target) - int(grants.get(str(card), 0)))
+            if short:
+                give[int(card)] = short
+            else:
+                give.pop(int(card), None)
+        if materials or give:
+            merged = dict(materials or {})
+            for card, count in give.items():
+                merged[card] = merged.get(card, 0) + count
+            self.add_materials(username, merged)
+        for card, count in give.items():
+            grants[str(card)] = grants.get(str(card), 0) + int(count)
+        account["card_grants"] = grants
+        return dict(account), [], give
+
     def set_quest_cleared(self, username, quest_id, difficulty):
         self.cleared.append((username, quest_id, difficulty))
         return dict(self.saved[username])
@@ -1860,8 +1894,8 @@ class MaterialRewardSettlementTests(BattleRoom):
         self.assertEqual({str(self.BLACK_BEAD): 1},
                          self.accounts.saved["alice"]["materials"])
 
-    def test_the_slot_is_always_the_material_column(self):
-        # 槽 1 是「称号卡片」栏，本版不做 —— 一发都不该发出去。
+    def test_the_slot_is_the_material_column_when_no_card_is_earned(self):
+        """没有一张卡片达标时，槽 1 一发都不该出现（`cards.json` 是空的）。"""
         self.clear_quest()
         self.end()
         for conn in (self.alice, self.bob):
@@ -1898,6 +1932,151 @@ class MaterialRewardSettlementTests(BattleRoom):
         # 没材料时一发都不发，结算的其余部分一个字节不变。
         self.assertEqual([], self.rewards(self.alice))
         self.assertEqual(2, len(bodies(self.alice, OP_REP_GAME_RESULT)))
+
+
+class CardRewardSettlementTests(BattleRoom):
+    """★ 结算界面「合成材料」**下面**那一栏 —— 槽 1（V0.3商店 · 称号卡片）。
+
+    `0x041c` 的线偏移 +4 就是槽类型（FINDINGS §3）：`0` 合成材料 / `1` 称号卡片。
+    这一栏的协议早就逆出来了，V0.3 前半列在「本版不做」里，这一版接上。
+    """
+
+    session_type = 1
+    arguments = (0, 3, 0)       # 个人战 + 夺分模式
+    CARD = 60004                # 幸运卡片
+
+    def setUp(self):
+        import tempfile
+        import shopcfg
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        saved_dir = shopcfg.DATA_DIR
+        shopcfg.DATA_DIR = self.tmp.name
+        self.addCleanup(shopcfg.invalidate)
+        self.addCleanup(setattr, shopcfg, "DATA_DIR", saved_dir)
+        self.write_rules([
+            {"card": self.CARD, "listed": True, "scope": "match",
+             "mode": "pvp", "metric": "guards", "threshold": 3,
+             "win_only": False, "count": 1, "limit": 0},
+        ])
+        super().setUp()
+
+    def write_rules(self, rules):
+        import shopcfg
+        shopcfg.write_json(
+            shopcfg.path_of(shopcfg.CARDS_FILENAME, self.tmp.name),
+            {"format": 1, "rules": rules})
+        shopcfg.invalidate()
+
+    def guard(self, seat, times):
+        """让这个座位「格挡」了 N 次 —— 按状态翻转数，所以要开-关-开-关。"""
+        for _ in range(times):
+            self.quest.note_guard(seat, True)
+            self.quest.note_guard(seat, False)
+
+    def end(self, conn=None):
+        gameserver.Conn.on_game_packet(conn or self.alice, OP_END_QUEST, b"")
+
+    def rewards(self, conn):
+        return [reward_fields(b)
+                for b in bodies(conn, gameserver.OP_REWARD_RECEIVED)]
+
+    def test_a_qualifying_game_ships_the_card_in_slot_one(self):
+        self.guard(0, 3)
+        self.end()
+        mine = [row for row in self.rewards(self.alice) if row[0] == 0]
+        self.assertEqual([(0, gameserver.REWARD_SLOT_TITLE, self.CARD, 1)],
+                         mine)
+
+    def test_the_card_goes_into_the_material_bucket(self):
+        """★ 卡片的 `kind` 就是 `material` ⇒ 和合成材料住同一个桶、
+        合成时也从同一个桶扣。"""
+        self.guard(0, 3)
+        self.end()
+        self.assertEqual({str(self.CARD): 1},
+                         self.accounts.saved["alice"]["materials"])
+        self.assertEqual({str(self.CARD): 1},
+                         self.accounts.saved["alice"]["card_grants"])
+
+    def test_missing_the_threshold_ships_nothing(self):
+        self.guard(0, 2)
+        self.end()
+        self.assertEqual([], self.rewards(self.alice))
+
+    def test_a_card_packet_comes_before_the_result_and_the_end_game(self):
+        """★ 和材料那一栏同一条硬约束：`0x041c` 写的是 `GameContext`，
+        关卡一结束（`0x0411`）它就变 0，那时再发是空指针（§3）。"""
+        self.guard(0, 3)
+        self.end()
+        ops = [op for op in opcodes(self.alice)
+               if op in (gameserver.OP_REWARD_RECEIVED,
+                         OP_REP_GAME_RESULT, OP_END_GAME)]
+        last_reward = len(ops) - 1 - ops[::-1].index(
+            gameserver.OP_REWARD_RECEIVED)
+        self.assertLess(last_reward, ops.index(OP_REP_GAME_RESULT))
+        self.assertLess(last_reward, ops.index(OP_END_GAME))
+
+    def test_a_rule_that_is_switched_off_ships_nothing(self):
+        """★ 运营的急刹车：关掉「能获得」，**不用重启**下一局就停。"""
+        self.write_rules([
+            {"card": self.CARD, "listed": False, "scope": "match",
+             "mode": "pvp", "metric": "guards", "threshold": 3,
+             "win_only": False, "count": 1, "limit": 0},
+        ])
+        self.guard(0, 9)
+        self.end()
+        self.assertEqual([], self.rewards(self.alice))
+
+    def test_settling_twice_never_ships_twice(self):
+        """`quest.settled` 挡着 —— 房里六个人各发一发 `0x040f`。"""
+        self.guard(0, 3)
+        self.end()
+        before = len(self.rewards(self.alice))
+        self.end(self.bob)
+        self.assertEqual(before, len(self.rewards(self.alice)))
+        self.assertEqual({str(self.CARD): 1},
+                         self.accounts.saved["alice"]["materials"])
+
+    def test_a_total_scope_rule_pays_only_when_it_crosses_the_line(self):
+        """累计档（里程碑）：不到线不发，跨线那一局发一张，再打一局不重发。"""
+        self.write_rules([
+            {"card": self.CARD, "listed": True, "scope": "total",
+             "mode": "pvp", "metric": "guards", "threshold": 5,
+             "win_only": False, "count": 1, "limit": 0},
+        ])
+        self.guard(0, 3)
+        self.end()
+        self.assertEqual([], self.rewards(self.alice), "3 < 5，这一局不该发")
+        stats = self.accounts.saved["alice"]["battle_stats"]
+        self.assertEqual(3, stats["pvp"]["guards"])
+
+        # 第二局：累计到 6，跨过 5 那条线 ⇒ 发一张。
+        self.restart()
+        self.guard(0, 3)
+        self.end()
+        mine = [row for row in self.rewards(self.alice) if row[0] == 0]
+        self.assertEqual([(0, gameserver.REWARD_SLOT_TITLE, self.CARD, 1)],
+                         mine)
+
+        # 第三局：累计到 9，还没到 10 ⇒ 一张都不该再发（幂等）。
+        self.restart()
+        self.guard(0, 3)
+        self.end()
+        self.assertEqual([], self.rewards(self.alice))
+        self.assertEqual({str(self.CARD): 1},
+                         self.accounts.saved["alice"]["card_grants"])
+
+    def restart(self):
+        """再开一局：清掉上一局的包和 `RoomQuest`，账号原样留着。
+
+        ★ `self.quest` 是只读属性（`self.room.quest` 的别名），所以换的是
+        **房间上那一份** —— 换完 `self.quest` 自然指向新的。
+        """
+        for conn in (self.alice, self.bob):
+            conn.sent[:] = []
+            conn.settled = False
+            conn.account = dict(self.accounts.saved[conn.account_name])
+        self.room.quest = gameserver.RoomQuest(seats=[0, 1])
 
 
 class PvpSettlementTests(BattleRoom):
@@ -2394,6 +2573,241 @@ class PvpTeamKillTests(BattleRoom):
         room.seats[1].team = room.seats[0].team
         self.kill(0, 1)
         self.assertEqual([0] * 6, self.quest.kills)
+
+
+class BattleStatsTests(BattleRoom):
+    """★ 本局战绩（称号卡片系统，V0.3商店）。
+
+    这一组钉的是「服务端能不能数清楚一局里发生了什么」—— 卡片发不发全靠它。
+    两个来源：`record_kill()`（杀敌 / 杀怪 / 误伤 / 自杀）和
+    `note_battle_stats()`（开枪 / 命中 / 伤害 / 格挡 / 突击技）。
+    """
+
+    session_type = 1
+    arguments = (1, 3, 0)       # 组队战 + 夺分模式（误伤那几条要它）
+
+    def kill(self, killer_seat, victim_seat, deaths=0):
+        gameserver.Conn.on_game_packet(
+            (self.alice, self.bob)[victim_seat], OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=victim_seat * 100000 + 100001,
+                            seat=victim_seat, arg=killer_seat, deaths=deaths))
+
+    @staticmethod
+    def peer(seat, inner, body=b""):
+        """一发 `UdpPacket`：头 12 字节（`+1` = 发送方座位、`+10` = 内层 opcode）。"""
+        head = bytearray(12)
+        head[0] = 0x7F
+        head[1] = seat & 0xFF
+        head[2] = 0xFF
+        struct.pack_into("<HHHH", head, 4, 0, 0, 0, inner)
+        return bytes(head) + body
+
+    def feed(self, seat, inner, body=b""):
+        gameserver.Conn.note_battle_stats(self.alice, self.peer(seat, inner, body))
+
+    @staticmethod
+    def fire_body(ammo):
+        return struct.pack("<BBiffffi", 10, 0, ammo, 1.0, 2.0, 0.5, 1.0, 1)
+
+    @staticmethod
+    def explode_body(target, damage, flags=0):
+        return struct.pack("<iiffiif", 7, target, 0.0, 0.0, 0, flags,
+                           float(damage))
+
+    @staticmethod
+    def splash_body(target, damage):
+        return (struct.pack("<iifBff", 7, target, float(damage), 0, 0.0, 0.0)
+                + b"\x00" * 12)
+
+    @staticmethod
+    def handle_of(seat):
+        return seat * 100000 + 100001
+
+    # -- record_kill 那四个计数器 ----------------------------------------
+    def test_killing_an_opponent_counts_as_an_enemy_kill(self):
+        self.kill(0, 1)
+        self.assertEqual(1, self.quest.enemy_kills[0])
+        self.assertEqual(0, self.quest.team_kills[0])
+        self.assertEqual(0, self.quest.suicides[0])
+
+    def test_killing_a_team_mate_counts_separately(self):
+        room = gameserver.Conn.lobby_room(self.alice)
+        room.seats[1].team = room.seats[0].team
+        self.quest.kills[0] = 2
+        self.kill(0, 1)
+        self.assertEqual(1, self.quest.team_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual(1, self.quest.kills[0], "净分照旧要扣")
+
+    def test_a_suicide_counts_even_when_the_score_is_already_zero(self):
+        """★★ 回归钉子：统计必须记在 `kills <= 0` 那条**早退的前面**。
+
+        客户端在分数已经是 0 时确实「整个函数什么都不做」（`0x506eba`），
+        但「他这一局把自己炸死了几次」照样是事实 —— 自爆卡片就数这个。
+        """
+        self.assertEqual(0, self.quest.kills[0])
+        # ★ 两发的「死亡次数」必须不同 —— 同一个 `(句柄, 次数)` 会被
+        #   `dead_events` 当重复上报吃掉（那是另一条正确的规矩）。
+        self.kill(0, 0, deaths=0)
+        self.kill(0, 0, deaths=1)
+        self.assertEqual(2, self.quest.suicides[0])
+        self.assertEqual([0] * 6, self.quest.kills)
+
+    def test_a_team_kill_counts_even_when_the_score_is_already_zero(self):
+        room = gameserver.Conn.lobby_room(self.alice)
+        room.seats[1].team = room.seats[0].team
+        self.kill(0, 1)
+        self.assertEqual(1, self.quest.team_kills[0])
+        self.assertEqual([0] * 6, self.quest.kills)
+
+    def test_killing_a_monster_counts_as_a_mob_kill(self):
+        """闯关那一路：受害者不是座位 ⇒ 客户端一分不加，但「杀了几只怪」要记。"""
+        self.quest.last_roh[0] = 110001
+        self.assertEqual(0, self.quest.record_kill(0, 0xFF))
+        self.assertEqual(1, self.quest.mob_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual(1, self.quest.weapon_stats[(0, 110001)]["kills"])
+
+    def test_a_kill_is_credited_to_the_weapon_last_fired(self):
+        """口径照抄客户端 `GetLastBulletROHIdx()`（武器称号比的就是它）。"""
+        self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1000020))
+        self.kill(0, 1)
+        self.assertEqual(1, self.quest.weapon_stats[(0, 110002)]["kills"])
+
+    def test_a_kill_with_no_known_weapon_is_not_credited_anywhere(self):
+        """商城角色的枪 / 突击技没有 ROH —— 不许拿 `None` 当 key 塞进字典。"""
+        self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1100010))
+        self.kill(0, 1)
+        self.assertIsNone(self.quest.last_roh[0])
+        self.assertEqual({}, self.quest.weapon_stats)
+
+    # -- note_battle_stats ------------------------------------------------
+    def test_a_heartbeat_is_ignored_before_anything_is_parsed(self):
+        """心跳占绝大部分流量，必须在第一句就掉头走（而且不能抛）。"""
+        self.feed(0, 0x4001, b"\x00" * 16)
+        self.feed(0, 0x4001, b"")            # 连 body 都没有也不许抛
+        self.assertEqual([0] * 6, self.quest.shots)
+
+    def test_firing_counts_shots_and_remembers_the_weapon(self):
+        for _ in range(3):
+            self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1000010))
+        self.assertEqual(3, self.quest.shots[0])
+        self.assertEqual(110001, self.quest.last_roh[0])
+        self.assertEqual(3, self.quest.weapon_stats[(0, 110001)]["shots"])
+
+    def test_a_hit_on_a_player_counts_as_a_hit(self):
+        self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1000010))
+        self.feed(0, gameserver.PEER_OP_EXPLODE,
+                  self.explode_body(self.handle_of(1), 7))
+        self.assertEqual(1, self.quest.hits[0])
+        self.assertEqual(7, self.quest.damage_out[0])
+        self.assertEqual(7, self.quest.weapon_stats[(0, 110001)]["damage"])
+
+    def test_the_attack_bonus_flag_counts_as_a_crit(self):
+        """★★ 玩家嘴里的「暴击」= **攻击加成那 15% 掷点过了**（用户 2026-09-13）。
+
+        客户端算完伤害把它写进 `rpExplode` 的 `flags & 0x10`
+        （伤害函数 `0x4806bf` 的 `0x48080d mov [ebp-4], 0x10`，V0.3商店 §102）
+        —— 服务端**直接看得到**，不用猜伤害数字。
+
+        ⚠ 别和 `EquipBonus` 的 `Critical`（idx 3）搞混：那个是死属性，
+        原版永远不触发。
+        """
+        target = self.handle_of(1)
+        self.feed(0, gameserver.PEER_OP_EXPLODE, self.explode_body(target, 5))
+        self.assertEqual(0, self.quest.crits[0], "没那一位就不是暴击")
+        self.feed(0, gameserver.PEER_OP_EXPLODE, self.explode_body(
+            target, 9, flags=gameserver.EXPLODE_FLAG_ATTACK_BONUS))
+        self.assertEqual(1, self.quest.crits[0])
+        self.assertEqual(2, self.quest.hits[0], "暴击照样是一次命中")
+        self.assertEqual(14, self.quest.damage_out[0])
+
+    def test_the_other_flag_bits_are_not_crits(self):
+        """同一个 flags 字里还有防御加成 / ×0.75 / 幸运免伤那几位（§102）。"""
+        target = self.handle_of(1)
+        for flags in (0x1, 0x4, 0x8, 0x100, 0x200, 0x400, 0x800):
+            self.feed(0, gameserver.PEER_OP_EXPLODE,
+                      self.explode_body(target, 3, flags=flags))
+        self.assertEqual(0, self.quest.crits[0])
+
+    def test_a_splash_hit_is_never_a_crit(self):
+        """`rpSplashDamaged` 根本没有 flags 字段（§5.4c）—— 看不到就是看不到。"""
+        self.feed(0, gameserver.PEER_OP_SPLASH_DAMAGED,
+                  self.splash_body(self.handle_of(1), 4))
+        self.assertEqual(0, self.quest.crits[0])
+
+    def test_a_miss_is_neither_a_hit_nor_damage(self):
+        """打空：目标句柄查不到、伤害 0 —— 两个数都不许动。"""
+        self.feed(0, gameserver.PEER_OP_EXPLODE, self.explode_body(0, 0))
+        self.assertEqual(0, self.quest.hits[0])
+        self.assertEqual(0, self.quest.damage_out[0])
+
+    def test_breaking_a_crate_is_damage_but_not_a_hit(self):
+        """★ 可破坏物和怪的句柄也会出现在 `+4`（packet_api §5.4c）。
+
+        砸箱子算命中的话「命中率」这个指标就没意义了。
+        """
+        self.feed(0, gameserver.PEER_OP_SPLASH_DAMAGED,
+                  self.splash_body(4242, 3))
+        self.assertEqual(0, self.quest.splash_hits[0])
+        self.assertEqual(3, self.quest.damage_out[0])
+
+    def test_a_splash_hit_on_a_player_counts(self):
+        self.feed(0, gameserver.PEER_OP_SPLASH_DAMAGED,
+                  self.splash_body(self.handle_of(1), 4))
+        self.assertEqual(1, self.quest.splash_hits[0])
+        self.assertEqual(0, self.quest.hits[0], "溅射和直接命中分开记")
+
+    def test_dashes_are_counted(self):
+        self.feed(0, gameserver.PEER_OP_DASH,
+                  struct.pack("<BbBff", 0, 1, 0, 0.0, 0.0))
+        self.assertEqual(1, self.quest.dashes[0])
+
+    def test_guards_are_counted_by_state_flips_not_by_packets(self):
+        """★ 铁律 10：`rpGuard` 报的是**状态**，按包数数会让连点的人刷爆。"""
+        for flag in (1, 1, 1):
+            self.feed(0, gameserver.PEER_OP_GUARD, struct.pack("<BB", 0, flag))
+        self.assertEqual(1, self.quest.guards[0])
+        self.feed(0, gameserver.PEER_OP_GUARD, struct.pack("<BB", 0, 0))
+        self.feed(0, gameserver.PEER_OP_GUARD, struct.pack("<BB", 0, 1))
+        self.assertEqual(2, self.quest.guards[0])
+
+    def test_a_short_body_is_ignored_instead_of_raising(self):
+        """客户端乱发 / 截断的包不能带走一条连接。"""
+        for inner in (gameserver.PEER_OP_FIRE, gameserver.PEER_OP_EXPLODE,
+                      gameserver.PEER_OP_SPLASH_DAMAGED,
+                      gameserver.PEER_OP_GUARD):
+            self.feed(0, inner, b"\x01")
+        self.assertEqual([0] * 6, self.quest.shots)
+        self.assertEqual([0] * 6, self.quest.guards)
+
+    def test_stats_are_credited_to_the_header_seat_not_the_body(self):
+        """发送方座位取包头 `+1` —— body 第一格各包含义不同，不能拿它当座位。"""
+        self.feed(3, gameserver.PEER_OP_FIRE, self.fire_body(1000010))
+        self.assertEqual(1, self.quest.shots[3])
+        self.assertEqual(0, self.quest.shots[0])
+
+    def test_picking_up_a_heart_is_counted(self):
+        handle = 0x5001
+        self.quest.item_handles[handle] = gameserver.HEART_ITEM_ID
+        self.assertTrue(self.quest.claim_item(handle, 0))
+        self.assertEqual(1, self.quest.hearts[0])
+
+    def test_picking_up_a_coin_does_not_count_as_a_heart(self):
+        handle = 0x5002
+        self.quest.item_handles[handle] = 10101
+        self.assertTrue(self.quest.claim_item(handle, 0))
+        self.assertEqual(0, self.quest.hearts[0])
+        self.assertEqual(1, self.quest.coins[0])
+
+    def test_the_character_handle_formula_matches_botsync(self):
+        """★ `peer_target_seat()` 是 `botsync.handle_seat()` 的第二份 —— 钉住它们一致。"""
+        import botsync
+        for seat in range(gameserver.ROOM_SEAT_COUNT):
+            handle = botsync.character_handle(seat)
+            self.assertEqual(seat, gameserver.peer_target_seat(handle))
+        self.assertIsNone(gameserver.peer_target_seat(0))
+        self.assertIsNone(gameserver.peer_target_seat(123456))
 
 
 class SurvivalFinishTests(BattleRoom):

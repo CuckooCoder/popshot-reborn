@@ -264,10 +264,29 @@ class QuoteTests(_PriceCase):
                           for slot in recipe["materials"]}, got["materials"])
 
     def test_anything_else_falls_back_to_the_other_price(self):
-        title_id = sorted(shopdata.ids_of_kind("title"))[0]
-        got = self.quote(title_id)
+        """既不是材料、货架上没有、也没有配方的那些（消耗品 / 礼包 / 钥匙）。"""
+        spare = [item_id for item_id in sorted(shopdata.ids_of_kind("consumable"))
+                 if item_id not in self.shop and item_id not in self.recipes]
+        self.assertTrue(spare, "物品表里居然没有一件「其他物品」可以验")
+        got = self.quote(spare[0])
         self.assertEqual(sellprice.SOURCE_OTHER, got["source"])
         self.assertEqual(self.prices["other_price"], got["unit"])
+
+    def test_a_title_with_a_recipe_sells_at_the_recipe_price(self):
+        """★ 称号**照样卖得掉**（用户 2026-09-13 拍板，推翻 D103）。
+
+        有配方的走第三条分支（`配方花费 × 百分比`），和别的合成品一个待遇；
+        嫌高是运营在「⚙ 卖出价格设置」里调百分比的事，不该在代码里立规矩。
+        """
+        made = [t for t in sorted(shopdata.ids_of_kind("title"))
+                if t in self.recipes]
+        self.assertTrue(made, "默认配方里居然一个称号都没有")
+        for title_id in made:
+            got = self.quote(title_id)
+            self.assertTrue(got["sellable"], title_id)
+            self.assertEqual(sellprice.SOURCE_RECIPE, got["source"], title_id)
+            self.assertEqual(self.recipes[title_id]["cost"] * 95 // 100,
+                             got["unit"], title_id)
 
     def test_something_the_client_does_not_know_is_not_sellable(self):
         got = self.quote(999999)
@@ -276,7 +295,11 @@ class QuoteTests(_PriceCase):
 
     def test_every_ownable_item_has_a_price(self):
         """★ 808 件可拥有物品**一件不落**都卖得掉 —— 玩家手上可能有任何一件
-        （管理员发的、掉落的、以前买的），「这件东西没有价」是个死胡同。"""
+        （管理员发的、掉落的、以前买的），「这件东西没有价」是个死胡同。
+
+        ★ **一个例外都没有**（用户 2026-09-13：不要擅自加限制）——
+        称号也在里面。
+        """
         quotes = sellprice.quote_all(self.prices)
         self.assertTrue(all(row["sellable"] for row in quotes.values()))
         owned = {item_id for kind in shopdata.kinds()

@@ -319,6 +319,40 @@ class RealTableTests(unittest.TestCase):
             if weapon is not None:
                 self.assertIn(weapon.id, usable)
 
+    def test_every_roh_is_one_of_the_nine_weapon_cards(self):
+        """武器族号只有 9 个取值，而且**就是 9 张武器卡片的 id**（V0.3商店 §37）。
+
+        称号卡片的 `weapon_*` 指标整条链压在这上面：卡片 id == `ROH` ==
+        客户端 `GetLastBulletROHIdx()` 比的那个数。多出第十个值就说明
+        提取口径变了，那几条默认规则会静默失效。
+        """
+        tagged = 0
+        for raw in weapondata.STORE.table()["weapons"].values():
+            if "roh" not in raw:
+                continue
+            tagged += 1
+            self.assertIn(raw["roh"], weapondata.WEAPON_ROH, raw["section"])
+        self.assertEqual(127, tagged)      # 228 节里带 ROH 的那些
+
+    def test_roh_of_covers_the_three_base_characters(self):
+        """基础三角色的 9 把主武器**一把不落**地映射到自己那张卡片上。
+
+        ⚠ 同时钉住反面：商城角色自带的枪**没有** ROH（原版数据就没写）——
+        用商城角色打拿不到武器卡片，这是既成事实，不是回归。
+        """
+        want = {1000010: 110001, 1000020: 110002, 1000030: 110003,
+                1001010: 120001, 1001020: 120002, 1001030: 120003,
+                1002010: 130001, 1002020: 130002, 1002030: 130003}
+        for ammo, roh in want.items():
+            self.assertEqual(roh, weapondata.roh_of(ammo), ammo)
+        # D / R / F 变体和 SE 跟着本族走（玩家在商店买的就是这些）。
+        self.assertEqual(110001, weapondata.roh_of(1000015))   # 리볼버 D1
+        self.assertEqual(110001, weapondata.roh_of(1000011))   # 리볼버 SE
+        # 商城角色 / 突击技 / 表里根本没有的 id —— 三条都得是 None，不能抛。
+        self.assertIsNone(weapondata.roh_of(1100010))          # ch100-01
+        self.assertIsNone(weapondata.roh_of(1003010))          # CH03-01
+        self.assertIsNone(weapondata.roh_of(999999))
+
     def test_known_weapon_matches_the_original_ini(self):
         """`ch02-01`（角色 2 的基础枪）—— 拿它当基准，产物格式变了会炸。
         `Damage=3` 和语料里 `rpExplode +24` 的最小值 3.0 正好对上（§43）。"""

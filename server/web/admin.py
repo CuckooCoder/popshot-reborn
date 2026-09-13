@@ -242,6 +242,9 @@ CONFIG_FILES = {
     "shop": shopcfg.SHOP_FILENAME,
     "recipe": shopcfg.RECIPE_FILENAME,
     "drops": shopcfg.DROPS_FILENAME,
+    # ★ 「称号卡片」紧挨着「材料掉落」（用户 2026-09-13）：两页回答的是同一个
+    #   问题「打完一局能拿到什么」，一个管材料、一个管卡片。
+    "cards": shopcfg.CARDS_FILENAME,
     "rewards": shopcfg.REWARDS_FILENAME,
 }
 
@@ -252,6 +255,7 @@ CONFIG_VALIDATORS = {
     "shop": shopcfg.validate_shop,
     "recipe": shopcfg.validate_recipes,
     "drops": shopcfg.validate_drops,
+    "cards": shopcfg.validate_cards,
     "rewards": shopcfg.validate_rewards,
 }
 
@@ -439,6 +443,17 @@ _catalog_cache = None
 _catalog_lock = threading.Lock()
 
 
+def invalidate_catalog():
+    """丢掉物品表缓存 —— **每一处写运营配置的地方都要叫一声**（V0.3商店）。
+
+    理由见 `catalog()` 的 docstring：称号卡片那 17 条 `desc` 是现算的。
+    重算一次约 800 件、几十毫秒，而且只发生在有人按保存 / 回滚的时候。
+    """
+    global _catalog_cache
+    with _catalog_lock:
+        _catalog_cache = None
+
+
 def icon_index():
     """图集索引 `{"size","cols","width","height","cells":{icon名: 格号}}`。
 
@@ -471,6 +486,12 @@ def catalog():
 
     算一次留着：`shop_items.json` 随代码走，运行期间不会变。约 800 件、
     序列化后 145 KB 上下，页面登录后取一次。
+
+    ⚠⚠ **有一样东西是会变的**（V0.3商店）：17 张称号卡片的 `desc` 是从
+    `cards.json` / `recipe.json` **现算**的（怎么拿 + 能合成什么），
+    运营在页面上改完就该变。⇒ 写配置的那两处（保存 / 数据回滚）
+    必须叫一声 `invalidate_catalog()`，前台的「↻ 刷新」也会连带重取物品表。
+    不这么做的症状是「浮窗里那句话一直停在登录那一刻」，**而且不报错**。
 
     ★ `desc` 就是**游戏里提示框那段说明**（`shopcfg.item_desc_zh`，和
     `0x0501` 的 `ItemInfo+0x18` / `0x0500` 的 `ShopStock+0x18` 同源）——
@@ -1309,6 +1330,14 @@ class AdminRoutes:
             #   把文件里缺的档位补出来（和物品库的 `fillItems()` 一个套路）——
             #   那一页是两张固定的二维表格，格子不能因为文件里少一行就没了。
             "reward_defaults": shopcfg.reward_defaults(),
+            # ★ 称号卡片那一页同一个套路（V0.3商店）：17 张卡片是原版定死的，
+            #   页面照这份把文件里缺的补出来（`fillCards()`）—— 文件里少一行
+            #   不该让那张卡片从画面上消失，运营会以为它不存在。
+            "card_defaults": shopcfg.default_cards()["rules"],
+            # ★ 统计指标表：哪些指标带武器、哪些只在一种模式下有意义 ——
+            #   前台照它锁「武器」和「模式」两个下拉（同 `PVP_LOCKED_KEYS` 的道理）。
+            "card_metrics": shopcfg.card_metrics_for_admin(),
+            "weapon_cards": list(shopcfg.WEAPON_CARDS),
             # ★ 等级曲线（D72a）：「金币 / 经验获取」的经验那一页拿它画一张
             #   **只读**参照表 —— 调「一局给多少经验」的人要看得见这些经验
             #   换算成多少级。曲线只在 `account_store` 定义一处，页面不自己算。
@@ -1513,6 +1542,9 @@ class AdminRoutes:
             # 热重载本来靠 mtime，但 mtime 的粒度可能粗到看不出这一次改动
             # —— 存完直接把缓存丢掉，下一次读一定是新的。
             shopcfg.invalidate()
+            # ★ 物品表里那 17 条卡片说明是从配置现算的（V0.3商店），
+            #   跟着一起丢；前台「↻ 刷新」会连带重取物品表。
+            invalidate_catalog()
 
         eventlog.online(f"[admin] {self._who(name)} 保存了 {filename}")
         message = f"已保存 {filename}，即刻生效（不用重启）"
@@ -1741,6 +1773,9 @@ class AdminRoutes:
         def after_write(restored):
             if databackup.ACCOUNTS_FILENAME in restored:
                 _reload_online_accounts()
+            # ★ 回滚运营配置也要丢物品表缓存（V0.3商店）：卡片说明是现算的，
+            #   不丢的话画面上那句「获得条件」还停在回滚前那一版。
+            invalidate_catalog()
 
         result = service.restore(backup_id, files, expect_admin=name,
                                  created_by=name, after_write=after_write)
