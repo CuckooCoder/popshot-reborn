@@ -6,6 +6,7 @@
 `_require_admin()` 就等于把那个接口开在公网上。
 """
 import http.cookiejar
+import io
 import json
 import os
 import re
@@ -29,6 +30,7 @@ import config as server_config                                 # noqa: E402
 import databackup                                              # noqa: E402
 import gameserver                                             # noqa: E402
 import gifthistory                                           # noqa: E402
+import lobby                                                   # noqa: E402
 import sellprice                                               # noqa: E402
 import shopcfg                                                 # noqa: E402
 import shopdata                                                # noqa: E402
@@ -801,6 +803,244 @@ class AdminAssetTests(_AdminCase):
         dupes = sorted({name for name in ids if ids.count(name) > 1})
         self.assertEqual([], dupes)
 
+    def test_the_online_dropdowns_offer_exactly_the_filters_the_server_knows(self):
+        """★ 下拉里的值和服务端 `ONLINE_FILTERS` 必须**一个不多一个不少**。
+
+        多一个：选了之后服务端认不出来，悄悄退回「全部」（`_online_filter`
+        的规矩）—— 用户以为筛了，其实没筛。
+        少一个：加了新档位却没人点得到。
+        两种都**一句报错都没有**，所以钉在这儿。
+        """
+        _status, html = self.request("/admin")
+        for select_id in ("playerOnline", "promoteOnline"):
+            block = re.search(r'<select id="%s">(.*?)</select>' % select_id,
+                              html, re.S)
+            self.assertIsNotNone(block, select_id)
+            values = re.findall(r'value="([a-z]+)"', block.group(1))
+            self.assertEqual(sorted(web_admin.ONLINE_FILTERS), sorted(values),
+                             select_id)
+
+    def test_the_place_names_cover_every_code_the_server_can_send(self):
+        """★ 位置码的中文名表（前台 `PLACE_ZH`）要盖住 `gameserver.PLACES` 全部。
+
+        漏一个的症状很轻但很怪：那一档的人被画成位置码原文（`room_quest`）
+        —— 前台留了这个兜底，但页面上冒英文就是漏了，这条会先红。
+        """
+        _status, _h, js = self.fetch("/admin/admin.js")
+        block = re.search(r'var PLACE_ZH = \{(.*?)\n\};',
+                          js.decode("utf-8"), re.S)
+        self.assertIsNotNone(block)
+        named = set(re.findall(r'(\w+):', block.group(1)))
+        self.assertEqual(set(gameserver.PLACES), named)
+
+    def test_promoting_a_player_lives_on_the_admin_page_not_the_locker_page(self):
+        """「设为管理员（运营）」搬家了（用户 2026-09-13）：它是账号管理，
+        不是仓库管理。★ 玩家仓库那张表里**不许再有**这个钮 —— 当初
+        （D40）图快放在那儿，页面看起来就乱在这一处。"""
+        _status, html = self.request("/admin")
+        # 入口在「管理员账号」页，开的是那个弹窗。
+        self.assertIn('id="promoteOpenBtn"', html)
+        self.assertIn('id="promoteModal"', html)
+        # ★ 弹窗要排在确认框 `#dialog` **前面** —— 点了按钮要在它上面再弹一层
+        #   确认框，而所有 `.modal` 同 z-index、靠 DOM 顺序分层。
+        self.assertLess(html.index('id="promoteModal"'), html.index('id="dialog"'))
+        _status, _h, js = self.fetch("/admin/admin.js")
+        js_text = js.decode("utf-8")
+        # 画玩家仓库那张表的函数里不许再出现这个钮。★ 先把 `//` 注释剥掉
+        # ——「这个钮搬走了」这句说明本身就写在那儿，连注释一起搜会误伤。
+        rows = re.search(r'function renderPlayerRows\(\) \{(.*?)\n\}',
+                         js_text, re.S)
+        self.assertIsNotNone(rows)
+        code = "\n".join(line for line in rows.group(1).splitlines()
+                         if not line.lstrip().startswith("//"))
+        self.assertNotIn("设为管理员", code)
+        self.assertNotIn("promoteToAdmin", code)
+        # 而弹窗那张表里必须有。
+        promote_rows = re.search(r'function renderPromoteRows\(\) \{(.*?)\n\}',
+                                 js_text, re.S)
+        self.assertIsNotNone(promote_rows)
+        self.assertIn("promoteToAdmin", promote_rows.group(1))
+
+    def test_every_modal_footer_has_exactly_one_gold_main_button(self):
+        """★ 弹窗底栏（`.panel-foot`）那颗**主**钮一律是金色 `.btn-primary`。
+
+        用户 2026-09-13 第四轮点的：「修改密码」窗的提交钮当时是深棕
+        （`.btn-ref`），和「添加管理员」窗的「添加」、卖出数量窗的
+        「加入待卖出」、确认框的「确定」都不一样 —— 同样是「按下去就生效」
+        的那颗钮，长得却不同。
+
+        深棕留给**工具条上那个入口钮**：那儿它要和旁边几个钮区分开；
+        进了窗之后已经没什么可混淆的，惯例优先。
+        """
+        _status, html = self.request("/admin")
+        for foot in re.findall(r'<div class="panel-foot"[^>]*>(.*?)</div>',
+                               html, re.S):
+            buttons = re.findall(r'<button class="([^"]*)"[^>]*>([^<]*)</button>',
+                                 foot)
+            if not buttons:
+                continue          # `#dialogButtons` / `#pickFoot` 由 JS 现填
+            main = [cls for cls, _text in buttons if "btn-primary" in cls]
+            self.assertEqual(
+                1, len(main),
+                "这个 panel-foot 的主钮不是正好一颗金色的：%r" % (buttons,))
+            # 底栏里不许再出现深棕 —— 那是工具条入口钮的衣服。
+            for cls, text in buttons:
+                self.assertNotIn("btn-ref", cls, text)
+
+    def test_both_password_boxes_are_confirmed_twice(self):
+        """密码输两遍（用户 2026-09-13）。★ 管理员密码是**明文**存的，而这一页
+        是唯一能改它的地方 —— 手滑打错只能上服务器改 JSON 才救得回来。
+
+        两件事一起钉：页面上四个框都在；提交前真的比过一次
+        （光有框不比 = 摆设，而且一句报错都没有）。
+        """
+        _status, html = self.request("/admin")
+        for box in ("newAdminPass", "newAdminPass2", "pwValue", "pwValue2"):
+            self.assertIn('id="%s"' % box, html)
+        _status, _h, js = self.fetch("/admin/admin.js")
+        js_text = js.decode("utf-8")
+        self.assertIn('passwordsMatch("newAdminPass", "newAdminPass2")', js_text)
+        self.assertIn('passwordsMatch("pwValue", "pwValue2")', js_text)
+        # 不一致时**一个字节都不发** —— 校验必须在 `api(...)` 之前 return。
+        for handler, first in (("addAdmin", "newAdminPass"), ("setPw", "pwValue")):
+            block = re.search(r'\$\("%s"\)\.onclick = async function \(\) \{(.*?)\n  \};'
+                              % handler, js_text, re.S)
+            self.assertIsNotNone(block, handler)
+            body = block.group(1)
+            self.assertLess(body.index("passwordsMatch"), body.index("await api"),
+                            handler)
+
+    def test_the_online_wording_has_a_single_source(self):
+        """★ 「在线（在哪）」这句话只在 `placeText()` 里拼一次。
+
+        四处各拼一遍的话，改一次说法就得改四处 —— 而漏掉的那处不会报错，
+        只会和别处说得不一样。
+        """
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        self.assertIn("function placeText(row, wrap)", js)
+        one = re.search(r"function placeText\(row, wrap\) \{.*?\n\}", js, re.S)
+        self.assertIsNotNone(one)
+        self.assertIn('"在线（" + where + "）"', one.group(0))
+        # 除了 `placeText` 自己，别处不许再出现写死的「● 在线」这类字样。
+        body = js.replace(one.group(0), "")
+        for literal in ('"● 在线"', '"○ 不在线"', '"● 在线，改完即时生效"',
+                        '" · 在线"'):
+            self.assertNotIn(literal, body, literal)
+
+    def test_every_money_box_is_wide_enough_for_eight_digits(self):
+        """金币框要装得下 8 位（用户 2026-09-13）。
+
+        默认的 `.field input[type=number]` 是 66px，实测（浏览器里量的）
+        **正好只装得下 5 位** —— 金币一过十万就看着被截断，而线上早有玩家
+        攒到六七位。104px 是实测出来的：左对齐那批 88px 就够，右对齐的奖励表格子要 99px
+        （右对齐时浏览器另给光标留一截），取最苛刻那一档再加余量。
+
+        ★ 配置页那一批（商店价格 / 合成花费）**不在这儿逐个点名** ——
+        它们由 `fieldNode` 按字段自己的单位判（`suffix === "金币"`），
+        下面那条用例守那个判据。
+        """
+        _status, html = self.request("/admin")
+        for box in ("playerMoney", "rewardMoney", "rewardExp"):
+            match = re.search(r'<input id="%s"([^>]*)>' % box, html)
+            self.assertIsNotNone(match, box)
+            self.assertIn("num-money", match.group(1), box)
+        _status, _h, raw = self.fetch("/admin/admin.css")
+        css = raw.decode("utf-8")
+        # ★ 装金币的**每一处**都得是 96px：三处各写各的，改一处忘两处时
+        #   症状是「有的页面能看全、有的还截断」，没人会报。
+        #   （`.level-table td` 那个 84px 是等级表的列宽，和金币无关。）
+        for rule in ("input[type=number].num-money { width: 104px; }",
+                     ".reward-bonus input[type=number] { width: 104px;",
+                     "flex: 0 0 auto; width: 104px; text-align: center;"):
+            self.assertIn(rule, css)
+        # ★★ 每一条都得压得过 `.field input[type=number]`（权重 (0,2,0)）——
+        #    `.reward-bonus input` 是 (0,1,1)，压不过，那条规则 2026-09-10
+        #    写下来**一直没生效**（框一直是默认的 66px），谁也没发现：
+        #    它只是比旁边窄一点、不报错。带上 `[type=number]` 才赢。
+        self.assertNotIn(".reward-bonus input {", css)
+        table_cell = re.search(r"\.reward-table td > input \{(.*?)\}", css, re.S)
+        self.assertIsNotNone(table_cell)
+        self.assertIn("width: 104px", table_cell.group(1))
+
+    def test_money_fields_are_recognised_by_their_unit_not_a_hardcoded_list(self):
+        """★ 「这一格装的是钱」的判据是字段表里的单位，不是一张写死的 key 清单。
+
+        写死清单的话，以后再加一个金币字段（第六份配置、新的奖励档位……）
+        就会**默认变回 5 位宽**，而且一句报错都没有。
+        """
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        self.assertIn('var MONEY_SUFFIX = "金币";', js)
+        self.assertIn('spec.suffix === MONEY_SUFFIX', js)
+        # 服务端字段表里确实有标着这个单位的字段（两边用的是同一个词）。
+        marked = [spec["key"]
+                  for meta in shopcfg.SCHEMA.values()
+                  for spec in meta.get("fields", [])
+                  if spec.get("suffix") == "金币"]
+        self.assertTrue(marked, "shopcfg.SCHEMA 里一个标『金币』的字段都没有？")
+
+    def test_the_admin_page_toolbar_is_split_left_and_right(self):
+        """管理员账号页的工具条（用户 2026-09-13，第二 / 第三轮）。
+
+        左边两个 = 「往名单里加一个人」的两条路；右边两个 = 「动已有的人 /
+        重读」，包在 `.tool-right` 里。
+
+        配色三档：「指定玩家为管理员」是主动作（金色）；「手动添加管理员」
+        少用，和「刷新」同一档米黄默认钮；「修改密码」穿深棕（`.btn-ref`）
+        —— 改完那个人会被踢下线，误点的代价和另外几个不一样。
+        """
+        _status, html = self.request("/admin")
+        panel = re.search(r'<section class="panel hidden fit-panel" id="adminsPanel">(.*?)</section>',
+                          html, re.S)
+        self.assertIsNotNone(panel, "管理员账号页不是 fit-panel？")
+        body = panel.group(1)
+        for button, cls in (("promoteOpenBtn", "btn btn-primary"),
+                            ("addAdminOpenBtn", "btn"),
+                            ("setPwOpenBtn", "btn btn-ref"),
+                            ("adminRefreshBtn", "btn")):
+            match = re.search(r'<button class="([^"]*)" id="%s"' % button, body)
+            self.assertIsNotNone(match, button)
+            self.assertEqual(cls, match.group(1).strip(), button)
+        # ★ 靠右那一组必须**包在一个 `.tool-right` 里**：给两个元素各写一个
+        #   `margin-left: auto`，flex 会把空隙**平分**，两个钮被拆到两处去
+        #   （玩家仓库页 2026-09-10 踩过这个，`admin.html` 里有注释）。
+        # ★ 深棕只留给**工具条上那个入口钮**；进了弹窗，底栏主钮一律金色
+        #   （见下面那条用例）。
+        right = re.search(r'<div class="tool-right">(.*?)</div>', body, re.S)
+        self.assertIsNotNone(right, "右边那一组没包进 .tool-right")
+        self.assertIn("setPwOpenBtn", right.group(1))
+        self.assertIn("adminRefreshBtn", right.group(1))
+        self.assertNotIn("promoteOpenBtn", right.group(1))
+        self.assertNotIn("addAdminOpenBtn", right.group(1))
+        # 两张表单搬进了弹窗 ⇒ 页面本体里不该再有那些输入框。
+        for box in ("newAdminName", "newAdminPass", "pwName", "pwValue"):
+            self.assertNotIn('id="%s"' % box, body)
+        self.assertIn('id="addAdminModal"', html)
+        self.assertIn('id="setPwModal"', html)
+        # 名单分页：一页 10 行，和玩家列表共用 `pagerInto`。
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        self.assertIn("pagerInto($(\"adminPager\")", js)
+        self.assertIn("size: 10", js)
+
+    def test_the_fit_shell_follows_the_panel_not_a_hardcoded_tab_list(self):
+        """★ 「面板撑满、只有列表滚」看的是**露出来那个面板带不带 `fit-panel`**。
+
+        原来是一串 `tab === "backup" || tab === "players" || …`：2026-09-13 把
+        「管理员账号」也改成这套壳时，光在 HTML 上加 `fit-panel` 那个类没用
+        —— 面板撑不满、列表也不滚，而且**一句报错都没有**。
+        """
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        self.assertIn('classList.contains("fit-panel")', js)
+        # ★ 判据只看**切 `fit` 那一句**：别处 `tab === "players"` 是「切到这页
+        #   要重新拉一次数据」，那是另一件事，不能一起禁掉。
+        toggle = re.search(r'\$\("mainArea"\)\.classList\.toggle\((.*?)\);',
+                           js, re.S)
+        self.assertIsNotNone(toggle, "找不到切 fit 的那一句")
+        self.assertNotIn("tab ===", toggle.group(1))
+
     def test_the_reward_message_default_matches_the_server(self):
         # 弹窗输入框里预填的那句和服务端「留空就用它」的那句必须是同一句 ——
         # 两边各改一处就会出现「页面上写 A、实际发的是 B」。
@@ -858,48 +1098,83 @@ class AdminAssetTests(_AdminCase):
         self.assertIsNotNone(match, "admin.js 里找不到 " + name)
         return set(re.findall(r'"([A-Za-z0-9_-]+)"', match.group(1)))
 
+    #: 标签页的**全部**归档表（一个标签必须且只能落进其中一张）。
+    #:
+    #: * `CONFIGS` —— 运营配置页（三档都看得到，玩家只读）
+    #: * `SYSTEM_ONLY_TABS` —— 只有系统管理员（数据备份 / 管理员账号）
+    #: * `EVERYONE_TABS` —— 三档都能进（装备卖出，2026-09-12）
+    #: * `EDITOR_TABS` —— 系统管理员 + 运营，玩家进不去（玩家仓库，2026-09-13）
+    #:
+    #: ★ 加一档就往这个清单里加一行，下面两条用例自动跟着走。
+    TAB_TABLES = ("CONFIGS", "SYSTEM_ONLY_TABS", "EVERYONE_TABS", "EDITOR_TABS")
+
     def test_every_tab_in_the_page_is_classified(self):
-        """★★ 每个标签都得落进三张表之一（D74；第三张 2026-09-12 加的）。
+        """★★ 每个标签都得落进 `TAB_TABLES` 之一（D74；第四张 2026-09-13 加的）。
 
         漏分类的那个：`canOpenTab` 对运营是**取反**判的（不在
         `SYSTEM_ONLY_TABS` 里就放行），于是新标签会**默认对运营开着**，
         而服务端那一侧多半根本没给他开门 —— 症状是点进去一片红，
         不是「看不到」。只读玩家那一档走的是白名单，反过来会**默认看不到**。
         两种错都不会有人报，所以在这儿钉死。
-
-        三张表：`CONFIGS`（配置页）、`SYSTEM_ONLY_TABS`（系统管理员专档）、
-        `EVERYONE_TABS`（三档都能进，「装备卖出」就是）。
         """
         _status, _h, raw = self.fetch("/admin/admin.js")
         js = raw.decode("utf-8")
         _status, html = self.request("/admin")
         tabs = set(re.findall(r'data-tab="([A-Za-z0-9_-]+)"', html))
         self.assertTrue(tabs, "页面上一个标签都没有？")
-        known = (self.js_list(js, "CONFIGS")
-                 | self.js_list(js, "SYSTEM_ONLY_TABS")
-                 | self.js_list(js, "EVERYONE_TABS"))
+        known = set()
+        for table in self.TAB_TABLES:
+            known |= self.js_list(js, table)
         self.assertEqual(set(), tabs - known,
-                         "这些标签没归档：CONFIGS / SYSTEM_ONLY_TABS / "
-                         "EVERYONE_TABS 三张表里都没有")
+                         "这些标签没归档：" + " / ".join(self.TAB_TABLES)
+                         + " 里都没有")
         # 反过来也钉一下：归了档却在页面上找不到 = 名字拼错了。
         self.assertEqual(set(), known - tabs, "这些名字在页面上没有对应的标签")
 
-    def test_the_three_tab_tables_do_not_overlap(self):
-        """★ 三张表**互不相交**（2026-09-12）。
+    def test_the_tab_tables_do_not_overlap(self):
+        """★ 这几张表**两两互不相交**（2026-09-12 起）。
 
         同一个名字落进两张表时，`canOpenTab` 的两条分支会给出不一样的答案
         （只读那条是白名单、运营那条是取反），于是「谁看得见」取决于你是
-        哪一档 —— 而这正是加第三张表时最容易犯的错：把「装备卖出」既写进
-        `EVERYONE_TABS` 又顺手留在 `SYSTEM_ONLY_TABS` 里。
+        哪一档 —— 而这正是加表时最容易犯的错：2026-09-13 把「玩家仓库」
+        挪进 `EDITOR_TABS` 时，就差点顺手把它留在 `SYSTEM_ONLY_TABS` 里。
         """
         _status, _h, raw = self.fetch("/admin/admin.js")
         js = raw.decode("utf-8")
-        configs = self.js_list(js, "CONFIGS")
-        system = self.js_list(js, "SYSTEM_ONLY_TABS")
-        everyone = self.js_list(js, "EVERYONE_TABS")
-        self.assertEqual(set(), configs & system)
-        self.assertEqual(set(), configs & everyone)
-        self.assertEqual(set(), system & everyone)
+        seen = {}
+        for table in self.TAB_TABLES:
+            for tab in self.js_list(js, table):
+                self.assertNotIn(tab, seen,
+                                 "%r 同时在 %s 和 %s 里"
+                                 % (tab, seen.get(tab), table))
+                seen[tab] = table
+
+    def test_the_locker_page_is_open_to_operators_but_not_to_players(self):
+        """「玩家仓库」开给运营（用户 2026-09-13），但**不能**开给只读玩家。
+
+        ★ 那一页能改**别人**的等级 / 金币 / 仓库，还能批量发奖 —— 对普通
+        玩家开着等于把整个服务器的存档交出去。服务端那一侧的闸因此必须是
+        `_require_editor()`（运营过、玩家 403），**不是** `_require_admin()`
+        （那个只问「登没登录」）。这条用例守前台那一半，服务端那一半由
+        `OperatorPermissionTests` / `PlayerReadOnlyTests` 守。
+        """
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        self.assertIn("players", self.js_list(js, "EDITOR_TABS"))
+        self.assertNotIn("players", self.js_list(js, "SYSTEM_ONLY_TABS"))
+        self.assertNotIn("players", self.js_list(js, "EVERYONE_TABS"))
+        # ★ 服务端：那一页的每个接口都不许再用 `_require_system_admin()`，
+        #   也不许退到只问登录的 `_require_admin()`。
+        source = io.open(web_admin.__file__, encoding="utf-8").read()
+        for name in ("_admin_player_search", "_admin_player_get",
+                     "_admin_player_save", "_admin_reward_players",
+                     "_admin_reward_send", "_admin_reward_history",
+                     "_admin_reward_history_clear"):
+            body = re.search(r"def %s\(self.*?\n(.*?)\n    def " % name,
+                             source, re.S)
+            self.assertIsNotNone(body, name)
+            self.assertIn("_require_editor()", body.group(1), name)
+            self.assertNotIn("_require_system_admin()", body.group(1), name)
 
     def test_the_config_tabs_in_the_page_match_the_server(self):
         # 前台 `CONFIGS` 和服务端 `CONFIG_FILES` 是同一份清单的两半 ——
@@ -1293,17 +1568,39 @@ class OperatorPermissionTests(_AdminCase):
         self.assertTrue(self.request("/admin/api/catalog")[1]["ok"])
         self.assertTrue(self.request("/admin/api/item?id=1120041")[1]["ok"])
 
+    def test_the_locker_page_is_open_to_operators(self):
+        """「玩家仓库」整页对运营开放（用户 2026-09-13）—— 找人 / 看资料 /
+        改资料 / 发奖 / 翻发奖记录，五件事都得真的走得通。
+
+        ★ 这一页原来是系统管理员专档（D34）。放开的前提是同一天把
+        「设为管理员（运营）」搬去了「管理员账号」页 —— 提权那颗钮和它的
+        接口仍旧关着（见下面那条 403 用例里的 `from_player`）。
+        """
+        self.accounts.register("alice", "pw1")
+        status, found = self.request("/admin/api/players?q=alice")
+        self.assertEqual(200, status)
+        self.assertTrue(found["ok"])
+        self.assertEqual(["alice"], [p["username"] for p in found["players"]])
+        # ★★ `admin_role` **不发给运营**：用它的只有「指定玩家为管理员」那个
+        #    弹窗（系统管理员专用）。发了就等于让运营从玩家列表里推断出整张
+        #    管理员名单 —— 那张名单他本来就看不到。
+        self.assertEqual([None], [p["admin_role"] for p in found["players"]])
+        self.assertTrue(self.request("/admin/api/player?name=alice")[1]["ok"])
+        self.assertTrue(self.request(
+            "/admin/api/player", {"name": "alice", "level": 3, "money": 50,
+                                  "materials": {}, "inventory": {}})[1]["ok"])
+        self.assertTrue(self.request("/admin/api/reward/players?q=")[1]["ok"])
+        self.assertTrue(self.request("/admin/api/reward/history")[1]["ok"])
+
     def test_every_system_only_api_is_403(self):
         """★★ 前台把那两个标签藏起来只是画面 —— 这条用例是**直接 POST**，
-        证明藏掉的按钮背后真的有一道门。"""
+        证明藏掉的按钮背后真的有一道门。
+
+        ★ 2026-09-13 起「玩家仓库」那七个接口**不在这张清单里**了（改成
+        运营也能用），它们由上面那条用例守。这里剩下的是「管理员账号」和
+        「数据备份」两页 —— 前者能提权、后者能回滚全服存档。
+        """
         for path, payload in (
-                ("/admin/api/players?q=a", None),
-                ("/admin/api/player?name=alice", None),
-                ("/admin/api/player", {"name": "alice", "money": 1}),
-                ("/admin/api/reward/players?q=a", None),
-                ("/admin/api/reward/send", {"players": ["alice"], "exp": 1}),
-                ("/admin/api/reward/history", None),
-                ("/admin/api/reward/history/clear", {}),
                 ("/admin/api/admins", None),
                 ("/admin/api/admins/add", {"name": "dave", "password": "pw12345"}),
                 ("/admin/api/admins/password", {"name": "carol",
@@ -1803,12 +2100,10 @@ class AdminPlayerTests(_AdminCase):
         """工具条右端那个「当前在线：N 人」（用户 2026-09-08）。
 
         ★ 这个数是**全服**的，不跟着搜索串 / 页码缩水 —— 每行那个 `online`
-          才是「这一页里谁在线」。两者同源（一次 `_online_usernames()`），
+          才是「这一页里谁在线」。两者同源（一次 `_online_places()`），
           所以列表里那些 ● 和右边那个总数永远对得上。
         """
-        real = web_admin._online_usernames
-        web_admin._online_usernames = lambda: {"alice", "bob"}
-        self.addCleanup(setattr, web_admin, "_online_usernames", real)
+        self.fake_online("alice", "bob")
         _status, everyone = self.request("/admin/api/players?q=")
         self.assertEqual(2, everyone["online_total"])
         self.assertEqual({"alice": True, "bob": True},
@@ -1822,29 +2117,129 @@ class AdminPlayerTests(_AdminCase):
         self.assertEqual(2, only_alice["online_total"])
 
     # ------------------------------------------------- 在线筛选（D75）
-    def fake_online(self, *names):
-        """把「谁在线」按住不动。真实来源是游戏服的连接表，测里没有连接。"""
-        real = web_admin._online_usernames
-        web_admin._online_usernames = lambda: set(names)
-        self.addCleanup(setattr, web_admin, "_online_usernames", real)
+    def fake_online(self, *names, **places):
+        """把「谁在线、各自在哪」按住不动。真实来源是游戏服的连接表，测里没有连接。
+
+        位置不写就算他在大厅 —— 大多数用例只关心「在不在线」。
+        要指定位置就写关键字：`fake_online(bob="play_quest")`。
+        """
+        table = {name: gameserver.PLACE_LOBBY for name in names}
+        table.update(places)
+        real = web_admin._online_places
+        web_admin._online_places = lambda: dict(table)
+        self.addCleanup(setattr, web_admin, "_online_places", real)
 
     def usernames(self, query):
         _status, result = self.request("/admin/api/players?" + query)
         self.assertTrue(result["ok"], result)
         return [p["username"] for p in result["players"]], result
 
-    def test_the_online_filter_has_three_settings(self):
-        """「全部」「在线」「不在线」（用户 2026-09-10）。
+    def test_the_online_filter_has_five_settings(self):
+        """「全部」「在线」「不在线」（D75）+「在待机」「在游戏中」（用户 2026-09-13）。
 
-        ★ 三档从 `ONLINE_FILTERS` 现取，不写死清单 —— 前台那个下拉照同一
+        ★ 五档从 `ONLINE_FILTERS` 现取，不写死清单 —— 前台那个下拉照同一
         份值发过来。
         """
-        self.fake_online("alice")
-        self.assertEqual(("all", "on", "off"), web_admin.ONLINE_FILTERS)
-        expected = {"all": ["alice", "bob"], "on": ["alice"], "off": ["bob"]}
+        # alice 在商店界面（算待机），bob 在打任务。
+        self.fake_online(alice=gameserver.PLACE_SHOP,
+                         bob=gameserver.PLACE_PLAY_QUEST)
+        self.assertEqual(("all", "on", "off", "idle", "playing"),
+                         web_admin.ONLINE_FILTERS)
+        expected = {"all": ["alice", "bob"], "on": ["alice", "bob"],
+                    "off": [], "idle": ["alice"], "playing": ["bob"]}
         for wanted in web_admin.ONLINE_FILTERS:
             found, _result = self.usernames("q=&online=" + wanted)
             self.assertEqual(expected[wanted], found, wanted)
+
+    def test_idle_and_playing_split_the_online_players_with_no_gap(self):
+        """★ 「在待机」+「在游戏中」必须**正好等于**「在线」，一个不多一个不少。
+
+        两档是从 `gameserver.PLACES` 算出来的（`_idle_places()` = 全部减去
+        「游戏中」那两档），所以以后再加一个位置码时，它要么自动归进待机、
+        要么得有人明确归进 `_playing_places()` —— 不会出现「新位置谁都筛不出来」
+        这种一句报错都没有的漏洞。
+        """
+        idle, playing = web_admin._idle_places(), web_admin._playing_places()
+        self.assertEqual(set(gameserver.PLACES), set(idle) | set(playing))
+        self.assertEqual(set(), set(idle) & set(playing))
+        # 逐个位置码走一遍接口，看它落进哪一档。
+        for place in gameserver.PLACES:
+            self.fake_online(alice=place)
+            on_idle, _r = self.usernames("q=alice&online=idle")
+            on_play, _r = self.usernames("q=alice&online=playing")
+            self.assertEqual(place in playing, on_play == ["alice"], place)
+            self.assertEqual(place in idle, on_idle == ["alice"], place)
+
+    def test_every_row_carries_where_that_player_is(self):
+        """每行那个 `place`（用户 2026-09-13）：在线的写位置码，不在线的是 None。"""
+        self.fake_online(alice=gameserver.PLACE_ROOM_BATTLE)
+        _found, result = self.usernames("q=")
+        self.assertEqual({"alice": gameserver.PLACE_ROOM_BATTLE, "bob": None},
+                         {p["username"]: p["place"] for p in result["players"]})
+
+    def test_every_place_that_shows_online_also_says_where(self):
+        """★ 四处显示在线状态的地方**都要带位置**（用户 2026-09-13 第二轮）。
+
+        玩家列表那一列早就有了；「修改仓库」弹窗、「装备卖出」页和发奖弹窗
+        左栏原来只写「在线」——它们各自从不同的接口取数，漏掉一处的症状是
+        「那一处还是只写在线」，不报错。所以按**接口**逐个钉。
+        """
+        self.fake_online(alice=gameserver.PLACE_PLAY_BATTLE)
+        # ① 玩家列表
+        _found, listed = self.usernames("q=alice")
+        self.assertEqual(gameserver.PLACE_PLAY_BATTLE,
+                         listed["players"][0]["place"])
+        # ② 「修改仓库」弹窗 / ③ 「装备卖出」页 —— 两处共用 `_player_view`
+        _status, one = self.request("/admin/api/player?name=alice")
+        self.assertTrue(one["ok"])
+        self.assertTrue(one["player"]["online"])
+        self.assertEqual(gameserver.PLACE_PLAY_BATTLE, one["player"]["place"])
+        # ④ 发奖弹窗左栏
+        _status, reward = self.request("/admin/api/reward/players?q=alice")
+        self.assertTrue(reward["ok"])
+        self.assertEqual(gameserver.PLACE_PLAY_BATTLE,
+                         reward["players"][0]["place"])
+        # 不在线的那一档：`place` 是 None，前台画「不在线」。
+        _status, off = self.request("/admin/api/player?name=bob")
+        self.assertFalse(off["player"]["online"])
+        self.assertIsNone(off["player"]["place"])
+
+    def test_the_real_connection_table_is_what_feeds_the_place_column(self):
+        """★★ 这条**不打桩** —— 上面那些用例都把 `_online_places()` 按住了，
+        于是「`_online_places()` 到底有没有真的问 `gameserver.conn_place()`」
+        这道接缝谁也没测过。接错了的症状是整列恒为「大厅」，一句报错都没有。
+
+        做法：往真的连接表里塞一条真 `Conn`（`__new__` 绕过 socket），
+        逐档改它的位置，看接口回什么。
+        """
+        conn = gameserver.Conn.__new__(gameserver.Conn)
+        conn.account_name = "alice"
+        saved = list(gameserver._conns)
+        gameserver._conns[:] = [conn]
+        self.addCleanup(gameserver._conns.__setitem__, slice(None), saved)
+        self.addCleanup(gameserver.LOBBY.reset)
+
+        # ① 房间外：`conn.place` 说了算。类级默认值是大厅。
+        _found, result = self.usernames("q=alice")
+        self.assertEqual(gameserver.PLACE_LOBBY, result["players"][0]["place"])
+        self.assertEqual(1, result["online_total"])
+        conn.place = gameserver.PLACE_SHOP
+        _found, result = self.usernames("q=alice")
+        self.assertEqual(gameserver.PLACE_SHOP, result["players"][0]["place"])
+
+        # ② 一进房间，房间态**盖过**他自报的那一格。
+        room = gameserver.LOBBY.create_room(
+            conn, session_type=gameserver.SESSION_TYPE_QUEST)
+        _found, result = self.usernames("q=alice")
+        self.assertEqual(gameserver.PLACE_ROOM_QUEST,
+                         result["players"][0]["place"])
+        gameserver.LOBBY.update_room(room, status=lobby.SESSION_STATUS_PLAYING)
+        _found, result = self.usernames("q=alice")
+        self.assertEqual(gameserver.PLACE_PLAY_QUEST,
+                         result["players"][0]["place"])
+        # 「在游戏中」那一档筛得到他，「在待机」筛不到。
+        self.assertEqual(["alice"], self.usernames("q=&online=playing")[0])
+        self.assertEqual([], self.usernames("q=&online=idle")[0])
 
     def test_the_filter_also_narrows_the_count_and_the_page_number(self):
         """★★ 筛在**服务端**、在数总数**之前**（D75）。
@@ -2163,9 +2558,10 @@ class AdminRewardTests(_AdminCase):
         self.login()
 
     def fake_online(self, *names):
-        real = web_admin._online_usernames
-        web_admin._online_usernames = lambda: set(names)
-        self.addCleanup(setattr, web_admin, "_online_usernames", real)
+        real = web_admin._online_places
+        table = {name: gameserver.PLACE_LOBBY for name in names}
+        web_admin._online_places = lambda: dict(table)
+        self.addCleanup(setattr, web_admin, "_online_places", real)
         conns = [self.FakeConn(name) for name in names]
         saved = list(gameserver._conns)
         gameserver._conns[:] = conns

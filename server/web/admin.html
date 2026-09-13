@@ -223,11 +223,17 @@
           <!-- 在线筛选（用户 2026-09-10，D75）。★ 筛在**服务端**：命中总数和
                页数都按筛完的算，所以选「在线」时每一页照样是满 10 行、翻页
                也不会翻到空页。改了下拉当场重查（回第一页），不用再点「查找」
-               —— 和配置页那几个筛选下拉一个手感。 -->
+               —— 和配置页那几个筛选下拉一个手感。
+               ★ 「在待机」「在游戏中」是用户 2026-09-13 加的：
+               在待机 = 在线但没进图（大厅 / 商店界面 / 待机中的房间，
+               任务和对战都算）；在游戏中 = 真进图了（任务 + 对战）。
+               值照服务端 `admin.ONLINE_FILTERS` 那一份发。 -->
           <select id="playerOnline">
             <option value="all">全部</option>
-            <option value="on">在线</option>
             <option value="off">不在线</option>
+            <option value="on">在线</option>
+            <option value="idle">待机中</option>
+            <option value="playing">游戏中</option>
           </select>
           <button class="btn" id="playerSearchBtn">查找</button>
           <!-- 玩家自己在游戏里也会改这些数（打完一局就涨经验和金币），
@@ -259,9 +265,15 @@
         <!-- 只有这一块滚。编辑区 2026-09-07 起是弹窗（#playerModal，在页面底部）。 -->
         <div class="player-list fit-list">
           <table>
+            <!-- ★ 「状态」列（用户 2026-09-13）：在线的人现在停在哪个界面
+                 —— 大厅 / 商店界面 / 待机房间·任务|对战 / 游戏中·任务|对战。
+                 判据全在服务端（`gameserver.conn_place()`），这里只画。
+                 ★ 末列从 236 收到 110：「设为管理员（运营）」搬去「管理员
+                 账号」页了（同一天的第 2 件事），这一格只剩「修改仓库」。 -->
             <thead><tr>
-              <th>用户名</th><th>昵称</th><th style="width:64px">等级</th>
-              <th style="width:96px">金币</th><th style="width:236px"></th>
+              <th>用户名</th><th>昵称</th><th style="width:150px">状态</th>
+              <th style="width:64px">等级</th>
+              <th style="width:96px">金币</th><th style="width:110px"></th>
             </tr></thead>
             <tbody id="playerRows"></tbody>
           </table>
@@ -331,79 +343,70 @@
       </div>
     </section>
 
-    <!-- ---------------- 管理员账号 ---------------- -->
-    <section class="panel hidden" id="adminsPanel">
-      <!-- ★ 刷新钮放在标题栏右端、只画一个圆箭头（用户 2026-09-06）——
-           单给它一行太突兀，这一页又没有筛选条可以搭。 -->
+    <!-- ---------------- 管理员账号 ----------------
+         ★ 2026-09-13 第二轮（用户看了左右两栏之后）：**页面上只剩一张名单**，
+         「添加管理员」和「修改密码」两张表单收进各自的弹窗。
+         走「面板撑满、只有列表滚」那套壳（`fit-panel`，D39）：说明 / 工具条 /
+         换页栏钉住不动，滚的只有名单本身。名单**一页 10 行**（前端分页）。 -->
+    <section class="panel hidden fit-panel" id="adminsPanel">
       <div class="panel-title">
         <h2>管理员账号</h2>
-        <button class="icon-btn" id="adminRefreshBtn" aria-label="刷新"
-                title="重新读一遍管理员名单和玩家列表">↻</button>
+        <span class="count" id="adminCount"></span>
       </div>
       <div class="panel-body">
-        <p class="hint">
-          密码是<b>明文</b>保存的（和玩家账号一个口径）。
-          至少要保留一个<b>系统管理员</b> —— 全删光了（或者全降成运营）
-          就没人进得来这一页，只能上服务器改 JSON。
-        </p>
-        <ul class="help">
+        <ul class="help fit-help">
           <li><b>系统管理员</b>：管理页所有标签页都能进，包括「玩家仓库」和这一页。</li>
           <!-- ★ 这一句由 admin.js 照 `CONFIGS` 现填（`paintOperatorPages`）——
                页名和页数写死在这儿的话，加一份配置就得记得回来改，
                而漏改不会报错、只会一直骗人（`test_web_admin` 那条静态检查钉着）。
                下面这行是**没跑到那一步时**的兜底，不带数字。 -->
-          <li><b>运营</b>：<span id="operatorPages">只能进那几个运营配置页，
-            看不到「玩家仓库」和「管理员账号」。</span></li>
-          <li>改权限<b>立刻生效</b>，对方不用重新登录。</li>
+          <li><b>运营</b>：<span id="operatorPages">只能进那几个运营配置页和
+            「玩家仓库」，看不到「数据备份」和「管理员账号」。</span></li>
+          <li>改权限<b>立刻生效</b>，对方不用重新登录。
+            至少要保留一个<b>系统管理员</b> —— 全删光了（或者全降成运营）
+            就没人进得来这一页，只能上服务器改 JSON。
+            密码是<b>明文</b>保存的（和玩家账号一个口径）。</li>
         </ul>
-        <!-- ★ 「昵称」这一列是**同名玩家账号**的昵称（用户 2026-09-13）：
-             管理员档本身不存昵称，服务端每一发现查一次同名游戏账号
-             （`account_store.admin_list()`）。没有同名号的画一个 `-`。 -->
-        <table>
-          <thead><tr>
-            <th>管理员</th>
-            <th style="width:200px">昵称</th>
-            <th style="width:170px">权限</th>
-            <th style="width:90px"></th>
-          </tr></thead>
-          <tbody id="adminRows"></tbody>
-        </table>
 
-        <div class="row" style="margin-top:18px">
-          <div>
-            <label for="newAdminName">新管理员名</label>
-            <input id="newAdminName" type="text">
+        <!-- ★ 工具条**左右分两组**（用户 2026-09-13 第三轮）：
+             左边是「往名单里加一个人」的两条路，右边是「动已有的人 / 重读」。
+             靠右那一组包在 `.tool-right` 里（`margin-left: auto` 只写这一次
+             —— 给两个元素各写一个 auto 的话，flex 会把空隙**平分**，
+             两个钮被拆到两处去，玩家仓库页 2026-09-10 踩过）。
+             ★ 配色：「指定玩家为管理员」是这一页的主动作（金色主钮）；
+             「手动添加管理员」少用，和「刷新」同一档米黄默认钮；
+             「修改密码」是「动一个已经在的人」—— 改完他会被踢下线，
+             误点的代价不一样，穿深棕那身（`.btn-ref`，和面板标题栏同色系）。 -->
+        <div class="toolbar">
+          <button class="btn btn-primary" id="promoteOpenBtn"
+                  title="从玩家列表里挑一个人，把他的游戏账号设成管理页的运营">＋ 指定玩家为管理员</button>
+          <button class="btn" id="addAdminOpenBtn"
+                  title="手动输一个名字和密码，新建一个管理页账号">＋ 手动添加管理员</button>
+          <div class="tool-right">
+            <button class="btn btn-ref" id="setPwOpenBtn"
+                    title="改某个管理员的密码 —— 改完他手上的会话会全部作废">✎ 修改密码</button>
+            <button class="btn" id="adminRefreshBtn"
+                    title="重新读一遍管理员名单和玩家列表">↻ 刷新</button>
           </div>
-          <div>
-            <label for="newAdminPass">密码</label>
-            <input id="newAdminPass" type="password" autocomplete="new-password">
-          </div>
-          <div>
-            <label for="newAdminRole">权限</label>
-            <select id="newAdminRole">
-              <option value="operator">运营</option>
-              <option value="system">系统管理员</option>
-            </select>
-          </div>
-          <div><button class="btn" id="addAdmin">添加</button></div>
         </div>
-
-        <div class="row" style="margin-top:12px">
-          <div>
-            <label for="pwName">改谁的密码</label>
-            <input id="pwName" type="text">
-          </div>
-          <div>
-            <label for="pwValue">新密码</label>
-            <input id="pwValue" type="password" autocomplete="new-password">
-          </div>
-          <div><button class="btn" id="setPw">改密码</button></div>
+        <!-- 换页栏钉在列表上面（和玩家仓库同一个做法，D37b）。 -->
+        <div class="pager" id="adminPager"></div>
+        <!-- ★ 只有这一块滚：一页 10 行，窗口矮到放不下时滚动条长在这儿，
+             上面的标题 / 说明 / 三个钮 / 换页栏都不动。 -->
+        <div class="player-list fit-list">
+          <!-- ★ 「昵称」这一列是**同名玩家账号**的昵称（用户 2026-09-13）：
+               管理员档本身不存昵称，服务端每一发现查一次同名游戏账号
+               （`account_store.admin_list()`）。没有同名号的画一个 `-`。 -->
+          <table>
+            <thead><tr>
+              <th>管理员</th>
+              <th style="width:220px">昵称</th>
+              <th style="width:170px">权限</th>
+              <th style="width:90px"></th>
+            </tr></thead>
+            <tbody id="adminRows"></tbody>
+          </table>
         </div>
-
-        <p class="hint" style="margin-top:14px">
-          名字规则：__USERNAME_RULE__<br>
-          密码规则：__PASSWORD_RULE__
-        </p>
       </div>
     </section>
 
@@ -435,7 +438,7 @@
         </div>
         <div class="field">
           <span class="lab">金币</span>
-          <input id="playerMoney" type="number" min="0" step="1">
+          <input id="playerMoney" class="num-money" type="number" min="0" step="1">
         </div>
         <div class="field wide">
           <span class="lab">经验（只读，跟着等级走）</span>
@@ -518,11 +521,11 @@
         <div class="row reward-stats">
           <div class="field">
             <span class="lab">经验（每人）</span>
-            <input id="rewardExp" type="number" min="0" step="1" value="0">
+            <input id="rewardExp" class="num-money" type="number" min="0" step="1" value="0">
           </div>
           <div class="field">
             <span class="lab">金币（每人）</span>
-            <input id="rewardMoney" type="number" min="0" step="1" value="0">
+            <input id="rewardMoney" class="num-money" type="number" min="0" step="1" value="0">
           </div>
           <!-- 留言（用户 2026-09-10）：玩家在礼物的接收弹窗里看到的那句话，
                可以整个改掉；留空按默认值发。默认值和服务端 `REWARD_MESSAGE_DEFAULT`
@@ -734,6 +737,133 @@
     <div class="panel-foot">
       <button class="btn" id="sellQtyCancel">取消</button>
       <button class="btn btn-primary" id="sellQtyOk">加入待卖出</button>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 指定玩家为管理员（用户 2026-09-13）=================
+     从「管理员账号」页的名单卡开，在玩家列表里挑人。★ 数据源就是玩家仓库
+     那一发 `/admin/api/players`（已经带分页 / 搜索 / 在线筛选 / `admin_role`），
+     **没有新接口** —— 两处列表长一个样也是用户要的。
+     ★ 这一版**故意排在 `#dialog` 前面**：点了按钮要弹确认框，而所有 `.modal`
+     同为 z-index 50、靠 DOM 顺序分层，`#dialog` 必须压在最上面。
+     只读窗 ⇒ 点遮罩和 Esc 都能关（有未保存改动的窗才只留 ✕）。 -->
+<div class="modal hidden" id="promoteModal">
+  <div class="panel promote-panel">
+    <div class="panel-title">
+      <h2>指定玩家为管理员</h2>
+      <span class="count" id="promoteCount"></span>
+      <button class="icon-btn" id="promoteClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="panel-body">
+      <ul class="help">
+        <li>选中的玩家会用他<b>游戏里那套账号和密码</b>登管理页，权限是<b>运营</b>
+          —— 密码由服务端照搬，<b>不经过这个页面</b>。</li>
+        <li>已经是管理员的人的权限在管理员列表里改。</li>
+      </ul>
+      <div class="toolbar">
+        <input id="promoteSearch" type="text" placeholder="搜 用户名 / 昵称">
+        <select id="promoteOnline">
+          <option value="all">全部</option>
+          <option value="off">不在线</option>
+          <option value="on">在线</option>
+          <option value="idle">待机中</option>
+          <option value="playing">游戏中</option>
+        </select>
+        <button class="btn" id="promoteSearchBtn">查找</button>
+        <button class="btn" id="promoteRefreshBtn" title="重新读一遍玩家列表">↻ 刷新</button>
+      </div>
+      <div class="pager" id="promotePager"></div>
+      <div class="player-list promote-list">
+        <table>
+          <thead><tr>
+            <th>用户名</th><th>昵称</th><th style="width:150px">状态</th>
+            <th style="width:64px">等级</th><th style="width:170px"></th>
+          </tr></thead>
+          <tbody id="promoteRows"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 手动添加管理员 / 修改密码（用户 2026-09-13 第二轮）============
+     两张表单原来摆在页面右栏，用户看了说还是乱 ⇒ 收进弹窗，页面上只留名单。
+     ★ 两张都**有没提交的输入**，所以按本页的约定**只认 ✕ 和 Esc，不认遮罩**
+       （点歪一下就白填了）。尺寸不写 `.modal .panel` 那个 640 高，让它按内容
+       收缩 —— 表单就四五行，撑到 640 会空一大片。 -->
+<div class="modal hidden" id="addAdminModal">
+  <div class="panel form-panel">
+    <div class="panel-title">
+      <h2>手动添加管理员</h2>
+      <button class="icon-btn" id="addAdminClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="panel-body">
+      <p class="hint">新建一个<b>管理页专用</b>的账号。要把一个已有的游戏账号
+        收成管理员，用「＋ 指定玩家为管理员」—— 那条路不用手抄密码。</p>
+      <div class="field wide">
+        <label class="lab" for="newAdminName">新管理员名</label>
+        <input id="newAdminName" type="text">
+      </div>
+      <div class="field wide">
+        <label class="lab" for="newAdminPass">密码</label>
+        <input id="newAdminPass" type="password" autocomplete="new-password">
+      </div>
+      <!-- ★ 密码输两遍（用户 2026-09-13）：明文存储 + 打错就登不进去，
+           而这一页又是**唯一**能改密码的地方 —— 手滑一次就只能上服务器
+           改 JSON。两遍不一致时前台直接拦下，一个字节都不发。 -->
+      <div class="field wide">
+        <label class="lab" for="newAdminPass2">确认密码</label>
+        <input id="newAdminPass2" type="password" autocomplete="new-password">
+      </div>
+      <div class="field">
+        <label class="lab" for="newAdminRole">权限</label>
+        <select id="newAdminRole">
+          <option value="operator">运营</option>
+          <option value="system">系统管理员</option>
+        </select>
+      </div>
+      <p class="hint">名字规则：__USERNAME_RULE__<br>
+        密码规则：__PASSWORD_RULE__</p>
+    </div>
+    <div class="panel-foot">
+      <button class="btn" id="addAdminCancel">取消</button>
+      <button class="btn btn-primary" id="addAdmin">添加</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal hidden" id="setPwModal">
+  <div class="panel form-panel">
+    <div class="panel-title">
+      <h2>修改密码</h2>
+      <button class="icon-btn" id="setPwClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="panel-body">
+      <p class="hint">改完那个人<b>手上的会话会全部作废</b>，他得用新密码重新登录
+        —— 改的要是你自己，这一页当场退出登录。</p>
+      <div class="field wide">
+        <label class="lab" for="pwName">改谁的密码</label>
+        <!-- 名单里点「改密码」进来时这一格已经填好了；也可以自己打。 -->
+        <input id="pwName" type="text">
+      </div>
+      <div class="field wide">
+        <label class="lab" for="pwValue">新密码</label>
+        <input id="pwValue" type="password" autocomplete="new-password">
+      </div>
+      <div class="field wide">
+        <label class="lab" for="pwValue2">确认密码</label>
+        <input id="pwValue2" type="password" autocomplete="new-password">
+      </div>
+      <p class="hint">密码规则：__PASSWORD_RULE__</p>
+    </div>
+    <div class="panel-foot">
+      <button class="btn" id="setPwCancel">取消</button>
+      <!-- ★ 弹窗底栏那颗主钮一律是金色（用户 2026-09-13 第四轮）——
+           「添加管理员」的「添加」、卖出数量窗的「加入待卖出」、确认框的
+           「确定」都是这一身。深棕只留给**工具条上那个入口钮**（`setPwOpenBtn`）：
+           那儿它要和旁边几个钮区分开，而进了窗之后已经没什么可混淆的了。 -->
+      <button class="btn btn-primary" id="setPw">改密码</button>
     </div>
   </div>
 </div>

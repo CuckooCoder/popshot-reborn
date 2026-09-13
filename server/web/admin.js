@@ -612,6 +612,11 @@ function guessSpec(key, value) {
   return {key: key, label: key, type: type, optional: true, unknown: true};
 }
 
+//: 字段表（服务端 `shopcfg.SCHEMA`）里给金币字段标的**单位**。
+//  ★ 它是「这一格装的是钱」的唯一判据（见 `fieldNode`）—— 服务端那边改了
+//    这个字，前台这一格就该跟着改，两处写的是同一个词。
+var MONEY_SUFFIX = "金币";
+
 /** 一个字段的 DOM。**直接改 `entry[spec.key]`** —— 模型就是那个对象。 */
 function fieldNode(spec, entry, onChange) {
   if (spec.type === "bool") {
@@ -651,6 +656,12 @@ function fieldNode(spec, entry, onChange) {
     input.type = "number";
     if (spec.min !== undefined) { input.min = spec.min; }
     if (spec.max !== undefined) { input.max = spec.max; }
+    // ★ 装金币的格子要宽一档（用户 2026-09-13）：默认那 66px 实测**正好
+    //   只装得下 5 位**，而商店价格 / 合成花费早就上六位了。
+    //   ★★ 判据是**字段自己写的单位**（`SCHEMA` 里的 `suffix: "金币"`），
+    //     不是一张写死的 key 清单 —— 以后再加一个标了「金币」的字段，
+    //     它自动跟着变宽，没人需要回来改这一行。
+    if (spec.suffix === MONEY_SUFFIX) { input.classList.add("num-money"); }
   } else {
     input.type = "text";
   }
@@ -2512,15 +2523,91 @@ function paintPicker() {
 
 var ROLE_ZH = {system: "系统管理员", operator: "运营"};
 
+/** 密码输两遍，不一致就**一个字节都不发**（用户 2026-09-13）。
+ *
+ * ★ 为什么值得单独拦一道：管理员密码是**明文**存的（D3），而这一页是唯一
+ *   能改它的地方 —— 添加时手滑打错，那个账号从生下来就登不进去；改密码时
+ *   手滑打错，人当场被踢下线（服务端会作废他全部会话）还不知道密码是什么。
+ *   两种都只能上服务器改 JSON 才救得回来。
+ * ★ 这是**防手滑，不是安全边界** ⇒ 服务端接口签名一个字没动（还是只收一个
+ *   `password`）。把它当门禁的话，绕过前台就等于没拦。
+ * ★ 空密码不在这儿管 —— 那是服务端的密码规则（`__PASSWORD_RULE__`）的事，
+ *   两边各管各的，重复一份迟早对不上。
+ */
+function passwordsMatch(firstId, secondId) {
+  if ($(firstId).value === $(secondId).value) { return true; }
+  toast("两次输入的密码不一致，请重新输入。", false);
+  // 焦点丢回第二个框：要重打的是它，不是上面那个。
+  $(secondId).focus();
+  $(secondId).select();
+  return false;
+}
+
+/* ---------------------------------------------------------------------
+   「手动添加管理员」/「修改密码」两个弹窗（用户 2026-09-13 第二轮）
+
+   ★ 两张表单原来摆在页面右栏。收进弹窗之后页面上只剩一张名单，
+     三个入口并排在工具条上。
+   ★ 开窗时**一律清空**上一次填的东西 —— 密码框留着上一个人的值太危险
+     （下一次点开可能是给另一个人改）。
+   --------------------------------------------------------------------- */
+var ADD_ADMIN_OPEN = false;
+var SET_PW_OPEN = false;
+
+function clearFields(ids) {
+  ids.forEach(function (id) { $(id).value = ""; });
+}
+
+function openAddAdmin() {
+  ADD_ADMIN_OPEN = true;
+  clearFields(["newAdminName", "newAdminPass", "newAdminPass2"]);
+  $("newAdminRole").value = "operator";   // 加人先给最小权限（D34）
+  $("addAdminModal").classList.remove("hidden");
+  $("newAdminName").focus();
+}
+
+function closeAddAdmin() {
+  ADD_ADMIN_OPEN = false;
+  $("addAdminModal").classList.add("hidden");
+}
+
+/** `name` 给了就把「改谁」预填好（从名单那一行点进来时用）。 */
+function openSetPw(name) {
+  SET_PW_OPEN = true;
+  clearFields(["pwName", "pwValue", "pwValue2"]);
+  if (name) { $("pwName").value = name; }
+  $("setPwModal").classList.remove("hidden");
+  $(name ? "pwValue" : "pwName").focus();
+}
+
+function closeSetPw() {
+  SET_PW_OPEN = false;
+  $("setPwModal").classList.add("hidden");
+}
+
 //: 玩家列表上那个灰钮写什么（D40）。★ 和 `ROLE_ZH` **故意不一样**：
 //  那张表用在「管理员账号」页的下拉框里，那儿上下文已经写着「权限」了；
 //  玩家列表上只有一个钮，光写「运营」看不出这是管理页的权限。
 var ADMIN_BADGE_ZH = {system: "系统管理员", operator: "管理员（运营）"};
 
+//: 管理员名单的分页（用户 2026-09-13 第二轮）。★ 和玩家列表不同，这一份
+//  **在前台分页**：`/admin/api/admins` 本来就一次回整张表（管理员统共几个人，
+//  不值得为它加一套服务端分页），而且「加完人当场看到他」要的就是整张表。
+var ADMIN_LIST = [];
+var ADMIN_PAGE = {page: 0, pages: 1, total: 0, size: 10};
+
 function renderAdmins(admins) {
+  if (admins) { ADMIN_LIST = admins; }
+  var size = ADMIN_PAGE.size;
+  var total = ADMIN_LIST.length;
+  var pages = Math.max(1, Math.ceil(total / size));
+  // 删到最后一页空了（或者换了一份更短的名单）就退回最后一页，别留一张空表。
+  var page = Math.min(ADMIN_PAGE.page, pages - 1);
+  ADMIN_PAGE = {page: page, pages: pages, total: total, size: size};
+  $("adminCount").textContent = total + " 个管理员";
   var rows = $("adminRows");
   rows.textContent = "";
-  (admins || []).forEach(function (row) {
+  ADMIN_LIST.slice(page * size, page * size + size).forEach(function (row) {
     var name = row.name;
     var tr = document.createElement("tr");
     tr.appendChild(el("td", null, name));
@@ -2546,11 +2633,22 @@ function renderAdmins(admins) {
     tr.appendChild(td);
 
     var actions = el("td");
+    var acts = el("div", "acts");
     var button = el("button", "btn btn-danger btn-sm", "删除");
     button.onclick = function () { removeAdmin(name); };
-    actions.appendChild(button);
+    acts.appendChild(button);
+    actions.appendChild(acts);
     tr.appendChild(actions);
     rows.appendChild(tr);
+  });
+  renderAdminPager();
+}
+
+function renderAdminPager() {
+  // 换页栏和玩家列表共用一份（`pagerInto`）。前台分页 ⇒ 翻页只是重画。
+  pagerInto($("adminPager"), ADMIN_PAGE, function (page) {
+    ADMIN_PAGE.page = page;
+    renderAdmins();
   });
 }
 
@@ -2910,9 +3008,55 @@ var PLAYER = null;        // {view, edit:{level, money, materials, inventory}}
 var PLAYER_LIST = [];
 var PLAYER_PAGE = {page: 0, pages: 1, total: 0, size: 10, q: "", online: "all"};
 
-//: 在线筛选那三档的中文名（D75）。值和服务端 `admin.ONLINE_FILTERS` 一样，
-//  下拉本身在 `admin.html` 里 —— 这份表只给「N 个账号（不在线）」那句话用。
-var ONLINE_FILTER_ZH = {on: "在线", off: "不在线"};
+//: 在线筛选那几档的中文名（D75 三档 + 用户 2026-09-13 的两档）。值和服务端
+//  `admin.ONLINE_FILTERS` 一样，下拉本身在 `admin.html` 里 —— 这份表只给
+//  「N 个账号（不在线）」那句话和空列表文案用。
+//  ★ 加一档就要**两边一起加**：漏了这里不会报错，只会在那句话里画出
+//  `undefined`（「没有 undefined 的匹配账号」）。
+var ONLINE_FILTER_ZH = {on: "在线", off: "不在线",
+                        idle: "待机中", playing: "游戏中"};
+
+//: 位置码 -> 中文（用户 2026-09-13）。码由服务端 `gameserver.PLACE_*` 发，
+//  中文只在这一处翻 —— 和 `ROLE_ZH` / `ADMIN_BADGE_ZH` 一个路子。
+//  ★ **商店 / 合成 / 仓库合成一档**：它们在客户端是同一个 ShopStage，进去时
+//  发的包逐字节相同，服务端分不出是哪一个（用户 2026-09-13 拍板合并）。
+var PLACE_ZH = {
+  lobby: "大厅",
+  shop: "商店界面",
+  room_quest: "待机房间·任务",
+  room_battle: "待机房间·对战",
+  play_quest: "游戏中·任务",
+  play_battle: "游戏中·对战"
+};
+
+/** 画「状态」那一格：在线的画实心圆点 + 他在哪，不在线画空心圆点 + 「不在线」。
+ *
+ * ★ 圆点和工具条右端那个「当前在线」共用一套（`.dot`，琥珀不是绿 ——
+ *   `admin.css` 里写着别改回去）。★ 位置码认不出来时**原样画出来**，
+ *   不画空白：服务端加了新位置而前台忘了翻译时，空白会被当成「没在线」。
+ */
+function placeCell(row) {
+  var td = el("td", "place" + (row.online ? "" : " off"));
+  td.appendChild(el("i", "dot"));
+  td.appendChild(document.createTextNode(placeText(row)));
+  return td;
+}
+
+/** 「他在哪」这句话的**唯一出处**（用户 2026-09-13 第二轮）。
+ *
+ * 玩家列表那一列只写位置本身（那一列的表头就叫「状态」，上下文已经说清了）；
+ * 别的地方（修改仓库弹窗 / 装备卖出页 / 发奖弹窗左栏）挤在一行字里，
+ * 光写「待机房间·任务」看不出这是在线状态 ⇒ 用 `wrap` 包成「在线（…）」。
+ *
+ * ★ 位置码认不出来时**原样画出来**，不画空白：服务端加了新位置而前台忘了
+ *   翻译时，空白会被当成「没在线」。
+ */
+function placeText(row, wrap) {
+  if (!row.online) { return "不在线"; }
+  var where = PLACE_ZH[row.place] || row.place || "";
+  if (!wrap) { return where || "在线"; }
+  return where ? "在线（" + where + "）" : "在线";
+}
 
 /** 查一页。`page` 省略 = **筛选条件没变**就停在当前页，变了就回第一页。
  *
@@ -2998,37 +3142,25 @@ function renderPlayerRows() {
                 PLAYER_PAGE.online === "all"
                   ? "没有匹配的账号"
                   : "没有" + ONLINE_FILTER_ZH[PLAYER_PAGE.online] + "的匹配账号");
-    td.colSpan = 5;
+    td.colSpan = 6;
     tr.appendChild(td);
     rows.appendChild(tr);
   }
   PLAYER_LIST.forEach(function (row) {
     var line = document.createElement("tr");
     if (PLAYER && PLAYER.view.username === row.username) { line.className = "on"; }
-    line.appendChild(el("td", null, row.username + (row.online ? " ●" : "")));
+    // ★ 用户名后面那个 ` ●` 2026-09-13 拿掉了 —— 「状态」列里已经有一个
+    //   圆点，而且还写着他在哪，同一行画两个圆点只会让人以为是两件事。
+    line.appendChild(el("td", null, row.username));
     line.appendChild(el("td", null, row.nickname));
+    line.appendChild(placeCell(row));
     line.appendChild(el("td", null, row.level));
     line.appendChild(el("td", null, row.money));
     var td = el("td");
-    // ★ 权限那个钮在**左**、「修改仓库」在**右**，整组**右对齐**
-    //   （用户 2026-09-06）。两个钮**长得不一样**（D40）：一个改这个人的仓库、
-    //   一个给他管理页的权限，不能像同一个东西 —— 但靠的是**轻重**不是色相
-    //   （D40a，用户 2026-09-07）：「修改仓库」是这一行的主动作，金色主钮；
-    //   「设为管理员」少用、米黄默认钮。原来的青色是整页唯一的冷色，太突兀。
+    // ★ 「设为管理员（运营）」2026-09-13 搬去「管理员账号」页了（D40 当初
+    //   图快放在这儿，可它是账号管理，不是仓库）。这一格现在只剩这一个钮，
+    //   `.acts` 那层右对齐留着 —— 表头那 110px 是按它量的。
     var acts = el("div", "acts");
-    // 已经是管理员的：同一个位置换成**点不动的灰钮**，上面写他的实际权限，
-    // 别给一个点下去必然报「已经存在」的按钮。
-    var promote = el("button", "btn btn-sm",
-                     row.admin_role ? (ADMIN_BADGE_ZH[row.admin_role]
-                                       || row.admin_role)
-                                    : "设为管理员（运营）");
-    if (row.admin_role) {
-      promote.disabled = true;
-      promote.title = "这个玩家已经能登管理页了，权限在「管理员账号」页改";
-    } else {
-      promote.onclick = function () { promoteToAdmin(row.username); };
-    }
-    acts.appendChild(promote);
     var button = el("button", "btn btn-sm btn-primary", "修改仓库");
     button.onclick = function () { openPlayer(row.username); };
     acts.appendChild(button);
@@ -3043,6 +3175,8 @@ function renderPlayerRows() {
  *
  * ★ 请求里**只有用户名** —— 密码由服务端自己从那个账号里取，页面从头到尾
  *   看不见它，也就不会跑到日志、截图和浏览器历史里去（铁律 9）。
+ * ★ 入口 2026-09-13 从「玩家仓库」的列表挪到了「管理员账号」页那个弹窗
+ *   （`#promoteModal`）—— 这个函数本身一个字没变，只是刷新哪几处跟着换了。
  */
 async function promoteToAdmin(username) {
   var go = await ask({
@@ -3060,28 +3194,132 @@ async function promoteToAdmin(username) {
   toast(result.message, result.ok);
   if (!result.ok) { return; }
   if (result.admins) { renderAdmins(result.admins); }
-  // 那一格要变成「已是管理员」—— 停在当前页重查一次。
-  searchPlayers(PLAYER_PAGE.page);
+  // 弹窗里那一格要变成「已是管理员」—— 停在当前页重查一次。
+  // ★ 玩家仓库那一页**不用**再刷：2026-09-13 起它已经没有这个钮了。
+  searchPromote(PROMOTE_PAGE.page);
 }
 
-function renderPlayerPager() {
-  var host = $("playerPager");
+/* ---------------------------------------------------------------------
+   「指定玩家为管理员」弹窗（用户 2026-09-13）
+
+   ★ 数据源就是玩家仓库那一发 `/admin/api/players` —— 它早就带了分页、
+     搜索、在线筛选和 `admin_role`，一个新接口都不用加。
+   ★ 分页状态**和玩家仓库分开**（`PROMOTE_PAGE` vs `PLAYER_PAGE`）：
+     两个列表各翻各的页，共用一份的话关掉弹窗会把背后那一页也带跑。
+   --------------------------------------------------------------------- */
+var PROMOTE_PAGE = {page: 0, pages: 1, total: 0, size: 10, q: "", online: "all"};
+var PROMOTE_LIST = [];
+//: 开着没有（Esc 那条链照 `LEVEL_MODAL` 的样子判）。
+var PROMOTE_OPEN = false;
+
+function openPromoteModal() {
+  PROMOTE_OPEN = true;
+  $("promoteModal").classList.remove("hidden");
+  searchPromote(0);
+}
+
+function closePromoteModal() {
+  PROMOTE_OPEN = false;
+  $("promoteModal").classList.add("hidden");
+}
+
+/** 查一页。`page` 省略 = 筛选条件没变就停在当前页，变了就回第一页
+ *  （和 `searchPlayers` 同一个道理：筛完可能只剩一页，停在第 3 页就是空表）。
+ */
+async function searchPromote(page) {
+  var q = $("promoteSearch").value.trim();
+  var online = $("promoteOnline").value;
+  if (page === undefined) {
+    page = (q === PROMOTE_PAGE.q && online === PROMOTE_PAGE.online)
+      ? PROMOTE_PAGE.page : 0;
+  }
+  var result = await api("/admin/api/players?q=" + encodeURIComponent(q)
+                         + "&page=" + page
+                         + "&online=" + encodeURIComponent(online));
+  if (bounced(result)) { return false; }
+  if (!result.ok) {
+    toast((result && result.message) || "查找失败", false);
+    return false;
+  }
+  PROMOTE_LIST = result.players;
+  PROMOTE_PAGE = {page: result.page, pages: result.pages,
+                  total: result.total, size: result.size, q: q, online: online};
+  renderPromoteRows();
+  $("promoteCount").textContent = result.total + " 个账号"
+    + (online === "all" ? "" : "（" + ONLINE_FILTER_ZH[online] + "）");
+  return true;
+}
+
+function renderPromoteRows() {
+  var rows = $("promoteRows");
+  rows.textContent = "";
+  if (!PROMOTE_LIST.length) {
+    var tr = document.createElement("tr");
+    var td = el("td", "own-empty",
+                PROMOTE_PAGE.online === "all"
+                  ? "没有匹配的账号"
+                  : "没有" + ONLINE_FILTER_ZH[PROMOTE_PAGE.online] + "的匹配账号");
+    td.colSpan = 5;
+    tr.appendChild(td);
+    rows.appendChild(tr);
+  }
+  PROMOTE_LIST.forEach(function (row) {
+    var line = document.createElement("tr");
+    line.appendChild(el("td", null, row.username));
+    line.appendChild(el("td", null, row.nickname));
+    line.appendChild(placeCell(row));
+    line.appendChild(el("td", null, row.level));
+    var td = el("td");
+    var acts = el("div", "acts");
+    // 已经是管理员的：**点不动的灰钮**，上面写他的实际权限（D40）——
+    // 别给一个点下去必然报「已经存在」的按钮。
+    var promote = el("button", "btn btn-sm",
+                     row.admin_role ? (ADMIN_BADGE_ZH[row.admin_role]
+                                       || row.admin_role)
+                                    : "设为管理员（运营）");
+    if (row.admin_role) {
+      promote.disabled = true;
+      promote.title = "这个玩家已经能登管理页了，权限在管理员列表里改";
+    } else {
+      promote.onclick = function () { promoteToAdmin(row.username); };
+    }
+    acts.appendChild(promote);
+    td.appendChild(acts);
+    line.appendChild(td);
+    rows.appendChild(line);
+  });
+  renderPromotePager();
+}
+
+function renderPromotePager() {
+  pagerInto($("promotePager"), PROMOTE_PAGE, searchPromote);
+}
+
+/** 把换页栏画进 `host`。`state` 是 `{page, pages}`，`go(页码)` 是重查那一发。
+ *
+ * ★ 「玩家仓库」和「指定玩家为管理员」弹窗**共用这一份**（用户 2026-09-13
+ *   加第二个列表时抽出来的）：两条换页栏长得一样、行为也该一样，各写一份
+ *   迟早会漂移成「一边能翻到最后一页、另一边差一页」。
+ */
+function pagerInto(host, state, go) {
   host.textContent = "";
   // ★ 只有一页时整条都不画 —— 大多数服务器就几十个号，别让翻页控件
   //   在那儿占一行说「第 1 / 1 页」。
-  if (PLAYER_PAGE.pages <= 1) { return; }
+  if (state.pages <= 1) { return; }
   function step(label, target, disabled) {
     var button = el("button", "btn btn-sm", label);
     button.disabled = disabled;
-    button.onclick = function () { searchPlayers(target); };
+    button.onclick = function () { go(target); };
     host.appendChild(button);
   }
-  step("‹ 上一页", PLAYER_PAGE.page - 1, PLAYER_PAGE.page <= 0);
+  step("‹ 上一页", state.page - 1, state.page <= 0);
   host.appendChild(el("span", "pageno",
-                      "第 " + (PLAYER_PAGE.page + 1) + " / "
-                      + PLAYER_PAGE.pages + " 页"));
-  step("下一页 ›", PLAYER_PAGE.page + 1,
-       PLAYER_PAGE.page >= PLAYER_PAGE.pages - 1);
+                      "第 " + (state.page + 1) + " / " + state.pages + " 页"));
+  step("下一页 ›", state.page + 1, state.page >= state.pages - 1);
+}
+
+function renderPlayerPager() {
+  pagerInto($("playerPager"), PLAYER_PAGE, searchPlayers);
 }
 
 async function openPlayer(username, force) {
@@ -3164,7 +3402,12 @@ function renderPlayer() {
   // 在线状态紧跟在名字后面（用户 2026-09-07），不再放标题栏右端。
   // ★ 是 `playerOnlineNote` 不是 `playerOnline` —— 后者是工具条上那个在线筛选
   //   下拉（D75），2026-09-10 撞过名：这一句把下拉的三个选项抹成了一行字。
-  $("playerOnlineNote").textContent = view.online ? "● 在线，改完即时生效" : "○ 不在线";
+  // ★ 在线时连**他现在在哪**一起写（用户 2026-09-13 第二轮）：
+  //   「在线（待机房间·任务）」比光写「在线」有用 —— 改仓库之前先看一眼
+  //   他是不是正在打，和玩家列表那一列同一套说法（`PLACE_ZH`）。
+  $("playerOnlineNote").textContent =
+    (view.online ? "● " : "○ ") + placeText(view, true)
+    + (view.online ? "，改完即时生效" : "");
   $("playerLevel").value = PLAYER.edit.level;
   $("playerLevel").max = view.level_max;
   $("playerMoney").value = PLAYER.edit.money;
@@ -3517,7 +3760,7 @@ function renderRewardPlayers() {
     line.appendChild(box);
     line.appendChild(el("span", "who", row.nickname + "（" + row.username + "）"));
     line.appendChild(el("span", "state" + (row.online ? " on" : ""),
-                        row.online ? "● 在线" : "○ 不在线"));
+                        (row.online ? "● " : "○ ") + placeText(row, true)));
     line.appendChild(el("span", "lv", "Lv." + row.level));
     host.appendChild(line);
   });
@@ -4260,8 +4503,11 @@ function renderSell() {
     return;
   }
   var view = SELL.view;
+  // 在线时把**他现在在哪**一起写出来（用户 2026-09-13 第二轮）。
+  // ★ 不在线时这一截整个不画 —— 标题栏那一格答的是「在卖谁的东西」，
+  //   「不在线」对卖东西这件事没有意义（对局中不让卖，那是另一条判据）。
   $("sellWho").textContent = view.nickname + "（" + view.username + "）"
-    + (view.online ? " · 在线" : "");
+    + (view.online ? " · " + placeText(view, true) : "");
   $("sellNick").textContent = view.nickname;
   $("sellLevel").textContent = view.level;
   $("sellMoney").textContent = view.money;
@@ -4682,7 +4928,15 @@ var ME = {name: "", nickname: ""};
 var TAB = "items";
 
 //: 只有系统管理员能进的标签页（数据备份也是：它能回滚玩家存档）。
-var SYSTEM_ONLY_TABS = ["players", "backup", "admins"];
+var SYSTEM_ONLY_TABS = ["backup", "admins"];
+
+//: **系统管理员 + 运营**都能进、但只读玩家进不去的标签页（用户 2026-09-13）。
+//  ★ 为什么要第四张表：「玩家仓库」2026-09-13 开给了运营，它从此
+//    既不是系统管理员专页、也不是配置页（没有三方合并那一套）、
+//    更不能对只读玩家开着（那一页能改**别人**的等级金币仓库）。
+//  ★★ 服务端那一侧的闸必须是 `_require_editor()`，**不是**
+//    `_require_admin()` —— 后者只问「登没登录」，只读玩家也过得去。
+var EDITOR_TABS = ["players"];
 
 //: **三档身份都能进**的标签页（用户 2026-09-12）。
 //  ★ 为什么要第三张表：原来页面上每个标签非「配置页」即「系统管理员专页」，
@@ -4707,6 +4961,7 @@ function canOpenTab(tab) {
   if (isReadOnly()) {
     return CONFIGS.indexOf(tab) >= 0 || EVERYONE_TABS.indexOf(tab) >= 0;
   }
+  // 运营：系统管理员专档之外全放行（`EDITOR_TABS` 自然落在这一侧）。
   return isSystemAdmin() || SYSTEM_ONLY_TABS.indexOf(tab) < 0;
 }
 
@@ -4855,17 +5110,20 @@ function paintTabChrome(tab) {
     button.classList.toggle("on", button.getAttribute("data-tab") === tab);
   });
   var isConfig = CONFIGS.indexOf(tab) >= 0;
-  // ★ 配置页、数据备份页和玩家仓库页是「面板撑满、列表自己滚」（D39；
-  //   玩家仓库页 2026-09-07 加进来）；管理员账号是普通长页面，整块跟着
-  //   `main` 滚。
-  $("mainArea").classList.toggle("fit",
-                                 isConfig || tab === "backup"
-                                 || tab === "players" || tab === "sell");
   $("cfgPanel").classList.toggle("hidden", !isConfig);
   $("adminsPanel").classList.toggle("hidden", tab !== "admins");
   $("playersPanel").classList.toggle("hidden", tab !== "players");
   $("backupPanel").classList.toggle("hidden", tab !== "backup");
   $("sellPanel").classList.toggle("hidden", tab !== "sell");
+  // ★★ 「面板撑满、只有列表滚」（D39）—— 判据是**露出来的那个面板自己
+  //    带不带 `fit-panel`**，不是一张硬编码的标签名清单。
+  //    以前是 `isConfig || tab === "backup" || tab === "players" || …`：
+  //    2026-09-13 把「管理员账号」也改成这套壳时，光加 `fit-panel` 那个类
+  //    没用 —— 面板撑不满、列表也不滚，而且**一句报错都没有**。
+  //    现在新页面只要在 HTML 上写 `fit-panel`，这里自动跟着走。
+  var shown = document.querySelector("#mainView > section:not(.hidden)");
+  $("mainArea").classList.toggle(
+    "fit", !!(shown && shown.classList.contains("fit-panel")));
   return isConfig;
 }
 
@@ -4940,6 +5198,20 @@ function wire() {
   // ★ 两页共用一发（D43）—— 点哪个都刷两边。
   $("playerRefreshBtn").onclick = function () { refreshAccounts(); };
   $("adminRefreshBtn").onclick = function () { refreshAccounts(); };
+
+  // 「指定玩家为管理员」弹窗（用户 2026-09-13）。同上：都包一层。
+  $("promoteOpenBtn").onclick = function () { openPromoteModal(); };
+  $("promoteClose").onclick = closePromoteModal;
+  // ★ 只读窗 ⇒ 点遮罩也能关（照「等级经验对应表」那一个）。
+  $("promoteModal").onclick = function (event) {
+    if (event.target === $("promoteModal")) { closePromoteModal(); }
+  };
+  $("promoteSearchBtn").onclick = function () { searchPromote(0); };
+  $("promoteSearch").addEventListener("keydown", function (event) {
+    if (event.key === "Enter") { searchPromote(0); }
+  });
+  $("promoteOnline").onchange = function () { searchPromote(0); };
+  $("promoteRefreshBtn").onclick = function () { searchPromote(); };
 
   // 数据备份页。同上：包一层，别把 Event 当参数传进去。
   $("backupRefreshBtn").onclick = function () { refreshBackups(); };
@@ -5137,33 +5409,51 @@ function wire() {
     if (event.key === "Escape" && SELL_QTY) { closeSellQty(); return; }
     // ★ 价格窗有没保存的改动 ⇒ `closeSellPrices()` 会先问一句再关。
     if (event.key === "Escape" && SELL_PRICES) { closeSellPrices(); return; }
-    // 只读那两张排最后：它们不会盖在选择器上面。
+    // 管理员账号页那两张表单窗：有没提交的输入，但 Esc 是明确的「我不填了」。
+    if (event.key === "Escape" && ADD_ADMIN_OPEN) { closeAddAdmin(); return; }
+    if (event.key === "Escape" && SET_PW_OPEN) { closeSetPw(); return; }
+    // 只读那几张排最后：它们不会盖在选择器上面。
     if (event.key === "Escape" && LEVEL_MODAL) { closeLevelModal(); return; }
+    if (event.key === "Escape" && PROMOTE_OPEN) { closePromoteModal(); return; }
     if (event.key === "Escape" && HISTORY) { closeHistoryModal(); }
   });
 
+  // 「手动添加管理员」/「修改密码」两个弹窗（用户 2026-09-13 第二轮）。
+  // ★ 两张都有没提交的输入 ⇒ **只认 ✕ / 取消 / Esc，不认遮罩**（本页约定）。
+  $("addAdminOpenBtn").onclick = function () { openAddAdmin(); };
+  $("addAdminClose").onclick = closeAddAdmin;
+  $("addAdminCancel").onclick = closeAddAdmin;
+  $("setPwOpenBtn").onclick = function () { openSetPw(); };
+  $("setPwClose").onclick = closeSetPw;
+  $("setPwCancel").onclick = closeSetPw;
+
   $("addAdmin").onclick = async function () {
-    // ★ 权限**永远明确传**，不指望服务端的默认值 —— 页面上那个下拉框
-    //   默认是「运营」（加人先给最小权限，要全权得自己点一下）。
+    if (!passwordsMatch("newAdminPass", "newAdminPass2")) { return; }
+    // ★ 权限**永远明确传**，不指望服务端的默认值 —— 弹窗里那个下拉框
+    //   每次打开都被重置成「运营」（加人先给最小权限，要全权得自己点一下）。
     var result = await api("/admin/api/admins/add", {
       name: $("newAdminName").value, password: $("newAdminPass").value,
       role: $("newAdminRole").value});
     toast(result.message, result.ok);
     if (result.ok) {
-      $("newAdminName").value = "";
-      $("newAdminPass").value = "";
+      closeAddAdmin();
       renderAdmins(result.admins);
     }
   };
   $("setPw").onclick = async function () {
+    if (!passwordsMatch("pwValue", "pwValue2")) { return; }
     var result = await api("/admin/api/admins/password", {
       name: $("pwName").value, password: $("pwValue").value});
-    $("pwValue").value = "";
     if (result.ok && result.logged_out) {
+      // 改的是自己 ⇒ 整页退到登录界面，弹窗跟着收掉。
+      closeSetPw();
       showLoggedOut(result.message);
       return;
     }
     toast(result.message, result.ok);
+    // ★ 失败时**把窗留着**（名字打错了改一个字就能再试），只清密码那两格。
+    if (result.ok) { closeSetPw(); }
+    else { clearFields(["pwValue", "pwValue2"]); }
   };
 
   // 浮条的位置跟着标题栏走：窗口变窄标题栏可能换行变高，重新量一次。

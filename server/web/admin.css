@@ -335,6 +335,16 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 .field input[type=number] {
   width: 66px; -moz-appearance: textfield; appearance: textfield;
 }
+/* ★★ 装**金币 / 经验**的格子（用户 2026-09-13）。
+   上面那个 66px 是给「数量 / 等级 / 概率」这类两三位数写的，实测**正好只
+   装得下 5 位**（14px 字 + 9px 左右内边距 + 2px 边框）—— 金币一过十万就
+   看着被截断了，而线上早有玩家攒到六七位。
+   104px 是**实测**出来的：左对齐那批 88px 就够 8 位，而奖励表格子里
+   `text-align: right` 那批要 99px（右对齐时浏览器另给光标留一截）。
+   四处写同一个数，取最苛刻那一档再加余量 ⇒ 每一处都真的装得下 8 位。
+   ⚠ 别把 66px 整个改大 —— 掉落行的「数量 / 概率」和配置卡片是按那个宽度
+     排的，一起变宽会把筛选条和卡片挤到换行。 */
+.field input[type=number].num-money { width: 104px; }
 .field input[type=number]::-webkit-outer-spin-button,
 .field input[type=number]::-webkit-inner-spin-button {
   -webkit-appearance: none; margin: 0;
@@ -641,11 +651,17 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 .reward-table thead th { background: var(--paper-2); }
 .reward-table thead tr:first-child th.grp { color: var(--cocoa-ink); }
 .reward-table td > input {
-  width: 84px; text-align: right; padding: 4px 7px;
+  /* ★ 这一批是**右对齐**的，比左对齐多吃 11px（浏览器另给光标留一截）
+     ⇒ 8 位要 99px。原来 84px 只装得下 7 位，金币一过百万就看着被截断。 */
+  width: 104px; text-align: right; padding: 4px 7px;
 }
 /* 经验那一半下面的加成系数。输入框跟表格里的格子一样宽，别一枝独秀。 */
 .reward-bonus { margin: -8px 0 22px 2px; }
-.reward-bonus input { width: 84px; text-align: right; }
+/* ⚠ 选择器必须带 `[type=number]`：光写 `.reward-bonus input` 是 (0,1,1)，
+   压不过上面 `.field input[type=number]` 的 (0,2,0) —— 这一条 2026-09-10
+   写下来就**一直没生效**（那个框一直是 66px 的默认宽），谁也没发现，
+   因为它只是比旁边的格子窄一点、不报错。带上属性选择器变 (0,2,1) 才赢。 */
+.reward-bonus input[type=number] { width: 104px; text-align: right; }
 
 /* ---- 「等级与经验」参照表（只读，D72a）：60 级分三栏并排 ----
    和上面两张表同一套边框 / 表头底色，但它没有输入框：数字右对齐好上下扫，
@@ -699,9 +715,10 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 table { border-collapse: collapse; width: 100%; max-width: 520px; }
 th, td { text-align: left; padding: 7px 10px; border-bottom: 2px solid var(--line); }
 th { color: var(--cocoa-soft); font-weight: 700; background: var(--paper-2); }
-/* 管理员账号那张表 2026-09-13 多了一列「昵称」——520 px 里塞不下
-   「名字 + 昵称 200 + 权限下拉 170 + 删除钮 90」，名字那列会被挤到换行。 */
-#adminsPanel table { max-width: 720px; }
+/* 管理员账号那张表 2026-09-13 多了一列「昵称」。同一天这一页改成
+   「面板撑满、只有列表滚」的壳（`fit-panel` + `.player-list`），
+   表格跟着撑满 —— 不再钉死 720。 */
+#adminsPanel table { max-width: none; }
 /* 没有同名玩家账号的那一格画 `-`：灰一点，别让它看着像一个真昵称。 */
 #adminsPanel td.nick.none { color: var(--cocoa-soft); }
 code {
@@ -1095,14 +1112,26 @@ h3.sub {
 .player-list td { vertical-align: middle; }
 tr.on td { background: #FFFBEF; }
 td .btn-sm { white-space: nowrap; }
-/* 一行两个按钮（「修改仓库」+「设为管理员（运营）」，D40）—— 挤不下就折行，
-   别把名字那几列压扁。 */
-/* 一行两个按钮（左「设为管理员（运营）」+ 右「修改仓库」，D40），
-   整组**右对齐** —— 那一列宽度随权限文字长短变，靠右才对得齐。 */
+/* 按钮组**右对齐**（D40）—— 那一列宽度随按钮文字长短变，靠右才对得齐。
+   ★ 玩家仓库那一列 2026-09-13 起只剩「修改仓库」一个钮（「设为管理员
+   （运营）」搬去「管理员账号」页的弹窗里了），但弹窗那张表的按钮宽度
+   仍然随权限文字变，这条照旧两处共用。 */
 td .acts {
   display: flex; gap: 6px; flex-wrap: wrap;
   align-items: center; justify-content: flex-end;
 }
+/* ★ 「状态」列（用户 2026-09-13）：圆点 + 他现在在哪。
+   圆点和工具条右端那个「当前在线」**共用一套** —— 琥珀色，见上面
+   `.online-tally .dot` 那段注释里写死的「别改回绿」。
+   不在线画空心灰点 + 灰字，和在线那几档一眼分得开。 */
+td.place { white-space: nowrap; font-weight: 600; }
+td.place .dot {
+  display: inline-block; width: 9px; height: 9px; margin-right: 6px;
+  vertical-align: 1px;
+  background: var(--amber); border: 1px solid var(--amber-dark); border-radius: 50%;
+}
+td.place.off { color: var(--cocoa-soft); font-weight: 400; }
+td.place.off .dot { background: transparent; border-color: var(--cocoa-soft); }
 /* 换页栏夹在筛选条和列表之间（数据备份 / 玩家仓库两页还在用；各配置页
    和选择物品弹窗的换页栏 2026-09-09 删了，那个位置换成两行分类标签，D68）：
    上面靠筛选条自己的下边距隔开，下面再留 12px 才接列表。原来是
@@ -1397,7 +1426,7 @@ ul.help li.ro-note { color: var(--crimson); font-weight: 700; }
 /* ⚠ 同理要盖掉 `.field input[type=number] { width: 66px }`（两个选择器
    都是 (0,2,0)，靠写在后面赢）—— 66 px 装不下五位数的卖价。 */
 .sell-price-row .field input[type=number] {
-  flex: 0 0 auto; width: 86px; text-align: center;
+  flex: 0 0 auto; width: 104px; text-align: center;
 }
 /* 玩家只读时那几个框：底色压成次级底、字**不变淡**（浏览器默认那种灰字
    在这身米黄配色里几乎读不出来，而这一页的价钱正是他要看的东西），
@@ -1474,4 +1503,41 @@ ul.help li.ro-note { color: var(--crimson); font-weight: 700; }
   background: linear-gradient(#FFDD79, var(--gold));
   border: 2px solid var(--gold-edge);
 }
+
+/* ======================================================================
+   管理员账号页（用户 2026-09-13，两轮）
+
+   第一轮做成了左右两栏（左名单 / 右两张表单卡）。用户实际用了之后说
+   还是不好看 ⇒ **第二轮把两张表单收进弹窗**，页面上只剩一张名单
+   （走 `fit-panel` 那套壳，一页 10 行），三个入口并排在工具条上。
+   所以这里只剩弹窗里那点表单样式。
+   ====================================================================== */
+/* 「手动添加管理员」/「修改密码」两张表单窗。
+   ⚠ 盖 `.modal .panel` 的宽高要写**三个类**（`.modal .panel.form-panel`）
+     —— 只写 `.form-panel` 权重不够，会被 `.modal .panel` 那条的
+     `height: min(640px, 100%)` 顶回去；表单就四五行，撑到 640 会空一大片。
+   `height: auto` ⇒ 按内容收缩。 */
+.modal .panel.form-panel { width: min(460px, 100%); height: auto; }
+.form-panel .panel-body { display: flex; flex-direction: column; gap: 10px; }
+/* ⚠⚠ `.field.wide` 原本是给**横排**的筛选条写的（`flex: 1 1 220px` = 宽度
+   基准 220）。这里的容器是 `flex-direction: column` ⇒ 那个 220 会被当成
+   **高度**基准，每个字段撑成 220 px 高，几个框之间空出一大片。
+   在这儿把它按回内容高度，`wide` 只保留「输入框撑满」那一半语义。 */
+.form-panel .field.wide { flex: 0 0 auto; }
+.form-panel .field.wide input[type=text],
+.form-panel .field.wide input[type=password] { max-width: none; width: 100%; }
+/* 全局 `label` 自带 10px 上边距，窗里的间距全交给 `.panel-body` 的 gap，
+   两套叠起来会一宽一窄。 */
+.form-panel .field > .lab { margin-top: 0; }
+.form-panel .hint { margin: 0; }
+.form-panel .panel-foot { justify-content: flex-end; gap: 10px; }
+
+/* ---------------- 「指定玩家为管理员」弹窗（用户 2026-09-13）----------------
+   ⚠ 盖 `.modal .panel` 的宽高必须写**三个类**（`.modal .panel.promote-panel`）
+     —— 只写 `.promote-panel` 权重不够，会被 `.modal .panel` 那条的
+     `height: min(640px, 100%)` 顶回去。同 `#sellPriceModal` 踩过的坑。 */
+.modal .panel.promote-panel { width: min(920px, 100%); height: min(660px, 100%); }
+/* 列表自己滚，工具条和换页栏钉住不动 —— 和玩家仓库那一页一个手感。 */
+.promote-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.promote-panel .panel-body { display: flex; flex-direction: column; min-height: 0; }
 

@@ -112,6 +112,7 @@ from account_store import (BASE_CHARACTER_IDS, EXPERIENCE_STEP, LEVEL_MAX,
                            owned_characters, quest_cleared_difficulty,
                            quest_difficulty_records)
 import gameserver
+import lobby
 import shop
 import shopcfg
 from test_shop import (config_dir, parse_equipped_masks,
@@ -3592,6 +3593,168 @@ class ShopProbeTests(unittest.TestCase):
                    and name not in mine and name not in server_direction}
         for opcode in gameserver.SHOP_PROBE_OPCODES:
             self.assertNotIn(opcode, handled, hex(opcode))
+
+
+class PlayerPlaceTests(unittest.TestCase):
+    """★ 「这个人现在在哪」（GM 管理页那一列，用户 2026-09-13）。
+
+    这一组守的是**判据的形状**：位置由两组**互斥的上行包**翻转，房间那几档
+    由大厅那份房间状态现查 —— 全程没有一个「N 秒没动静就算离开」的阈值
+    （铁律 10）。实测依据（`logs/server-20260912-030644.out`）：大厅每 3 秒
+    发一发 `0x0200`，人一进 ShopStage 就**完全停发**，一退出来当场又来一发。
+    """
+
+    Args = CharacterUnlockTests.Args
+
+    def setUp(self):
+        saved = gameserver.eventlog.online
+        gameserver.eventlog.online = lambda _msg: None
+        self.addCleanup(setattr, gameserver.eventlog, "online", saved)
+        self.addCleanup(gameserver.LOBBY.reset)
+
+    def make_conn(self):
+        conn = ShopProbeTests.make_conn(self)
+        conn.account_name = "tester"
+        return conn
+
+    def feed(self, conn, opcode, payload=b""):
+        gameserver.Conn.on_game_packet(conn, opcode, payload)
+
+    # ---------------------------------------------------------- 房间外两档
+    def test_a_fresh_connection_starts_in_the_lobby(self):
+        # ★ 类级默认值那一份 —— `Conn.__new__` 造的连接也得有位置，
+        #   否则管理页第一次查就 AttributeError。
+        self.assertEqual(gameserver.PLACE_LOBBY, gameserver.Conn.place)
+        self.assertEqual(gameserver.PLACE_LOBBY,
+                         gameserver.conn_place(self.make_conn()))
+
+    def test_the_shop_entry_packets_move_him_into_the_shop(self):
+        for opcode in gameserver.SHOP_PLACE_OPCODES:
+            conn = self.make_conn()
+            if opcode in (gameserver.OP_REQ_SHOP_ITEM_LIST,
+                          gameserver.OP_REQ_COMPOSITION_LIST):
+                payload = shop.build_shop_list_request()
+            elif opcode == gameserver.OP_REQ_ITEM_BUY:
+                payload = struct.pack("<i", 0)          # 空购物车
+            elif opcode == gameserver.OP_REQ_COMPOSE_ITEM:
+                payload = struct.pack("<i", 0)          # 不存在的配方
+            else:
+                payload = b""
+            self.feed(conn, opcode, payload)
+            self.assertEqual(gameserver.PLACE_SHOP,
+                             gameserver.conn_place(conn), hex(opcode))
+
+    def test_the_two_ambiguous_packets_do_not_move_him(self):
+        """★★ `0x0700` 和 `0x0601` **故意不算**，各有实据：
+
+        * `0x0700` 持有物清单 —— 大厅和房间也发（6 个调用点）；
+        * `0x0601` 物品定义 —— **结算界面也发**（`0x041c` 材料结算之后紧跟
+          着就是它，客户端不认识刚掉的材料 id）。
+
+        混进来的症状是**一句报错都没有**：刚登录的人被画成「在商店界面」。
+        """
+        for opcode, payload in (
+                (gameserver.OP_REQ_INVENTORY, b""),
+                (gameserver.OP_REQ_ITEM_INFO,
+                 struct.pack("<ii", 1, 1120041) + b"\x02")):
+            conn = self.make_conn()
+            self.feed(conn, opcode, payload)
+            self.assertEqual(gameserver.PLACE_LOBBY,
+                             gameserver.conn_place(conn), hex(opcode))
+            self.assertNotIn(opcode, gameserver.SHOP_PLACE_OPCODES)
+        # 但它们**仍然**归商店段处理（只是不当位置判据）。
+        self.assertLess(set(gameserver.SHOP_PLACE_OPCODES),
+                        set(gameserver.SHOP_PROBE_OPCODES))
+
+    def test_the_lobby_heartbeat_brings_him_back(self):
+        """★ 这是「他离开商店了」的**唯一**事件源 —— 客户端不发任何退出包。"""
+        for opcode in (gameserver.OP_LIST_SESSION, gameserver.OP_REQ_USER_LIST):
+            conn = self.make_conn()
+            self.feed(conn, gameserver.OP_REQ_SHOP_ITEM_LIST,
+                      shop.build_shop_list_request())
+            self.assertEqual(gameserver.PLACE_SHOP, gameserver.conn_place(conn))
+            self.feed(conn, opcode, b"")
+            self.assertEqual(gameserver.PLACE_LOBBY,
+                             gameserver.conn_place(conn), hex(opcode))
+
+    def test_the_flip_is_logged_only_when_it_really_changes(self):
+        """日志按**状态翻转**去重，不按次数 —— 大厅 3 秒一发，按次记一分钟 20 行。"""
+        conn = self.make_conn()
+        for _ in range(5):
+            self.feed(conn, gameserver.OP_LIST_SESSION, b"")
+        self.assertEqual([], [line for line in conn.logged
+                              if line.startswith("位置 -> ")])
+        self.feed(conn, gameserver.OP_REQ_SHOP_ITEM_LIST,
+                  shop.build_shop_list_request())
+        self.feed(conn, gameserver.OP_REQ_GIFT_LIST, b"")
+        self.assertEqual(["位置 -> shop"],
+                         [line for line in conn.logged
+                          if line.startswith("位置 -> ")])
+
+    # ------------------------------------------------------------ 房间四档
+    def enter_room(self, conn, session_type):
+        return gameserver.LOBBY.create_room(conn, session_type=session_type)
+
+    def test_a_room_outranks_whatever_the_client_last_said(self):
+        """★ 房间态**现查**：人在房间里时 `conn.place` 那一格压根不看。
+
+        不这么定的话，「进房之前在商店」的人会一直被画成在商店界面 ——
+        而房间那份状态是四处（进房 / 退房 / 开局 / 结算）都在写的权威。
+        """
+        conn = self.make_conn()
+        self.feed(conn, gameserver.OP_REQ_SHOP_ITEM_LIST,
+                  shop.build_shop_list_request())
+        self.enter_room(conn, gameserver.SESSION_TYPE_QUEST)
+        self.assertEqual(gameserver.PLACE_ROOM_QUEST,
+                         gameserver.conn_place(conn))
+        self.assertEqual(gameserver.PLACE_SHOP, conn.place)   # 那一格没被动过
+
+    def test_quest_and_battle_rooms_split_waiting_from_playing(self):
+        cases = {
+            (gameserver.SESSION_TYPE_QUEST, False): gameserver.PLACE_ROOM_QUEST,
+            (gameserver.SESSION_TYPE_QUEST, True): gameserver.PLACE_PLAY_QUEST,
+            (lobby.SESSION_TYPE_NORMAL, False): gameserver.PLACE_ROOM_BATTLE,
+            (lobby.SESSION_TYPE_NORMAL, True): gameserver.PLACE_PLAY_BATTLE,
+        }
+        for (session_type, playing), expected in cases.items():
+            gameserver.LOBBY.reset()
+            conn = self.make_conn()
+            room = self.enter_room(conn, session_type)
+            if playing:
+                gameserver.LOBBY.update_room(
+                    room, status=lobby.SESSION_STATUS_PLAYING)
+            self.assertEqual(expected, gameserver.conn_place(conn),
+                             (session_type, playing))
+
+    def test_ladder_and_practice_rooms_count_as_battle(self):
+        """天梯 / 练习跟着走**对战**那一支 —— 和客户端结算时自己判的一样
+        （`[LobbyStage+0x1c] == 2` 才是闯关，§161）。"""
+        for session_type in (0, 5, 6):
+            gameserver.LOBBY.reset()
+            conn = self.make_conn()
+            self.enter_room(conn, session_type)
+            self.assertEqual(gameserver.PLACE_ROOM_BATTLE,
+                             gameserver.conn_place(conn), session_type)
+
+    def test_leaving_the_room_puts_him_back_in_the_lobby_right_away(self):
+        """★ 不等客户端下一发 `0x0200`（最迟 3 秒）—— 那 3 秒里他会被画成
+        还在进房之前那个地方。"""
+        conn = self.make_conn()
+        self.feed(conn, gameserver.OP_REQ_SHOP_ITEM_LIST,
+                  shop.build_shop_list_request())
+        self.enter_room(conn, gameserver.SESSION_TYPE_QUEST)
+        gameserver.Conn.leave_room(conn)
+        self.assertEqual(gameserver.PLACE_LOBBY, gameserver.conn_place(conn))
+
+    def test_every_place_code_is_reachable_and_listed(self):
+        """`PLACES` 是管理页筛选和中文名表的唯一出处 —— 少一个的症状是
+        「那个位置的人谁都筛不出来」，一句报错都没有。"""
+        self.assertEqual(len(gameserver.PLACES), len(set(gameserver.PLACES)))
+        self.assertEqual(
+            {gameserver.PLACE_LOBBY, gameserver.PLACE_SHOP,
+             gameserver.PLACE_ROOM_QUEST, gameserver.PLACE_ROOM_BATTLE,
+             gameserver.PLACE_PLAY_QUEST, gameserver.PLACE_PLAY_BATTLE},
+            set(gameserver.PLACES))
 
 
 class ShopBuyAndEquipTests(unittest.TestCase):

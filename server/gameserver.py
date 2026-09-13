@@ -584,6 +584,26 @@ SHOP_PROBE_OPCODES = SHOP_ENTRY_OPCODES + (
     OP_REQ_REPAIR_ITEM, OP_REQ_COMPOSE_ITEM,
     OP_REQ_EQUIP_ITEM, OP_REQ_UNEQUIP_ITEM, OP_REQ_GIFT_ACTION)
 
+#: ★ 收到哪几发就判定「这个人打开了商店界面」（GM 管理页那一列，
+#: 用户 2026-09-13）。**是 `SHOP_PROBE_OPCODES` 的真子集**，逐个说明为什么：
+#:
+#: * 收进来的四发 = 进商店五连发里 ShopStage **独占**的那四发
+#:   （ctor 顺序发；`0x0600` / `0x0605` 在点分类标签时重发、`0x0607` 在收到
+#:   `0x0507` 到货通知时重发 —— 全都只有 ShopStage 发得出来）；
+#: * 外加 `0x0602` 购买 / `0x0606` 合成两个动作包，同样只有商店界面能按。
+#:
+#: **故意排除**的四个，每个都有实据：
+#:
+#: * `0x0700` 持有物清单 —— 大厅和房间也发（`0x5541c1` 有 6 个调用点），
+#:   拿它当判据会把刚登录的人画成「在商店」；
+#: * `0x0601` 物品定义 —— ★ **结算界面也发**（实测：`0x041c` 材料结算之后
+#:   紧跟着就是它，客户端不认识掉落的材料 id）；
+#: * `0x0702` / `0x0703` 穿脱 —— 仓库里做的，但进仓库之前一定先发过上面
+#:   那四发，用不着它；房间面板会不会也发没查过，不赌。
+SHOP_PLACE_OPCODES = (OP_REQ_SHOP_ITEM_LIST, OP_REQ_EQUIPPED_LIST,
+                      OP_REQ_COMPOSITION_LIST, OP_REQ_GIFT_LIST,
+                      OP_REQ_ITEM_BUY, OP_REQ_COMPOSE_ITEM)
+
 #: 每个号「逆出来的形状」和「期望应答」，只用来给日志配一句人话。
 #: ★ 括号里的可信度标记就是 `re/packet_api.md` §3.8 里那一份，别在这儿升级它。
 SHOP_PROBE_NOTES = {
@@ -5601,6 +5621,62 @@ def conn_is_playing(conn):
     return room is not None and room.status == SESSION_STATUS_PLAYING
 
 
+# ---------------------------------------------------------------------------
+# ★ 玩家现在在哪（GM 管理页那一列，用户 2026-09-13）
+#
+# 房间里那几档由 `LOBBY.room_of()` **现查**，房外那两档（大厅 / 商店界面）
+# 得靠上行包推 —— `Conn` 上本来没有任何 stage 字段，商店段是纯请求-应答。
+#
+# ★★ 判据是**两组互斥的上行包**，不是计时器（铁律 10）。实测
+# （`logs/server-20260912-030644.out`）：
+#
+#   · 人在大厅时 `0x0200` 每 3 秒、`0x020d` 每 10 秒发一发 —— LobbyStage 的心跳；
+#   · 02:52:11 进 ShopStage 五连发之后，到 02:52:23 退出为止，
+#     **一发 `0x0200` 都没有**；
+#   · 02:52:23 退回大厅，`0x0200` + `0x020d` 当场各来一发，3 秒节奏恢复。
+#
+# ⇒ 「进商店」和「回大厅」各有自己的事件，谁都不需要「N 秒没动静就算离开」
+#    那种拿一台机器的观测值当真理的过期口径。
+# ---------------------------------------------------------------------------
+#: 大厅（房间列表界面）。
+PLACE_LOBBY = "lobby"
+#: 商店界面。★ 商店 / 合成 / 仓库在客户端是**同一个 ShopStage**
+#: （`re/packet_api.md` §3.8），进去时那五连发逐字节相同（52 次实测载荷里
+#: 分类恒为 `0x2` 新商品）⇒ 服务端**分不出**他打开的是哪一个，合成一档。
+#: 要分开只能让客户端上报（改 hook + 重打客户端包），用户 2026-09-13 否掉了。
+PLACE_SHOP = "shop"
+#: 待机房间 / 游戏中，各分任务（闯关）和对战两档。
+PLACE_ROOM_QUEST = "room_quest"
+PLACE_ROOM_BATTLE = "room_battle"
+PLACE_PLAY_QUEST = "play_quest"
+PLACE_PLAY_BATTLE = "play_battle"
+
+#: 全部位置码。管理页的筛选和中文名表都照着它排，别在别处再抄一份。
+PLACES = (PLACE_LOBBY, PLACE_SHOP, PLACE_ROOM_QUEST, PLACE_ROOM_BATTLE,
+          PLACE_PLAY_QUEST, PLACE_PLAY_BATTLE)
+
+
+def conn_place(conn):
+    """这条连接现在在哪，返回 `PLACE_*` 之一。
+
+    ★ **房间态现查、房外才看 `conn.place`**：房间那份状态是权威的
+    （进房 / 退房 / 开局 / 结算四处都在写它），而 `conn.place` 只是「客户端
+    最近一次自报家门」。人在房间里时商店包根本发不出来，两者不会打架；
+    真打架时也该信房间那份。
+
+    任务 / 对战按 `SESSION_TYPE_QUEST` 分 —— 这正是**客户端结算时自己用的
+    判据**（`[LobbyStage+0x1c] == 2`），天梯 / 练习跟着走对战那一支，
+    和 §161 一个口径。
+    """
+    room = LOBBY.room_of(conn)
+    if room is not None:
+        quest = (room.session_type == SESSION_TYPE_QUEST)
+        if room.is_playing():
+            return PLACE_PLAY_QUEST if quest else PLACE_PLAY_BATTLE
+        return PLACE_ROOM_QUEST if quest else PLACE_ROOM_BATTLE
+    return getattr(conn, "place", PLACE_LOBBY)
+
+
 def room_difficulty(room):
     """闯关房选的**难度**（1..4）；不是闯关房 / 参数不全返回 `None`。
 
@@ -5746,6 +5822,12 @@ class Conn:
     version_rejected = False
     # 客户端最后一次要的那一页合成配方，同理（见 __init__ 里的说明）。
     last_composition_request = None
+    # ★ 他现在停在哪个界面（GM 管理页那一列，用户 2026-09-13），同理。
+    #   起手是大厅：登录成功之后客户端进的就是 LobbyStage。
+    #   ★★ **只管房间外那两档**（`PLACE_LOBBY` / `PLACE_SHOP`）—— 人在房间
+    #   里时 `conn_place()` 压根不看这一格，直接查大厅那份房间状态。
+    #   翻转由上行包驱动，见 `enter_place()` 和 `PLACE_*` 那一节。
+    place = PLACE_LOBBY
     # ★ 位置轨迹同理，但它是**每条连接一份的可变对象** —— 类上放一个共享的
     #   deque 会让所有实例往同一条轨迹里写。所以类级默认放一个空元组当哨兵，
     #   `note_sync_position()` 碰到它时现建一个（只有 `Conn.__new__` 造的
@@ -5905,6 +5987,8 @@ class Conn:
         # 所以客户端一进大厅就停在「对战」标签页上。
         self.channel_code = 0
         self.channel_index = 0
+        # ★ `place`（他停在哪个界面）**只有类级默认值那一处**，这里不再抄一份
+        #   —— 它的初值对每条连接都一样（大厅），两处写会漂移。
         # 战斗中客户端 0x0406 gcpCreateItem 自报的最后一个掉落点（float）。
         # 掉落点就在角色/怪物脚下，所以拿它当控制通道 respawn 的兜底坐标是
         # 合适的；正式重生走 0x0413 -> 0x0419 的回显，用不着它（§112 勘误：
@@ -6355,6 +6439,17 @@ class Conn:
     def lobby_room(self):
         """本连接当前所在的房间（`lobby.Room`），不在房间里就是 ``None``。"""
         return LOBBY.room_of(self)
+
+    def enter_place(self, place):
+        """客户端自报「我现在在 `place`」（`PLACE_LOBBY` / `PLACE_SHOP`）。
+
+        ★ **只在真的翻转时记一行日志**（说过了就不再说，直到状态真的变了）
+        —— 大厅每 3 秒一发 `0x0200`，按次数记的话一分钟就刷 20 行。
+        """
+        if self.place == place:
+            return
+        self.place = place
+        self.log(f"位置 -> {place}")
 
     # ---- 战斗逻辑的三个共用取数口（J.3）------------------------------------
     #
@@ -7054,6 +7149,9 @@ class Conn:
                              f"顶它的是 ip={self.peer()}")
                 other.close_now()
         self.account_name, self.account = name, account
+        # 登录成功 = 客户端进 LobbyStage。直接赋值不走 `enter_place()`：
+        # 这一格本来就是它，记一行「位置 -> lobby」只会和上面那句 ✓ 登录重复。
+        self.place = PLACE_LOBBY
         # ★ 这张票据从现在起也是这个玩家的**重连凭证**：服务端一断，客户端会
         #   自己反复重连并原样重放它（§171），全程不回认证服。所以要把它标成
         #   「已登进游戏服」换一个长得多的有效期，并落盘扛住服务端重启（D096）。
@@ -7320,7 +7418,10 @@ class Conn:
         | 0 | 「推荐对手」| 全部在线的人，按**等级和我接近**排前面 |
 
         两档都**不含自己**（D095）。
+
+        ★ 和 `0x0200` 一样，这一发也是「我在大厅」的事件（用户 2026-09-13）。
         """
+        self.enter_place(PLACE_LOBBY)
         try:
             request = parse_user_list_request(payload)
         except (ValueError, struct.error, IndexError) as error:
@@ -8484,7 +8585,11 @@ class Conn:
         待机中的房间（§170）。
         解析失败就退回「不过滤」，宁可多列几个房间，也不要让列表整个空掉
         （空列表和「服务端挂了」在玩家眼里长得一模一样）。
+
+        ★ 这一发同时是「我在大厅」的事件（用户 2026-09-13）：只有 LobbyStage
+        发它，每 3 秒一发；人一进商店界面就**完全停发**，一退出来当场又来一发。
         """
+        self.enter_place(PLACE_LOBBY)
         game_type = None
         waiting_only = False
         try:
@@ -9605,6 +9710,10 @@ class Conn:
                        else f"房里还剩 {len(result.remaining)} 人")
                     + (f"，{len(result.dropped_bots)} 个 bot 跟着散了"
                        if result.dropped_bots else ""))
+        # 退房 = 客户端切回 LobbyStage（用户 2026-09-13）。★ 它下一发 `0x0200`
+        # 最迟 3 秒后就到，这一句只是把那 3 秒的空窗补上 —— 不补的话，
+        # 「进房之前在商店」的人退房后会有几秒被画成还在商店界面。
+        self.enter_place(PLACE_LOBBY)
         self.after_someone_left(result, system_text or f"{who} 离开了房间。")
         return result
 
@@ -9915,6 +10024,8 @@ class Conn:
                 self.log(f"   请求游戏类型 {game_type} ({name}) 没有对应频道码; 不回包")
                 return
             self.channel_code = channel_code
+            # 切大厅标签页 = 人在大厅（用户 2026-09-13）。
+            self.enter_place(PLACE_LOBBY)
             self.log(f"   请求游戏类型 {game_type} ({name}) -> 频道码 {channel_code}")
             self.log(f"← 回 gspRepMoveInto(ok=1, channel_code={channel_code}, "
                      f"channel_index={self.channel_index})")
@@ -10023,6 +10134,11 @@ class Conn:
         ⚠ **`0x0700` 不在应答之列** —— 它不是商店专用的（`0x5541c1` 有 6 个
         调用点，大厅和房间也发），拿它触发货架下发会在大厅里乱发 `0x0500`。
         """
+        # ★ 「他打开了商店界面」的事件（用户 2026-09-13）。哪几发算、哪几发
+        #   **故意不算**，见 `SHOP_PLACE_OPCODES` 那一节 —— 尤其 `0x0700` 和
+        #   `0x0601` 在大厅 / 结算界面也发，混进来就会把人画到错的地方去。
+        if opcode in SHOP_PLACE_OPCODES:
+            self.enter_place(PLACE_SHOP)
         shape, expected = SHOP_PROBE_NOTES.get(opcode, ("❓未查", "❓未查"))
         name = GCP_NAMES.get(opcode, "?")
         if opcode in SHOP_ENTRY_OPCODES:

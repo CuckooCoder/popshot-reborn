@@ -23,13 +23,13 @@
     POST /admin/api/admins/remove     {name}                                ★系统
     POST /admin/api/admins/from_player {name}  把玩家收成运营（D40）        ★系统
     GET  /admin/api/item?id=1120041   某件东西**现在在商店里**是什么价（选择器侧栏用）
-    GET  /admin/api/players?q=名字&page=0&online=all|on|off  找玩家（一页 10 行）★系统
-    GET  /admin/api/player?name=alice  一个玩家的可编辑资料                 ★系统
-    POST /admin/api/player            {name, level, money, ...}             ★系统
-    GET  /admin/api/reward/players?q=名字&online=all|on|off  发奖弹窗左栏的名单 ★系统
-    POST /admin/api/reward/send       {players, items, exp, money, message}  ★系统
-    GET  /admin/api/reward/history    发奖记录：{ok, records, max}           ★系统
-    POST /admin/api/reward/history/clear  清空发奖记录                       ★系统
+    GET  /admin/api/players?q=名字&page=0&online=…  找玩家（一页 10 行）    ★运营
+    GET  /admin/api/player?name=alice  一个玩家的可编辑资料                 ★运营
+    POST /admin/api/player            {name, level, money, ...}             ★运营
+    GET  /admin/api/reward/players?q=名字&online=all|on|off  发奖弹窗左栏的名单 ★运营
+    POST /admin/api/reward/send       {players, items, exp, money, message}  ★运营
+    GET  /admin/api/reward/history    发奖记录：{ok, records, max}           ★运营
+    POST /admin/api/reward/history/clear  清空发奖记录                       ★运营
     GET  /admin/api/sell/state        装备卖出：{locked, reason, player, quotes, prices} ☆三档
     POST /admin/api/sell              {items:[{id,count}]} 一次性卖掉         ☆三档
     GET  /admin/api/sell/prices       卖价表 + 每个材料小类装着哪些东西       ☆三档
@@ -45,13 +45,24 @@
 | 档 | 拿什么口令进来 | 能看什么 | 能改什么 |
 |---|---|---|---|
 | **系统管理员** `system` | `admin_accounts` 里那份 | 全部标签页 | 全部 |
-| **运营** `operator` | 同上 | 只有 `CONFIG_FILES` 那几个配置页 | 那几页 |
-| **玩家** `player` | **游戏账号**那份（`accounts`）| 同上，**只读** | 一个字都不能改 |
+| **运营** `operator` | 同上 | 配置页 + **玩家仓库**（用户 2026-09-13）| 那几页 |
+| **玩家** `player` | **游戏账号**那份（`accounts`）| 配置页，**只读** | 一个字都不能改 |
 
-上面标了 ★系统 的接口走 `_require_system_admin()`，写配置和存卖价那两发走
-`_require_editor()`。**前台把标签藏起来、把输入框锁上只是画面**，真正的门
-在这两个函数里 —— `test_web_admin` 有两条用例分别拿运营和玩家身份逐个路径
-打一遍，确认该 403 的全是 403。
+标 ★系统 的走 `_require_system_admin()`（只剩**数据备份**和**管理员账号**
+两页）；标 ★运营 的走 `_require_editor()` —— 写配置、存卖价，以及
+**玩家仓库整页**（找人 / 改资料 / 发奖 / 发奖记录）。
+
+⚠⚠ **「玩家仓库」开给运营时，闸只能是 `_require_editor()`，不能是
+`_require_admin()`** —— 后者只问「登没登录」，**只读玩家也过得去**，
+那等于让任何一个游戏账号都能改别人的仓库。
+
+★ 同一天把「设为管理员（运营）」从玩家仓库搬去了「管理员账号」页（D97c），
+所以这次开放**不会**顺带把提权能力交给运营 —— 那颗钮和它的接口
+（`/admin/api/admins/from_player`）仍旧在 ★系统 那一档。
+
+**前台把标签藏起来、把输入框锁上只是画面**，真正的门在这几个函数里 ——
+`test_web_admin` 有两条用例分别拿运营和玩家身份逐个路径打一遍，
+确认该 403 的全是 403。
 
 ★★ 标了 ☆三档 的是「装备卖出」那一页（用户 2026-09-12）——
 **整个 `/admin` 里唯一一处普通玩家也能写东西的地方**。上表那条
@@ -530,18 +541,37 @@ def default_admin_password_in_use(accounts):
         account_store.DEFAULT_ADMIN_PASSWORD) == account_store.AUTH_OK)
 
 
-def _online_usernames():
-    """现在有哪些账号连着游戏服。拿不到（比如单跑注册页）就当没人在线。
+def _online_places():
+    """现在有哪些账号连着游戏服，各自停在哪个界面：``{账号名: 位置码}``。
+
+    位置码就是 `gameserver.PLACE_*`（大厅 / 商店界面 / 待机房间·任务 /
+    待机房间·对战 / 游戏中·任务 / 游戏中·对战），中文名在前台那份 `PLACE_ZH`。
+    拿不到 `gameserver`（比如单跑注册页）就当没人在线。
 
     ★ **惰性 import** `gameserver`：`web/` 这一层本来不依赖游戏服，
     单元测试和 `--no-web` 之外的组合都不该因为它而多背一个大模块。
+
+    ★ **整个 `web/` 层只有这一处遍历连接表**（`_online_usernames()` 是它的
+    切片）—— 一次请求扫一遍就够，别再加第二个遍历函数。
+
+    ★ 同一个账号短暂出现两条连接（断线重连那一瞬）时**后者覆盖前者**：
+    `_conns` 是 append 顺序，后连上的那条才是他现在用的。
     """
     try:
         import gameserver
     except ImportError:
-        return set()
-    return {conn.account_name for conn in gameserver.all_conns()
-            if conn.account_name}
+        return {}
+    places = {}
+    for conn in gameserver.all_conns():
+        if not conn.account_name:
+            continue
+        places[conn.account_name] = gameserver.conn_place(conn)
+    return places
+
+
+def _online_usernames():
+    """现在有哪些账号连着游戏服。拿不到（比如单跑注册页）就当没人在线。"""
+    return set(_online_places())
 
 
 def _in_match(username):
@@ -570,14 +600,40 @@ def _in_match(username):
     return False
 
 
-#: 玩家仓库那条「在线」筛选的三档（用户 2026-09-10，D75）。前台那个下拉照
-#: 这三个值发，`test_web_admin` 拿它当清单逐档打一遍。
-ONLINE_FILTERS = ("all", "on", "off")
+#: 玩家仓库那条「在线」筛选的五档（三档是用户 2026-09-10 的 D75，
+#: `idle` / `playing` 两档是用户 2026-09-13 加的）。前台那个下拉照这些值发，
+#: `test_web_admin` 拿它当清单逐档打一遍。
+ONLINE_FILTERS = ("all", "on", "off", "idle", "playing")
 
 
-def _online_filter(wanted, online):
+def _idle_places():
+    """「在待机」= 人在线但**没在打**：大厅 / 商店界面 / 待机中的房间。
+
+    ★ 定义由 `gameserver.PLACES` 减去「游戏中」那两档**算出来**，不手抄一份
+    —— 以后再加一个位置码时，它要么自动归进待机、要么得有人明确把它归进
+    `_playing_places()`，不会出现「新位置谁都筛不出来」。
+    """
+    try:
+        import gameserver
+    except ImportError:
+        return ()
+    playing = _playing_places()
+    return tuple(place for place in gameserver.PLACES if place not in playing)
+
+
+def _playing_places():
+    """「在游戏中」= 真进图了，含任务和对战两档。"""
+    try:
+        import gameserver
+    except ImportError:
+        return ()
+    return (gameserver.PLACE_PLAY_QUEST, gameserver.PLACE_PLAY_BATTLE)
+
+
+def _online_filter(wanted, places):
     """把 `online=` 那个查询参数翻成 `search_accounts(keep=…)` 要的判据。
 
+    `places` 就是 `_online_places()` 那张 ``{账号名: 位置码}``。
     `all` 返回 `None` = 不筛。
 
     ★ **认不出来的值也当「全部」**（不是当错误）：筛选是个「看」的东西，
@@ -585,9 +641,15 @@ def _online_filter(wanted, online):
     """
     wanted = str(wanted or "all").strip().lower()
     if wanted == "on":
-        return lambda username, _account: username in online
+        return lambda username, _account: username in places
     if wanted == "off":
-        return lambda username, _account: username not in online
+        return lambda username, _account: username not in places
+    if wanted == "idle":
+        idle = set(_idle_places())
+        return lambda username, _account: places.get(username) in idle
+    if wanted == "playing":
+        playing = set(_playing_places())
+        return lambda username, _account: places.get(username) in playing
     return None
 
 
@@ -898,6 +960,10 @@ def _player_view(username, account):
     equipped = set(account_store.equipped_items(account))
     inventory = account_store.inventory_items(account)
     materials = account_store.material_counts(account)
+    # ★ 「在线」和「他在哪」取**同一份快照**（用户 2026-09-13 第二轮：
+    #   这两处也要写清楚在哪，不光是「在线」）—— 分两次取的话，
+    #   人正好在这中间下线就会画出「在线（不在线）」这种自相矛盾的话。
+    places = _online_places()
 
     return {
         "username": username,
@@ -908,7 +974,9 @@ def _player_view(username, account):
         "level_start_exp": start,
         "next_level_exp": nxt,
         "money": account_store.player_money(account),
-        "online": username in _online_usernames(),
+        "online": username in places,
+        # 不在线就是 None；中文名在前台那份 `PLACE_ZH`（和玩家列表同一套）。
+        "place": places.get(username),
         "materials": [{"id": item_id, "count": materials[item_id],
                        "stackable": True}
                       for item_id in sorted(materials)],
@@ -1741,9 +1809,10 @@ class AdminRoutes:
 
         `online` 是 `all`（默认）/ `on` / `off`（用户 2026-09-10，D75）。
 
-        ★ **系统管理员专用**（D34）：玩家仓库整页对运营不开放。
+        ★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。
         """
-        if self._require_system_admin() is None:
+        who = self._require_editor()
+        if who is None:
             return
         fields = urllib.parse.parse_qs(query or "")
         raw = (fields.get("q") or [""])[0]
@@ -1753,8 +1822,9 @@ class AdminRoutes:
             page = 0
         # ★ 这一份快照要在搜索**之前**取：下面那个筛选判据、每行那个 `online`、
         #   和工具条上的「当前在线：N 人」用的是**同一份**，三者天生对得上。
-        online = _online_usernames()
-        keep = _online_filter((fields.get("online") or ["all"])[0], online)
+        places = _online_places()
+        online = set(places)
+        keep = _online_filter((fields.get("online") or ["all"])[0], places)
         found, total = self.accounts.search_accounts(
             raw, limit=PLAYER_PAGE_SIZE, offset=page * PLAYER_PAGE_SIZE,
             keep=keep)
@@ -1769,8 +1839,16 @@ class AdminRoutes:
         # 「设为管理员（运营）」那个按钮要知道这个人**现在是什么权限**（D40）：
         # 已经是了就把按钮换成灰的、写上他的实际权限。★ 一次取整张表再查，
         # 别对着 10 行各问一次 `admin_role()`（那是 10 次加锁 + 10 次读盘）。
-        admin_roles = {row["name"]: row["role"]
-                       for row in self.accounts.admin_list()}
+        #
+        # ★★ **只发给系统管理员**（用户 2026-09-13 把这一页开给运营之后）：
+        #    用它的只有「指定玩家为管理员」那个弹窗，而那个弹窗和它背后的
+        #    `/admin/api/admins/from_player` 都是系统管理员专用。发给运营
+        #    等于让他从玩家列表里推断出整张管理员名单 —— 那张名单在
+        #    「管理员账号」页，运营本来就看不到。
+        admin_roles = {}
+        if self.accounts.admin_role(who) == account_store.ADMIN_ROLE_SYSTEM:
+            admin_roles = {row["name"]: row["role"]
+                           for row in self.accounts.admin_list()}
         self._send_json({
             "ok": True,
             "page": page,
@@ -1789,14 +1867,19 @@ class AdminRoutes:
                 "level": account_store.player_level(account),
                 "money": account_store.player_money(account),
                 "online": username in online,
+                # ★ 在线的人**现在停在哪个界面**（用户 2026-09-13）：
+                #   大厅 / 商店界面 / 待机房间·任务|对战 / 游戏中·任务|对战。
+                #   不在线就是 None。中文名在前台那份 `PLACE_ZH` ——
+                #   服务端只发码，和 `admin_role` 一个路子。
+                "place": places.get(username),
                 # 不是管理员就是 None —— 前台按「有没有值」决定按钮画哪一种。
                 "admin_role": admin_roles.get(username),
             } for username, account in found],
         })
 
     def _admin_player_get(self, query):
-        """`/admin/api/player?name=…` —— 一个玩家的可编辑资料。★ 系统管理员专用。"""
-        if self._require_system_admin() is None:
+        """`/admin/api/player?name=…` —— 一个玩家的可编辑资料。★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。"""
+        if self._require_editor() is None:
             return
         username = (urllib.parse.parse_qs(query or "").get("name") or [""])[0]
         _name, account = self.accounts.get_account(username)
@@ -1812,7 +1895,7 @@ class AdminRoutes:
         D23a）：等级门槛在**穿上**那一刻还要再判一次，塞进仓库并不等于
         绕过了它 —— 等级不够就是穿不上。
         """
-        admin = self._require_system_admin()
+        admin = self._require_editor()
         if admin is None:
             return
         username = str(data.get("name") or "").strip()
@@ -1867,14 +1950,18 @@ class AdminRoutes:
 
         **不分页**（勾人要看全的），最多 `REWARD_LIST_MAX` 行；`q` / `online`
         和玩家仓库那一页同一套判据（`search_accounts` + `_online_filter`）。
-        ★ 系统管理员专用（和 `_admin_player_search` 同一档）。
+        ★ 和 `_admin_player_search` 同一档：系统管理员 · 运营都能用。
         """
-        if self._require_system_admin() is None:
+        if self._require_editor() is None:
             return
         fields = urllib.parse.parse_qs(query or "")
         raw = (fields.get("q") or [""])[0]
-        online = _online_usernames()
-        keep = _online_filter((fields.get("online") or ["all"])[0], online)
+        # 这一页的下拉只有「全部 / 在线 / 不在线」三档（用户没点它，别顺手改）
+        # —— `_online_filter` 照样认那三个值，多出来的两档它用不上。
+        # ★ 但每行**要带位置**：左栏那句话 2026-09-13 改成了「在线（在哪）」。
+        places = _online_places()
+        online = set(places)
+        keep = _online_filter((fields.get("online") or ["all"])[0], places)
         found, total = self.accounts.search_accounts(
             raw, limit=REWARD_LIST_MAX, offset=0, keep=keep)
         self._send_json({
@@ -1887,6 +1974,7 @@ class AdminRoutes:
                 "nickname": account_store.display_name(account),
                 "level": account_store.player_level(account),
                 "online": username in online,
+                "place": places.get(username),
             } for username, account in found],
         })
 
@@ -1896,9 +1984,9 @@ class AdminRoutes:
         载荷 `{players: [...], items: {id: 数量}, exp, money, message}`。每个玩家：
         每样奖励各成**一份礼物**（`add_gifts`）；不可堆叠的装备**已经拥有就跳过**
         并在回执里点名（塞第二件是句空话，§28）；在线的当场推 `0x0507` 提醒。
-        ★ 系统管理员专用。
+        ★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。
         """
-        admin = self._require_system_admin()
+        admin = self._require_editor()
         if admin is None:
             return
         try:
@@ -1961,8 +2049,8 @@ class AdminRoutes:
                          "results": results})
 
     def _admin_reward_history(self):
-        """`GET /admin/api/reward/history` —— 发过哪几次（新的在前）。★ 系统管理员专用。"""
-        if self._require_system_admin() is None:
+        """`GET /admin/api/reward/history` —— 发过哪几次（新的在前）。★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。"""
+        if self._require_editor() is None:
             return
         # 时间在**服务端**格成人话（和数据备份页同一个口径）：管理员和服务器
         # 不一定在同一个时区，而「那一次是几点发的」说的是**服务器上**的几点。
@@ -1980,11 +2068,11 @@ class AdminRoutes:
                          "records": records})
 
     def _admin_reward_history_clear(self):
-        """`POST /admin/api/reward/history/clear` —— 把发奖记录全删掉。★ 系统管理员专用。
+        """`POST /admin/api/reward/history/clear` —— 把发奖记录全删掉。★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。
 
         只删**记录**：已经发出去的礼物还躺在玩家的礼物盒里，这里碰不到它们。
         """
-        admin = self._require_system_admin()
+        admin = self._require_editor()
         if admin is None:
             return
         count = gifthistory.clear(log=eventlog.online)
