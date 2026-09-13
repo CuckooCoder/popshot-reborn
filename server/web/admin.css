@@ -52,6 +52,10 @@
   --moss:       #7C9A4B;   /* 苔绿：开着的开关（拨轨） */
   --moss-dk:    #5F7A34;   /* 同色深一档：描边 / 字 / 白字徽标底 */
 
+  /* 「改过、还没保存」那一行外面那圈光。★ 就是 `--crimson` 兑出来的 ——
+     用户 2026-09-14 拍板：这件事和工具条上那句「有未保存的修改」同色。 */
+  --edit-glow:  rgba(192, 39, 45, .38);
+
   --line:       #E2CFAB;   /* 分隔线 / 输入框描边 */
 }
 
@@ -754,6 +758,58 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 .level-table tbody th.lv { background: var(--paper-2); }
 .level-table tbody tr th, .level-table tbody tr td { border-bottom: none; }
 .reward-note { margin: -8px 0 4px 2px; }
+
+/* ------------------------------------ 「改过了，还没保存」（用户 2026-09-14）
+
+   工具条上那句「有未保存的修改」只说了「有」，不说「在哪」—— 一页几百条，
+   改完一格挪开眼睛就再也找不回来了。⇒ 改过的那**一整行 / 一整张卡**换一圈边框。
+
+   ★ 用户 2026-09-14 拍板：**就用绯红**，和工具条上那句「有未保存的修改」
+     同一个色（那句话是这一页原来就有的，一个字没动），外面再加一圈**发光**。
+   ★ **只换描边 + 那圈光，底色一个字不动**：底色那一格是「上架 /
+     关着 / 没有」在用的（`.item-card.listed` / `.card-row.off` / `.own.off`），
+     改了就把那几样信号盖掉了。
+   ★ 和 `.bad`（服务端拒收的那一条）**靠底色分**：`.bad` 多一层粉底
+     `#FFF2F2` 和那段 `flash` 动画。它写在这一节**后面**，压得过这里。 */
+.item-card.edited, .recipe-card.edited, .rule-row.edited,
+.own.edited, .sell-price-row.edited, .card-cond.edited {
+  border-color: var(--crimson);
+  box-shadow: 0 0 8px 1px var(--edit-glow);
+}
+/* ★ 称号卡片页关着的行整行 `opacity: .55`（`.card-row.off`），**连光一起淡**
+   —— 而「把这一张关掉」恰恰是这一页最常做的那一改。⇒ 关着又改过的行换成
+   深一档的红、光也加厚一档，淡完之后看着和别处那一圈差不多。
+   （`opacity` 是整棵子树一起合成的，靠给子元素写 `opacity: 1` 救不回来。） */
+.card-row.off.edited {
+  border-color: var(--crimson-dk);
+  box-shadow: 0 0 11px 2px rgba(192, 39, 45, .72);
+}
+/* 奖励表的格子只有**下**边框（画整圈会把格子撑开、整张表跟着歪）——
+   改成内描边 + 往里发的光，占的还是原来那块地方。
+   一条记录 = 一组两格，两格一起亮。 */
+.reward-table td.edited {
+  box-shadow: inset 0 0 0 2px var(--crimson), inset 0 0 7px var(--edit-glow);
+}
+/* 加成系数那一格是个**整行宽**的壳（1221px），画框会拉出一条横贯整页的红线
+   —— 标它里面那个输入框就够（同下面「等级 / 金币」那一条）。
+   ⚠ 选择器得带 `[type=number]` 才压得过 `.field input[type=number]`
+     （同这一页 `.reward-bonus` 自己那条注释里踩过的坑）。 */
+.reward-bonus.edited input[type=number] {
+  border-color: var(--crimson);
+  box-shadow: 0 0 7px 1px var(--edit-glow);
+}
+/* 等级 / 金币 / 备份设置那几格：它们不是「一件物品」，本来也没有自己的
+   边框 —— 标在**那个输入框**上（同一套色，光小一号）。 */
+.field.edited > input, .field.edited > select,
+.field.edited .with-suffix > input {
+  border-color: var(--crimson);
+  box-shadow: 0 0 7px 1px var(--edit-glow);
+}
+/* 开关（备份页「每天自动备份」那一个）只有一条拨轨可标。★ 字色不动 ——
+   那是 `.toggle.on` 的苔绿在说「开着没有」，两件事别挤在一个位置上。 */
+.toggle.edited .track {
+  border-color: var(--crimson); box-shadow: 0 0 7px 1px var(--edit-glow);
+}
 
 /* 出错时高亮那一张卡（服务端把下标写在错误里，前台定位过来） */
 .flash { animation: flash 1.6s ease-out; }

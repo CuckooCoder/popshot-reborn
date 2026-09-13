@@ -852,6 +852,79 @@ function isDirty(which) {
   return CFG[which] && snapshot(which) !== CFG[which].snapshot;
 }
 
+/* ----------------------------------------- 「这一条改过了」（用户 2026-09-14）
+
+   工具条上那句「● 有未保存的修改」只说了「有」，没说「在哪」——
+   一页几百条，改完一格挪开眼睛就找不回来了。⇒ 每条记录进页面时按原样
+   留一份**基线**，和基线不一样的那一行整行换个边框（`.edited`，样式在
+   `admin.css` 的「改过了」那一节）。
+
+   ★ 基线存在 `WeakMap` 里、键是**记录对象本身**，不是下标：删一条
+     （`killButton`）、加一条（`addEntry`）都会让下标整体挪位，按下标存的话
+     删掉第 3 条会让后面每一条都变成「改过了」。记录对象本身从进页面到
+     保存为止是同一个（架构那一段：「模型是原对象本身」），拿它当键最稳。
+   ★ 比的是 `stableJson`（键序无关）—— 改一格常常是**删掉一个键再加回来**
+     （`fieldNode` 里可选字段留空那一支），直接 `JSON.stringify` 比的话
+     键序一变就成了假阳性（同 `cardEditDirty` 那条理由）。
+   ★ 基线在 `adoptConfig` 里和 `snapshot()` **同一时刻**记下：
+     `fillItems` / `fillRewards` / `fillCards` 补出来的那些也算基线的一部分，
+     不然一进页面几百条全亮着。 */
+var ROW_BASE = new WeakMap();
+
+/** 记下「磁盘上那份」。`baseCount` 是当时有几条 —— 删掉的那些在画面上
+ *  没有行可标，只能靠它数出来。 */
+function markBase(which) {
+  var cfg = CFG[which];
+  var count = 0;
+  (cfg.entries || []).forEach(function (entry) {
+    if (entry && typeof entry === "object") {
+      ROW_BASE.set(entry, stableJson(entry));
+      count += 1;
+    }
+  });
+  cfg.baseCount = count;
+}
+
+/** 这一条和进页面时那份比，改过没有。**没有基线 = 新加的**，也算改过。 */
+function entryEdited(entry) {
+  if (!entry || typeof entry !== "object") { return false; }
+  var was = ROW_BASE.get(entry);
+  return was === undefined || was !== stableJson(entry);
+}
+
+/** 改 / 增 / 删 各几条。 */
+function editCounts(which) {
+  var cfg = CFG[which] || {};
+  var out = {changed: 0, added: 0, removed: 0};
+  var kept = 0;
+  (cfg.entries || []).forEach(function (entry) {
+    if (!entry || typeof entry !== "object") { return; }
+    var was = ROW_BASE.get(entry);
+    if (was === undefined) { out.added += 1; return; }
+    kept += 1;
+    if (was !== stableJson(entry)) { out.changed += 1; }
+  });
+  out.removed = Math.max(0, (cfg.baseCount || 0) - kept);
+  return out;
+}
+
+/** 把 `.edited` 刷到画出来的那些行上。
+ *
+ * ★ **画完统一扫一遍**，不在 6 个渲染器里各写一句（同 `lockList()` 那条
+ *   理由）：判据是「元素身上有没有 `data-index`」—— 那个属性本来就是
+ *   `markBadCard` 定位用的，每个渲染器都已经挂了，以后新加的画面只要
+ *   照挂就自动被收进来。
+ * ★ 奖励表的 `data-index` 挂在**格子**上（一行里有好几条记录），
+ *   一条记录的两格一起亮，正好是它在画面上占的那一块。 */
+function paintEdited(host, which) {
+  var entries = (CFG[which] || {}).entries || [];
+  Array.prototype.forEach.call(
+    host.querySelectorAll("[data-index]"), function (node) {
+      var entry = entries[Number(node.getAttribute("data-index"))];
+      node.classList.toggle("edited", entryEdited(entry));
+    });
+}
+
 async function loadConfig(which) {
   var result = await api("/admin/api/config/" + which);
   if (bounced(result)) { return false; }
@@ -893,6 +966,9 @@ function adoptConfig(which, text, warnings, path) {
   if (which === "rewards") { fillRewards(); }
   if (which === "cards") { fillCards(); }
   CFG[which].snapshot = snapshot(which);
+  // ★ 和 `snapshot()` 同一时刻：两个说的是同一件事（「磁盘上当时是什么样」），
+  //   一个管整页那句话、一个管每一行的边框，分开记迟早对不上。
+  markBase(which);
   return true;
 }
 
@@ -1246,8 +1322,16 @@ function touched() {
   node.className = "dirty" + (dirty ? "" : " clean");
   $("cfgSave").disabled = !dirty;
   $("cfgReset").disabled = !dirty;
+  // ★ 删掉的那几条**只能靠一句话说**：行都没了，边框标在哪儿都不对
+  //   （改过的和新增的自己会亮，不用在这儿再数一遍）。
+  // ★★ 写在**面板标题**那一格，不写在工具条上那句话后面：工具条是一行 flex，
+  //   掉落页那一条筛选开着时在 1320 里只剩 70 px 余量（CSS 里量过的那一处），
+  //   再往「有未保存的修改」后面接七个字，整条当场折成两行。
+  var gone = dirty ? editCounts(CURRENT).removed : 0;
   $("cfgCount").textContent =
-    CFG[CURRENT].entries.length + " " + CAT.schema[CURRENT].unit;
+    CFG[CURRENT].entries.length + " " + CAT.schema[CURRENT].unit
+    + (gone ? "（删掉 " + gone + " 条还没保存）" : "");
+  paintEdited($("cfgList"), CURRENT);
 }
 
 /* ======================================================================
@@ -2638,6 +2722,9 @@ function paintCardSay() {
   shown.listed = true;
   box.textContent = cardRuleText(shown);
   box.classList.toggle("bad-text", !!why);
+  // ★ 排在下面那句 `if (!cond) return` **前面** —— 「对局模式」那个窗
+  //   走的就是那一支，排在后面的话它那几格永远标不上。
+  paintCardEdited();
   if (!cond) { return; }
   // 「条件无效」四个字底下补一行说清哪儿不对 —— 只写四个字的话，
   // 人得自己一格格试出来是哪一条错了。
@@ -2645,6 +2732,34 @@ function paintCardSay() {
   $("cardCondWhy").classList.toggle("hidden", !why);
   // ★ 配不出来的东西**存不进去**（用户 2026-09-13：「此时无法保存」）。
   $("cardCondSave").disabled = !!why;
+}
+
+/** 弹窗里改过的那几格 / 那几行套上「改过了」那一圈（用户 2026-09-14）。
+ *
+ * 比的是**打开弹窗那一刻的规则**（`CARD_EDIT.entry`），和 `cardEditDirty()`
+ * 一个口径 —— 那一句管「关窗前要不要问」，这一圈管「到底动了哪一格」。
+ * ★ 条件行按**位置**比：删掉第一条之后后面全体上移，那几行确实都变了
+ *   （存回去的就是新的顺序），照实标出来比假装没动强。 */
+function paintCardEdited() {
+  if (!CARD_EDIT) { return; }
+  var entry = CARD_EDIT.entry, draft = CARD_EDIT.draft;
+  if (CARD_EDIT.which === "mode") {
+    Array.prototype.forEach.call(
+      $("cardModeFields").querySelectorAll("[data-key]"), function (node) {
+        var key = node.getAttribute("data-key");
+        node.classList.toggle(
+          "edited", stableJson(draft[key]) !== stableJson(entry[key]));
+      });
+    return;
+  }
+  var was = entry.conditions || [];
+  Array.prototype.forEach.call(
+    $("cardCondRows").querySelectorAll("[data-at]"), function (row) {
+      var at = Number(row.getAttribute("data-at"));
+      row.classList.toggle(
+        "edited",
+        stableJson((draft.conditions || [])[at]) !== stableJson(was[at]));
+    });
 }
 
 /** 把弹窗里改好的那份写回规则，然后整页重画一遍。 */
@@ -2795,6 +2910,7 @@ function cardCondRow(cond, at, list) {
   var limits = cardLimits();
   var info = cardMetricInfo(cond.metric);
   var row = el("div", "card-cond");
+  row.setAttribute("data-at", at);        // 「改过了」那一圈按它找行
   var gap = function () { row.appendChild(el("div", "cond-gap")); };
   (cardSpec("conditions").fields || []).forEach(function (spec) {
     if (spec.key === "join") {
@@ -3792,6 +3908,14 @@ function backupTouched() {
   var node = $("backupDirty");
   node.textContent = dirty ? "有未保存的改动" : "";
   node.className = "dirty" + (dirty ? "" : " clean");
+  if (!BACKUP) { return; }
+  // 改过的那一格套上「改过了」那一圈（用户 2026-09-14）。★ 这三样不是
+  // 「一件物品」，标的是**各自那一格**，不是整条工具条。
+  var s = BACKUP.settings, e = BACKUP.edit;
+  $("backupEnabled").classList.toggle("edited", !!s.enabled !== !!e.enabled);
+  $("backupTime").parentNode.classList.toggle("edited", s.time !== e.time);
+  $("backupKeepDays").parentNode.classList.toggle(
+    "edited", Number(s.keep_days) !== Number(e.keep_days));
 }
 
 function renderBackupStatus() {
@@ -4478,6 +4602,34 @@ function playerTouched() {
   var node = $("playerDirty");
   node.textContent = dirty ? "有未保存的修改" : "没有未保存的修改";
   node.className = "dirty" + (dirty ? "" : " clean");
+  paintPlayerEdited();
+}
+
+/** 这个人的这一件东西，和刚读回来那份比改过没有。
+ *  ★ 服务端没给的那些 = 0 件（`adoptPlayer` 就是这么摊平的）。 */
+function ownEdited(bucket, itemId) {
+  var was = 0;
+  (PLAYER.view[bucket] || []).forEach(function (row) {
+    if (Number(row.id) === Number(itemId)) { was = row.count; }
+  });
+  return Number(PLAYER.edit[bucket][itemId] || 0) !== Number(was);
+}
+
+/** 改过的那几格 / 等级 / 金币各自套上「改过了」那一圈（用户 2026-09-14）。
+ *
+ * ★ 等级和金币标的是**那一格**：它俩不是「一件物品」，整行标过去就把
+ *   旁边只读的经验也圈进来了。 */
+function paintPlayerEdited() {
+  if (!PLAYER) { return; }
+  $("playerLevel").parentNode.classList.toggle(
+    "edited", Number(PLAYER.edit.level) !== Number(PLAYER.view.level));
+  $("playerMoney").parentNode.classList.toggle(
+    "edited", Number(PLAYER.edit.money) !== Number(PLAYER.view.money));
+  Array.prototype.forEach.call(
+    $("playerOwnedGrid").querySelectorAll("[data-own]"), function (node) {
+      var at = node.getAttribute("data-own").split(":");
+      node.classList.toggle("edited", ownEdited(at[0], Number(at[1])));
+    });
 }
 
 function renderPlayer() {
@@ -4613,6 +4765,9 @@ function ownNode(bucket, itemId) {
   var stack = ownStackable(bucket, itemId);
   var have = Number(PLAYER.edit[bucket][itemId]) > 0;
   var box = el("div", "own" + (stack || have ? "" : " off"));
+  // 「改过了」那一圈按它找格子（`paintPlayerEdited`）。★ 数字框改完
+  // **格子本身不重画**（见下面 `oninput` 那句），所以这一圈只能靠扫属性刷。
+  box.setAttribute("data-own", bucket + ":" + itemId);
   box.appendChild(slotNode(itemId, 26, false, false));
 
   // 名字那两行也挂上浮窗（被省略号截掉时全名在浮窗里）。★ 数字框和按钮
@@ -5850,6 +6005,16 @@ function paintSellPriceDirty() {
   var node = $("sellPriceDirty");
   node.textContent = dirty ? "有未保存的修改" : "没有未保存的修改";
   node.className = "dirty" + (dirty ? "" : " clean");
+  // 改过的那一档套上「改过了」那一圈（用户 2026-09-14）。这一窗最多十来格，
+  // 但档位名字（「特殊材料」「高级材料」）差一个字，不标出来真会存错档。
+  if (!SELL_PRICES) { return; }
+  Array.prototype.forEach.call(
+    $("sellPriceBody").querySelectorAll("[data-price-key]"), function (row) {
+      var key = row.getAttribute("data-price-key");
+      row.classList.toggle(
+        "edited",
+        Number(SELL_PRICES.edit[key]) !== Number(SELL_PRICES.base[key]));
+    });
 }
 
 /** 一个价格格子：一行「标签 + 输入框 + 单位」，底下一行「这一档装着什么」。
@@ -5859,6 +6024,7 @@ function paintSellPriceDirty() {
  */
 function sellPriceField(key, label, suffix, names, max) {
   var wrap = el("div", "sell-price-row");
+  wrap.setAttribute("data-price-key", key);   // 「改过了」那一圈按它找格子
   var field = el("div", "field");
   field.appendChild(el("span", "lab", label));
   var input = document.createElement("input");

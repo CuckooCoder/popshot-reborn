@@ -27,7 +27,7 @@ MODULES = ("test_account_store", "test_savecrypt", "test_gameserver", "test_onli
            "test_chrprops",
            "test_shopdata", "test_shopcfg", "test_shop", "test_cfgmerge",
            "test_sellprice", "test_cards", "test_cardtext",
-           "test_web_admin", "test_backup",
+           "test_web_admin", "test_admindirty", "test_backup",
            "test_crashwatch", "test_crashstore",
            "test_ballistics",
            "test_relayserver", "test_proxy",
