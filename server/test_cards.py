@@ -799,16 +799,25 @@ class DefaultRulesTests(unittest.TestCase):
         self.assertEqual(sub, registered)
 
     def test_the_lucky_card_is_what_the_user_asked_for(self):
-        """用户 2026-09-13 指定：对战每局格挡 ≥ 30 次**且获胜**才给一张。"""
+        """用户 2026-09-14 在管理页上定的：对战每局格挡 ≥ 36 次**且获胜**，
+        **或者**累计格挡满 166 次，给一张。
+
+        ★ 第三条是**兜底** ——「或者」接在前两条后面（从上往下结合，没有
+        括号），少了它这张全表最强的卡就只有「打出一局好的」一条路。
+        """
         lucky = [r for r in self.rules if r["card"] == 60004][0]
         self.assertEqual("pvp", lucky["mode"])
-        first, second = lucky["conditions"]
+        first, second, third = lucky["conditions"]
         self.assertEqual(shopcfg.CARD_SCOPE_MATCH, first["scope"])
         self.assertEqual("guards", first["metric"])
-        self.assertEqual(30, first["threshold"])
+        self.assertEqual(36, first["threshold"])
         self.assertEqual("won", second["metric"])
         self.assertEqual(1, second["threshold"])
         self.assertEqual(shopcfg.CARD_JOIN_AND, second["join"])
+        self.assertEqual(shopcfg.CARD_SCOPE_TOTAL, third["scope"])
+        self.assertEqual("guards", third["metric"])
+        self.assertEqual(166, third["threshold"])
+        self.assertEqual(shopcfg.CARD_JOIN_OR, third["join"])
 
     def test_each_weapon_card_counts_its_own_weapon(self):
         """★ 指标就是普通的「击杀数」，「用哪把枪」由条件里那一格回答。"""
@@ -874,10 +883,17 @@ class DefaultRulesTests(unittest.TestCase):
         ★ 提示框念的是**不带尾巴**那一版（`with_tail=False`）：它就停在那张
         卡上弹出来、前面还写着「获得条件：」，再说一遍「获得一张卡片」
         纯占宽度 —— 这条用例量的正是它。
+
+        ★★ 上限**按「占几行」算**：234 px ÷ 10 px（字高 10 的全角字）≈ 23 字
+        一行，「获得条件：」自己吃掉 5 个 ⇒ 一行 ≈ 18 字、三行 ≈ 64 字，
+        6 行里还剩 3 行给「可合成：」那几行。原来卡在 **2 行（40 字）**，
+        用户 2026-09-14 把 `60004` 改成三条条件（带括号）之后那句 56 字
+        ⇒ 放宽到 **3 行**。其余 16 句都 ≤ 34 字，还在 2 行里。
+        ⚠ 再往上就要挤「可合成：」了，别顺手再放宽 —— 该改的是那条规则。
         """
         for entry in self.rules:
             line = shopcfg.describe_card_rule(entry, with_tail=False)
-            self.assertLessEqual(len(line), 40,
+            self.assertLessEqual(len(line), 64,
                                  "%s 那句太长了：%s" % (entry["card"], line))
 
     def test_a_switched_off_rule_says_so(self):
@@ -1268,7 +1284,7 @@ class CardTooltipTests(unittest.TestCase):
 
     def test_changing_the_rule_changes_the_description(self):
         """★ 改完保存即刻生效（服务端这一侧）—— 说明是**现算**的，不是快照。"""
-        self.assertIn(shopcfg.CARD_OP_ZH[shopcfg.CARD_OP_GE] + "30",
+        self.assertIn(shopcfg.CARD_OP_ZH[shopcfg.CARD_OP_GE] + "36",
                       self.desc(60004))
         rules = shopcfg.validate_cards(shopdefaults.default_cards())
         for entry in rules:
@@ -1283,7 +1299,7 @@ class CardTooltipTests(unittest.TestCase):
 
     def test_the_fight_master_title_warns_that_it_never_fires(self):
         """⚠ `560002` 的加成要求格斗模式，而中国区客户端根本选不到那个模式
-        —— 说明里必须写明白，不然玩家攒 30 张卡换一个空壳。"""
+        —— 说明里必须写明白，不然玩家攒 50 张卡换一个空壳。"""
         self.assertIn("不会触发", self.desc(560002))
 
 
