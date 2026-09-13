@@ -454,14 +454,25 @@ function paintTip(itemId) {
     });
   }
   // ---- 等级 / 角色限定：取**物品库**那一份（D31），没登记就说清楚 ----
+  //
+  // ★ **穿不上身的东西不画这一行**（用户 2026-09-13）：判据是 `part_flag`
+  //   （占不占装备槽），和 `shopcfg` 那张「哪些物品有等级 / 角色限定」用的是
+  //   同一条 —— 客户端在**穿的那一刻**才读这两个字段，材料 / 消耗品 / 礼包
+  //   读了也没人用，那一行永远是「不限角色　不限等级」。
+  //   ⚠ 它写的是**这件东西自己**的限制；停在称号卡片上时很容易被当成
+  //   「合出来那个称号的限制」误读，而卡片的提示框本来就已经很长了。
+  //   称号自己有 `part_flag`（`0x2000`），停在称号上照画不误。
+  // ★ 没登记的**照画** —— 那一行这时是句诊断（名字 / 等级都在退回原版数据）。
   var rule = itemRuleOf(itemId);
-  var line = el("div", "t-meta");
-  line.appendChild(document.createTextNode(
-    (rule.character === null ? "不限角色"
-      : (CAT.characters[String(rule.character)] || ("角色" + rule.character)))
-    + "　" + (rule.level > 1 ? ("需 " + rule.level + " 级") : "不限等级")
-    + (rule.known ? "" : "（物品库里没登记）")));
-  box.appendChild(line);
+  if ((item && item.part_flag) || !rule.known) {
+    var line = el("div", "t-meta");
+    line.appendChild(document.createTextNode(
+      (rule.character === null ? "不限角色"
+        : (CAT.characters[String(rule.character)] || ("角色" + rule.character)))
+      + "　" + (rule.level > 1 ? ("需 " + rule.level + " 级") : "不限等级")
+      + (rule.known ? "" : "（物品库里没登记）")));
+    box.appendChild(line);
+  }
 
   // ---- 上架状态：商店 / 合成 / 未上架（互斥），带上代价 ----
   var where = listingOf(itemId);
@@ -1062,8 +1073,20 @@ async function postConfig(which, only) {
   // ★ 换成**落盘后的那一份** —— 别人改的东西这一刻就出现在画面上
   //   （用户 2026-09-06：「保存后画面直接更新显示 merge 后的最新状态」）。
   adoptConfig(which, result.text, []);
+  // ★★ 物品表也跟着重取（用户 2026-09-13：「实时根据设置值变化」）：
+  //   称号卡片的 `desc` 是服务端从 `cards.json` / `recipe.json` **现算**的
+  //   （`shopcfg.item_desc_zh`），`CAT` 里那份是**进页面那一刻**的快照。
+  //   不重取的症状正是用户看到的那个：刚把「完美卡片」加进 [队内间谍] 的
+  //   配方并保存，停在那张卡上的浮窗里却还是只有 [完美胜利者] 一个称号
+  //   —— **而且不报错**，人只会以为没保存上。服务端保存时已经
+  //   `invalidate_catalog()` 了，缺的就是前台这一问。
+  //   ★ 不按「哪几页会影响说明」开白名单：判据要落在结果上，不落在
+  //     「谁记得把新加的那一页也写进白名单」上（同 `lockList()`）。
+  var fresh = await loadCatalog();
   if (which === CURRENT) { renderCurrent(); }
-  toast(result.message, true);
+  // 重取失败时**不要**盖掉 `loadCatalog` 报的那句（同 `refreshConfigs`）
+  // —— 存是存上了，但画面上那份说明是旧的，这件事得让人看见。
+  if (fresh) { toast(result.message, true); }
   return true;
 }
 

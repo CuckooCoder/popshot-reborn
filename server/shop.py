@@ -57,6 +57,60 @@ def w_wstr(s):
     return struct.pack("<H", len(text)) + text.encode("utf-16le")
 
 
+#: ★★ 客户端的**换行记号是字面反斜杠 + `n`**，不是 U+000A（§104）。
+#:
+#: 排版器 `0x5be3e7` 只认 `0x5c` 后跟 `n`/`N`；U+000A 它不认，只有
+#: `DrawTextW` 自己会在那儿折行 ⇒ **它多画一行，排版器的 y 却只走一行**，
+#: 下一段就压在上一段身上（用户 2026-09-13 实机：卡片提示框第 1 段三行
+#: 叠成一团）。原版 `Chinese.ini` 里 491 处用的就是字面 `\n`。
+#:
+#: ★★ **前面那个空格是必须的，不是好看** —— 排版器在这条路上**少画一个字**
+#: （`0x5be476` 拷 `esi-1` 个，而 `esi` 在 `0x5be3f7` 已经减过一次）⇒
+#: 紧挨着记号的那个字会被吃掉。空格是拿来**喂给它**的。
+#: 实机对照：发 `"…获得 1 张\n可合成…"` 时画面上写的是「…获得 1」，「张」没了。
+#: 原版自己踩在同一个坑里 —— 236 处中文侧的记号，前一个字符出现最多的是
+#: `n`（`\n\n` 空行）和 `。`/`!`/`?`（丢个句号看不出来）。
+DESC_NEWLINE_WIRE = " \\n"
+
+
+def desc_wire(text):
+    """说明**下发前**把 U+000A 换成客户端认得的字面 `\\n`（§104）。
+
+    ★ **只在下发那一刻换** —— 我们自己这边（`shopcfg.item_desc_zh`、管理页
+    浮窗、测试断言）一路都是真换行，好读也好比。换在 `build_*` 里而不是
+    交给每个调用方，是因为漏一处的症状是「就是那一处的字叠在一起」，
+    不报错（铁律 13 那一类）。
+
+    ⚠ 段分隔符 `|` 不动 —— 那是 `wcstok`（`0x5fa904`）另一套机制。
+    ⚠ 记号前面那个空格是**喂给排版器的**，不是排版好看，见
+    `DESC_NEWLINE_WIRE` 的注释。
+    """
+    # ⚠ **先清掉正文里的反斜杠，再放我们自己的记号进去**：排版器见到 `\`
+    #   就 `add ebx,4`（`0x5be3f8`）—— 连它后面那个字**一起吞掉**，不管后面
+    #   是不是 `n`。运营在物品名里打一个 `\`，画面上就凭空少一个字，
+    #   而且不报错。`|` 那条（`describe_card_rule`）用的也是这个换法。
+    return _no_backslash(text).replace("\n", DESC_NEWLINE_WIRE)
+
+
+def _no_backslash(text):
+    """反斜杠 → `/`。单独一个函数是因为**每一处发给客户端的文本都要过它**。"""
+    return str("" if text is None else text).replace("\\", "/")
+
+
+def text_wire(text):
+    """给客户端画的**单行**文本：物品名 / 送礼人 / 留言（§104）。
+
+    和 `desc_wire` 的差别只有一条：**换行压成空格**，不翻成断行记号 ——
+    那几个标签在 `.ui` 里都只有一行高（`ItemNameTxt` 20 px），
+    真断了行只会顶到别的标签上。反斜杠一样要清掉。
+
+    ★ 这几个字段现在都是单行的（管理页那个留言框是 `<input>`），所以这个
+    函数平时什么都不做 —— 它防的是「哪天有人把它换成 `<textarea>`」
+    和「接口被别的程序直接调」。判据落在结果上，不落在「谁记得别打回车」。
+    """
+    return " ".join(_no_backslash(text).split("\n"))
+
+
 # ---------------------------------------------------------------------------
 # 分类 id（FINDINGS §22）
 #
@@ -362,7 +416,7 @@ def build_shop_stock(item_id, name, price, currency=0, list_price=None,
     | i32 | `+0x0c` | **价格**（旁边的标签是 `가격`）|
     | i32 | `+0x10` | ★ **划线原价**（提示框里「原价 → 现价」左边那个数）|
     | i32 | `+0x14` | 货币：`0` = 픽셀（中文版叫「金币」）/ 非 0 = 캐시（「游戏币」）|
-    | wstr | `+0x18` | ★ **商品说明**（提示框下半那三行，`\\|` 分段，最多 3 段）|
+    | wstr | `+0x18` | ★ **商品说明**（提示框下半那三行，`\\|` 分段，最多 3 段；段内换行下发的是**字面 `\\n`**，§104）|
     | i32 | `+0x1c` | ❓ 未查明，填 0 |
     | i32 n + n×`Item@ShopStock` | `+0x20` | **买了到手的东西** |
 
@@ -382,11 +436,11 @@ def build_shop_stock(item_id, name, price, currency=0, list_price=None,
     """
     entries = list(grants) if grants else [int(item_id)]
     body = (w_i32(item_id)
-            + w_wstr(name)
+            + w_wstr(text_wire(name))      # 单行标签（§104）
             + w_i32(price)
             + w_i32(price if list_price is None else list_price)
             + w_i32(currency)
-            + w_wstr(note)
+            + w_wstr(desc_wire(note))       # ★ 换行换成字面 \n（§104）
             + w_i32(unknown2)
             + w_i32(len(entries)))
     for granted in entries:
@@ -1192,8 +1246,9 @@ def build_gift(gift, item_name=None, note=None):
                              grants=[(item_id, max(1, count), 0)])
     flags = GIFT_FLAG_UNREAD if gift.get("unread", True) else 0
     return (stock
-            + w_wstr(gift.get("sender") or "")
-            + w_wstr(gift.get("message") or "")
+            # 送礼人 / 留言都是**单行**标签（§104）：反斜杠会吃掉后面那个字。
+            + w_wstr(text_wire(gift.get("sender") or ""))
+            + w_wstr(text_wire(gift.get("message") or ""))
             + build_systemtime(gift.get("sent"))
             + w_i32(flags)
             + w_i32(int(gift.get("id") or 0)))
@@ -1294,13 +1349,16 @@ def build_item_info(item_id, name="", part_flag=0, flags=0, level=0,
     全镜像找不到消费点，和 `ShopStock` 剩下那格同款 —— 填 0。
     ★ `desc`（`+0x18`）是**仓库提示框下半那三行**（`0x4554e7` 按 `|` 切成
     最多 3 段，§31）。原版的说明文字随服务端 DB 一起没了。
+    ★ 传进来的 `desc` 用**真换行**，`desc_wire()` 在这儿换成客户端认的
+    字面 `\\n`（§104）——调用方不用记得这件事。
     """
     return (w_i32(item_id)          # +0x04 itemId（map 的 key）
             + w_i32(0)              # +0x08 ❓
             + w_i32(part_flag)      # +0x0c PartFlag 部位掩码
             + w_i32(flags)          # +0x10 形态标志
-            + w_wstr(name)          # +0x14 物品名
-            + w_wstr(desc)          # +0x18 ★ 物品说明（| 分段，最多 3 段）
+            + w_wstr(text_wire(name))   # +0x14 物品名（单行，§104）
+            # +0x18 ★ 物品说明（`|` 分段；段内换行是**字面 `\n`**，§104）
+            + w_wstr(desc_wire(desc))
             + w_i32(level)          # +0x1c ★ 等级要求（> 玩家等级就穿不上）
             + w_i32(0)              # +0x20 ❓
             + w_i16(character)      # +0x24 ★ 角色限定，-1 = 不限

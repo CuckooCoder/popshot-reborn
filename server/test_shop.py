@@ -162,7 +162,7 @@ def parse_rep_item_info(body):
         record["part_flag"] = wire.i32()
         record["flags"] = wire.i32()
         record["name"] = wire.wstr()
-        wire.wstr()                             # +0x18 ❓
+        record["desc"] = wire.wstr()            # +0x18 物品说明（§31 / §104）
         record["level"] = wire.i32()
         wire.i32()                              # +0x20 ❓
         record["character"] = wire.i16()
@@ -888,7 +888,8 @@ class PacketTests(_ShopCase):
                                      lambda i: "左轮 R1"))
         parsed = self.parse_gift(wire)
         wire.done()
-        self.assertEqual(want, parsed["note"])
+        # ★ 线上那份的换行是**字面 `\n`**（§104）；比的还是同一句话。
+        self.assertEqual(shop.desc_wire(want), parsed["note"])
         # 客户端按 `|` 切、**只画前 2 段**（`0x45c4c9` 的 `cmp i,2`）⇒ 不许超过 2 段。
         self.assertLessEqual(parsed["note"].count(shopcfg.DESC_SEPARATOR), 1)
 
@@ -1020,6 +1021,59 @@ class ItemInfoTests(_ShopCase):
         records, skipped, _ = shop.item_info_records([1120041, 9999999, "abc"])
         self.assertEqual(1, len(records))
         self.assertEqual([9999999, "abc"], skipped)
+
+    def test_说明里的换行下发成字面反斜杠n(self):
+        """★★ 客户端的换行记号是**字面 `\\` + `n`**，不是 U+000A（§104）。
+
+        发真换行的话排版器 `0x5be3e7` 不认，只有 `DrawTextW` 自己折 ——
+        它多画一行、排版器的 y 只走一行 ⇒ **下一行压在上一行身上**
+        （用户 2026-09-13 实机看到的就是这个）。
+        """
+        record = parse_rep_item_info(shop.build_rep_item_info(
+            [shop.item_info_of(1120041, desc="第一行\n第二行|下半段")]))[0][0]
+        self.assertEqual("第一行 \\n第二行|下半段", record["desc"])
+        self.assertNotIn("\n", record["desc"], "真换行一个都不能剩")
+        # ⚠ 段分隔符是另一套机制（`wcstok`），不许跟着动。
+        self.assertEqual(1, record["desc"].count(shopcfg.DESC_SEPARATOR))
+
+    def test_货架提示框那段说明也换(self):
+        """★ 两个下发点**都要换** —— 漏一个的症状是「就那一处的字叠在一起」。"""
+        stock = shop.build_shop_stock(1120041, "左轮", 3000, note="甲\n乙")
+        self.assertIn("甲 \\n乙".encode("utf-16le"), stock)
+        self.assertNotIn("甲\n乙".encode("utf-16le"), stock)
+
+    def test_记号前面垫一个空格_不然前一个字会被吃掉(self):
+        """★★ 排版器在换行这条路上**少画一个字**：`0x5be3f7` 先 `dec esi`，
+        `0x5be476` 又只拷 `esi-1` 个 ⇒ 紧挨着记号的那个字没了。
+
+        ✅ 实机对照（用户 2026-09-13）：发「…获得 1 张\\n可合成…」时画面上
+        写的是「…获得 1」，「张」不见了。空格就是拿来喂给它的。
+        """
+        self.assertTrue(shop.DESC_NEWLINE_WIRE.startswith(" "))
+        self.assertEqual("获得 1 张 \\n可合成", shop.desc_wire("获得 1 张\n可合成"))
+
+    def test_单行的那几个字段换行压成空格_不发断行记号(self):
+        """★ 物品名 / 送礼人 / 留言在 `.ui` 里都只有一行高（`ItemNameTxt` 20 px）
+        —— 真断了行只会顶到别的标签上。反斜杠一样要清掉（§104）。"""
+        self.assertEqual("甲 乙", shop.text_wire("甲\n乙"))
+        self.assertEqual("甲/乙", shop.text_wire("甲\\乙"))
+        record = parse_rep_item_info(shop.build_rep_item_info(
+            [shop.item_info_of(1120041, name="左轮\\枪")]))[0][0]
+        self.assertEqual("左轮/枪", record["name"])
+        wire = _Wire(shop.build_gift({"id": 1, "item": 1120041, "count": 1,
+                                      "sender": "G\\M", "message": "甲\n乙"}))
+        parsed = parse_gift(wire)
+        wire.done()
+        self.assertEqual("G/M", parsed["sender"])
+        self.assertEqual("甲 乙", parsed["message"])
+
+    def test_正文里的反斜杠先清掉(self):
+        """⚠ 排版器见到 `\\` 就 `add ebx,4`（`0x5be3f8`）—— **连后面那个字
+        一起吞掉**，不管后面是不是 `n`。运营在名字里打一个反斜杠，画面上就
+        凭空少一个字，还不报错。⇒ 放我们自己的记号进去**之前**先换掉。"""
+        self.assertEqual("甲/乙", shop.desc_wire("甲\\乙"))
+        self.assertEqual("甲/n乙", shop.desc_wire("甲\\n乙"))    # 正文里打的
+        self.assertEqual("甲 \\n乙", shop.desc_wire("甲\n乙"))   # 真换行才是记号
 
 
 class InventoryTests(_ShopCase):

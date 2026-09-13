@@ -872,6 +872,13 @@ ITEM_DESC_MAX_LINES_2 = 3
 #: 说明的段分隔符（客户端 `0x668274` 就是这个字符）。
 DESC_SEPARATOR = "|"
 
+#: 卡片说明里「这张卡能合成什么」那几行的行首（用户 2026-09-13）。
+#:
+#: ★ 原来是一个光秃秃的 `➜` —— 看的人得**猜**它是「合成」还是「变成」还是
+#:   「兑换」。和上一行「获得条件：」一样写成一个词，一眼就分得出
+#:   「这张卡怎么来」和「这张卡能去哪」。
+CARD_CRAFT_PREFIX = "可合成："
+
 #: 压行：数值加成一行最多摆几项。234 px / 字号 10 大约放得下 3 项
 #: （「攻击 +3%　防御 +2%　生命 +2」）。★ 这个数要实机核对。
 BONUS_PER_LINE = 3
@@ -1025,8 +1032,8 @@ def _card_desc_lines(item, card_rules, recipes_table):
 
     ★ **两段是按行数预算分的**（第 1 段 ≈5 行、第 2 段 ≈3 行，§31）：
 
-        第 1 段  获得条件（1 行）+ 每个称号一行「➜ [叫什么] 要什么」
-        第 2 段  每个称号的**加成效果**，一行一个
+        第 1 段  获得条件（1 行）+ 每个称号一行「可合成：[叫什么] 要什么」
+        第 2 段  每个称号的**加成效果**，一行一个，**行首是称号名**
 
     一张卡片能合成好几个称号时两段一起长，各自按预算截断并在末尾写
     「…另有 N 个」。默认的一一对应下是 2 行 + 1 行，很宽裕。
@@ -1051,19 +1058,23 @@ def _card_desc_lines(item, card_rules, recipes_table):
             break
         title = item_name(recipe["result"]) or ("#%s" % recipe["result"])
         shown.append((title, title_effect_zh(recipe["result"])))
-        stats.append("➜ %s　%s" % (title, _recipe_cost_zh(recipe, item.id)))
+        stats.append("%s%s　%s"
+                     % (CARD_CRAFT_PREFIX, title,
+                        _recipe_cost_zh(recipe, item.id)))
     left = len(pairs) - len(shown)
     if left > 0:
         # 放不下的那些至少要说一声有 —— 不说的话玩家会以为只有这几个。
-        stats[-1] = "➜ …另有 %d 个称号用得上它（详见合成界面）" % (left + 1)
+        stats[-1] = ("%s…另有 %d 个称号用得上它（详见合成界面）"
+                     % (CARD_CRAFT_PREFIX, left + 1))
         shown.pop()
     notes = []
-    #: 只有一个称号时不重复写名字（上面那行刚写过）；好几个才要分得清是谁的。
+    #: ★ **每个效果前都写称号名，只有一个时也写**（用户 2026-09-13）：
+    #:   不写名字的那一行看上去像是**卡片自己**的效果，而卡片穿不上身、
+    #:   本来就没有效果 —— 名字才是「这是合出来那个称号的效果」的标记。
     for title, effect in shown[:ITEM_DESC_MAX_LINES_2]:
         if not effect:
             continue
-        notes.append(effect if len(shown) == 1
-                     else "%s　%s" % (title, effect))
+        notes.append("%s　%s" % (title, effect))
     return stats, notes
 
 

@@ -581,7 +581,7 @@ class CardTooltipTests(unittest.TestCase):
         for card in shopcfg.ALL_CARDS:
             text = self.desc(card)
             self.assertIn("获得条件：", text, card)
-            self.assertIn("➜ ", text, card)          # 能合成什么
+            self.assertIn(shopcfg.CARD_CRAFT_PREFIX, text, card)  # 能合成什么
             self.assertIn("金币", text, card)          # 要花多少
 
     def test_the_title_effect_comes_along(self):
@@ -603,7 +603,7 @@ class CardTooltipTests(unittest.TestCase):
         self.write_recipes(rows)
         text = self.desc(110001)
         self.assertIn("获得条件：", text)
-        self.assertNotIn("➜", text)
+        self.assertNotIn(shopcfg.CARD_CRAFT_PREFIX, text)
         self.assertNotIn(shopcfg.DESC_SEPARATOR, text, "空段也不该切出来")
 
     def test_a_recipe_that_needs_several_cards_lists_them_all(self):
@@ -618,13 +618,15 @@ class CardTooltipTests(unittest.TestCase):
                 entry["materials"] = [{"id": 60004, "count": 500},
                                       {"id": 60006, "count": 50}]
         self.write_recipes(rows)
-        line = [l for l in self.desc(60004).split("\n") if l.startswith("➜")][0]
+        line = [l for l in self.desc(60004).split("\n")
+                if l.startswith(shopcfg.CARD_CRAFT_PREFIX)][0]
         self.assertIn("幸运卡片×500", line)
         self.assertIn("红心卡片×50", line)
         self.assertLess(line.index("幸运卡片"), line.index("红心卡片"))
         # 反过来停在红心卡片上时，红心排最前面。
         other = [l for l in self.desc(60006).split("\n")
-                 if l.startswith("➜") and "幸运幸存者" in l][0]
+                 if l.startswith(shopcfg.CARD_CRAFT_PREFIX)
+                 and "幸运幸存者" in l][0]
         self.assertLess(other.index("红心卡片"), other.index("幸运卡片"))
 
     def test_a_card_used_by_several_titles_lists_them_all(self):
@@ -644,6 +646,37 @@ class CardTooltipTests(unittest.TestCase):
                              shopcfg.ITEM_DESC_MAX_LINES)
         self.assertLessEqual(len(segments[1].split("\n")),
                              shopcfg.ITEM_DESC_MAX_LINES_2)
+
+    def test_every_title_that_uses_the_card_shows_its_own_effect(self):
+        """★ **几个称号就写几条效果，每条行首是称号名**（用户 2026-09-13）。
+
+        用户的实际配置就是这一型：`[队内间谍]` 要两种卡片，而其中一种
+        `完美卡片` 同时又是 `[完美胜利者]` 的材料 —— 停在那张卡上时
+        **两个称号的效果都得写出来**，只写一条人分不清写的是哪个。
+        """
+        rows = shopcfg.validate_recipes(shopcfg.default_recipes())
+        for entry in rows:
+            if entry["result"] == 560007:
+                entry["materials"] = [{"id": 60007, "count": 20},
+                                      {"id": 60001, "count": 1}]
+        self.write_recipes(rows)
+        effects = self.desc(60001).split(shopcfg.DESC_SEPARATOR)[1]
+        lines = effects.split("\n")
+        self.assertEqual(2, len(lines), effects)
+        for title in ("[完美胜利者]", "[队内间谍]"):
+            line = [l for l in lines if l.startswith(title)]
+            self.assertEqual(1, len(line), title)
+            self.assertIn(shopcfg.title_effect_zh(
+                560001 if title == "[完美胜利者]" else 560007), line[0])
+
+    def test_the_effect_line_carries_the_title_name_even_when_alone(self):
+        """★ 只有一个称号时**也**写名字（用户 2026-09-13）。
+
+        不写的话那一行看上去像是**卡片自己**的效果 —— 卡片穿不上身，
+        它没有效果。
+        """
+        effects = self.desc(60004).split(shopcfg.DESC_SEPARATOR)[1]
+        self.assertTrue(effects.startswith("[幸运幸存者]"), effects)
 
     def test_too_many_titles_get_truncated_but_still_say_so(self):
         """放不下的那些至少要说一声有 —— 不说的话玩家会以为只有这几个。"""
