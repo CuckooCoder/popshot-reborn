@@ -3008,6 +3008,27 @@ var PLAYER = null;        // {view, edit:{level, money, materials, inventory}}
 var PLAYER_LIST = [];
 var PLAYER_PAGE = {page: 0, pages: 1, total: 0, size: 10, q: "", online: "all"};
 
+//: 运营把鼠标指到那颗锁住的「修改仓库」上时说的话（用户 2026-09-13 第五轮）。
+//  ★ 一处定义两处用（按钮的 `title` + 页面说明那一句），别各写各的。
+var LOCKED_LOCKER_NOTE = "运营权限不能直接修改玩家仓库";
+
+/** 说明块里那条「你改不了仓库」——**只画给运营看**。
+ *
+ * ★ 上面那三条讲的都是「怎么改」，而运营根本改不了 —— 不说一句的话，
+ *   他只会对着那颗灰按钮猜是不是页面坏了。
+ * ★ 按**身份**判（不是「有没有那颗钮」）：和 `isReadOnly()` 那一套同一个
+ *   路子，一处一处地判「这个东西该不该画」迟早漏。
+ */
+function paintLockedLockerNote() {
+  var note = $("playersLockedNote");
+  var locked = !isSystemAdmin();
+  note.textContent = locked
+    ? LOCKED_LOCKER_NOTE + " —— 这一页你可以查玩家、看他现在在哪、"
+      + "批量发送奖励，但「修改仓库」要系统管理员来。"
+    : "";
+  note.classList.toggle("hidden", !locked);
+}
+
 //: 在线筛选那几档的中文名（D75 三档 + 用户 2026-09-13 的两档）。值和服务端
 //  `admin.ONLINE_FILTERS` 一样，下拉本身在 `admin.html` 里 —— 这份表只给
 //  「N 个账号（不在线）」那句话和空列表文案用。
@@ -3162,7 +3183,19 @@ function renderPlayerRows() {
     //   `.acts` 那层右对齐留着 —— 表头那 110px 是按它量的。
     var acts = el("div", "acts");
     var button = el("button", "btn btn-sm btn-primary", "修改仓库");
-    button.onclick = function () { openPlayer(row.username); };
+    // ★★ 运营进得了这一页、也能批量发奖，但**改不了别人的仓库**
+    //   （用户 2026-09-13 第五轮）。
+    //   ⚠ 锁法是 `aria-disabled` 而**不是** `disabled`：浏览器不给
+    //     `disabled` 元素派发鼠标事件，那句 `title` 提示根本弹不出来 ——
+    //     而这颗钮锁住之后的全部意义就是告诉他「为什么点不了」。
+    //     点不动靠的是**不绑 onclick**；真正的门在服务端
+    //     （`GET`/`POST /admin/api/player` 都是 `_require_system_admin()`）。
+    if (isSystemAdmin()) {
+      button.onclick = function () { openPlayer(row.username); };
+    } else {
+      button.setAttribute("aria-disabled", "true");
+      button.title = LOCKED_LOCKER_NOTE;
+    }
     acts.appendChild(button);
     td.appendChild(acts);
     line.appendChild(td);
@@ -4971,6 +5004,9 @@ function applyRoleToTabs() {
     var tab = button.getAttribute("data-tab");
     button.classList.toggle("hidden", !canOpenTab(tab));
   });
+  // 「玩家仓库」那条「你改不了仓库」的说明跟着身份走 —— 挂在这儿而不是
+  // 切页那一处：把自己降成运营时它当场就该出现（同 `self_demoted` 那条路）。
+  paintLockedLockerNote();
   // 权限被现场降级时，人可能正停在一个已经不该看的页上 —— 拉回第一页。
   // ★ 「`CAT` 还没到手就别切」那道保险挪进了 `switchTab`（它最后那一句
   //   `renderCurrent()` 才是要 `CAT` 的）—— 留在这儿的话，登录那一瞬间

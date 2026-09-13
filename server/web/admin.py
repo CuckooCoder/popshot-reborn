@@ -24,8 +24,8 @@
     POST /admin/api/admins/from_player {name}  把玩家收成运营（D40）        ★系统
     GET  /admin/api/item?id=1120041   某件东西**现在在商店里**是什么价（选择器侧栏用）
     GET  /admin/api/players?q=名字&page=0&online=…  找玩家（一页 10 行）    ★运营
-    GET  /admin/api/player?name=alice  一个玩家的可编辑资料                 ★运营
-    POST /admin/api/player            {name, level, money, ...}             ★运营
+    GET  /admin/api/player?name=alice  一个玩家的可编辑资料                 ★系统
+    POST /admin/api/player            {name, level, money, ...}             ★系统
     GET  /admin/api/reward/players?q=名字&online=all|on|off  发奖弹窗左栏的名单 ★运营
     POST /admin/api/reward/send       {players, items, exp, money, message}  ★运营
     GET  /admin/api/reward/history    发奖记录：{ok, records, max}           ★运营
@@ -45,16 +45,30 @@
 | 档 | 拿什么口令进来 | 能看什么 | 能改什么 |
 |---|---|---|---|
 | **系统管理员** `system` | `admin_accounts` 里那份 | 全部标签页 | 全部 |
-| **运营** `operator` | 同上 | 配置页 + **玩家仓库**（用户 2026-09-13）| 那几页 |
+| **运营** `operator` | 同上 | 配置页 + **玩家仓库**（用户 2026-09-13）| 配置页 + 批量发奖；**改不了别人的仓库** |
 | **玩家** `player` | **游戏账号**那份（`accounts`）| 配置页，**只读** | 一个字都不能改 |
 
-标 ★系统 的走 `_require_system_admin()`（只剩**数据备份**和**管理员账号**
-两页）；标 ★运营 的走 `_require_editor()` —— 写配置、存卖价，以及
-**玩家仓库整页**（找人 / 改资料 / 发奖 / 发奖记录）。
+标 ★系统 的走 `_require_system_admin()`（**数据备份**、**管理员账号**，
+以及「玩家仓库」页里**「修改仓库」那条路**）；标 ★运营 的走
+`_require_editor()` —— 写配置、存卖价，以及玩家仓库页的**找人 / 发奖 /
+发奖记录**。
 
-⚠⚠ **「玩家仓库」开给运营时，闸只能是 `_require_editor()`，不能是
+★★ **「玩家仓库」这一页对运营是「能看能发奖、改不了仓库」**
+（用户 2026-09-13 第五轮）：
+
+| 那一页上的事 | 接口 | 运营 |
+|---|---|---|
+| 找人 / 看列表（含谁在哪）| `GET /admin/api/players` | ✅ |
+| 批量发送奖励 + 发奖记录 | `/admin/api/reward/*` | ✅ |
+| **修改仓库**（等级 / 金币 / 材料 / 物品）| `GET` + `POST /admin/api/player` | ❌ 403 |
+
+前台那颗「修改仓库」钮对运营是锁住的，**但锁住的按钮拦不住直接 POST** ——
+真正的门是这两发上的 `_require_system_admin()`。★ 连**读**都关：那一发回的是
+那个人仓库里的每一件东西，既然改不了也没必要看（最小权限）。
+
+⚠⚠ **开给运营的那几发，闸只能是 `_require_editor()`，不能是
 `_require_admin()`** —— 后者只问「登没登录」，**只读玩家也过得去**，
-那等于让任何一个游戏账号都能改别人的仓库。
+那等于让任何一个游戏账号都能翻全服的玩家列表。
 
 ★ 同一天把「设为管理员（运营）」从玩家仓库搬去了「管理员账号」页（D97c），
 所以这次开放**不会**顺带把提权能力交给运营 —— 那颗钮和它的接口
@@ -1878,8 +1892,18 @@ class AdminRoutes:
         })
 
     def _admin_player_get(self, query):
-        """`/admin/api/player?name=…` —— 一个玩家的可编辑资料。★ 系统管理员 · 运营都能用（用户 2026-09-13）；只读玩家 403。"""
-        if self._require_editor() is None:
+        """`/admin/api/player?name=…` —— 一个玩家的可编辑资料。
+
+        ★★ **系统管理员专用**（用户 2026-09-13 第五轮）：运营进得了「玩家仓库」
+        这一页、也能批量发奖励，但**不能直接改别人的仓库**。
+        ⇒ 「修改仓库」那条路（这一发 + `POST /admin/api/player`）对他关着。
+
+        ★ 连**读**都关：按钮在前台已经锁住，他本来就打不开这个弹窗；
+        而这一发回的是那个人仓库里的**每一件东西**，既然改不了，也没必要看
+        （最小权限）。发奖弹窗要的那份名单走 `/admin/api/reward/players`，
+        只有名字 / 昵称 / 等级 / 在不在线，和这一发不是一回事。
+        """
+        if self._require_system_admin() is None:
             return
         username = (urllib.parse.parse_qs(query or "").get("name") or [""])[0]
         _name, account = self.accounts.get_account(username)
@@ -1894,8 +1918,12 @@ class AdminRoutes:
         ★ **商店在卖的东西也能直接发**（用户 2026-09-06 推翻了 D23，见
         D23a）：等级门槛在**穿上**那一刻还要再判一次，塞进仓库并不等于
         绕过了它 —— 等级不够就是穿不上。
+
+        ★★ **系统管理员专用**（用户 2026-09-13 第五轮）：运营改不了别人的仓库。
+        前台把「修改仓库」那颗钮锁住了，但**锁住的按钮拦不住直接 POST** ——
+        真正的门在这一句。
         """
-        admin = self._require_editor()
+        admin = self._require_system_admin()
         if admin is None:
             return
         username = str(data.get("name") or "").strip()

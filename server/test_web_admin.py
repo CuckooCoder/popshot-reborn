@@ -28,6 +28,7 @@ import account_store                                           # noqa: E402
 import cfgmerge                                                  # noqa: E402
 import config as server_config                                 # noqa: E402
 import databackup                                              # noqa: E402
+import eventlog                                                # noqa: E402
 import gameserver                                             # noqa: E402
 import gifthistory                                           # noqa: E402
 import lobby                                                   # noqa: E402
@@ -62,6 +63,16 @@ class _AdminCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # ★★ **把运营事件日志掐掉**（2026-09-13）：存档和配置都进了临时目录，
+        #   可 `eventlog.online()` 的落点是**真实的 `logs/online.log`** ——
+        #   跑一次这一组就往运营审计日志里灌几十条假记录（「添加了管理员
+        #   'carol'」「登录失败 'alice'」）。那份日志是出事时翻账用的，
+        #   混进测试噪音会**把排查往错的方向带**：2026-09-13 排一次
+        #   「管理员名单怎么少了 17 个」时就差点被这些假记录误导。
+        #   `ShopProbeTests` 早就这么做了，这一组照抄。
+        saved_online = eventlog.online
+        eventlog.online = lambda _msg: None
+        self.addCleanup(setattr, eventlog, "online", saved_online)
         # ★ 配置接口走的是无参的 `shopcfg.path_of()` ⇒ 改模块级的 DATA_DIR。
         #   存档也放进这份 data 目录 —— 和真实布局一样，数据备份才会把它卷进去。
         self.data_dir = os.path.join(self.tmp.name, "data")
@@ -861,6 +872,37 @@ class AdminAssetTests(_AdminCase):
         self.assertIsNotNone(promote_rows)
         self.assertIn("promoteToAdmin", promote_rows.group(1))
 
+    def test_the_locked_edit_button_uses_aria_disabled_not_disabled(self):
+        """★★ 运营那颗锁住的「修改仓库」必须用 `aria-disabled`，**不能**用
+        `disabled`（用户 2026-09-13 第五轮）。
+
+        浏览器**不给 `disabled` 元素派发鼠标事件** ⇒ 它上面的 `title`
+        根本弹不出来。而这颗钮锁住之后的全部意义，就是在鼠标指上去时说清
+        「为什么点不了」—— 用 `disabled` 的话，用户看到的是一颗灰按钮
+        加**一片沉默**，只会以为页面坏了。
+
+        点不动靠的是**不绑 onclick**；真正的门在服务端。
+        """
+        _status, _h, raw = self.fetch("/admin/admin.js")
+        js = raw.decode("utf-8")
+        rows = re.search(r"function renderPlayerRows\(\) \{(.*?)\n\}", js, re.S)
+        self.assertIsNotNone(rows)
+        body = rows.group(1)
+        self.assertIn('setAttribute("aria-disabled", "true")', body)
+        self.assertIn("LOCKED_LOCKER_NOTE", body)
+        # 那一段里不许出现 `xxx.disabled = true`。
+        self.assertNotRegex(body, r"\.disabled\s*=\s*true")
+        # 只有系统管理员才绑得上点击。
+        self.assertIn("if (isSystemAdmin())", body)
+        # 文案一处定义，两处用（按钮 title + 说明块那一句）。
+        self.assertIn('var LOCKED_LOCKER_NOTE = "运营权限不能直接修改玩家仓库";', js)
+        self.assertIn("function paintLockedLockerNote()", js)
+        # 锁住的那身衣服在 CSS 里也得有（否则看着还是一颗能点的钮）。
+        _status, _h, css_raw = self.fetch("/admin/admin.css")
+        css = css_raw.decode("utf-8")
+        self.assertIn('.btn[aria-disabled="true"]', css)
+        self.assertIn("cursor: not-allowed", css)
+
     def test_every_modal_footer_has_exactly_one_gold_main_button(self):
         """★ 弹窗底栏（`.panel-foot`）那颗**主**钮一律是金色 `.btn-primary`。
 
@@ -1163,18 +1205,29 @@ class AdminAssetTests(_AdminCase):
         self.assertIn("players", self.js_list(js, "EDITOR_TABS"))
         self.assertNotIn("players", self.js_list(js, "SYSTEM_ONLY_TABS"))
         self.assertNotIn("players", self.js_list(js, "EVERYONE_TABS"))
-        # ★ 服务端：那一页的每个接口都不许再用 `_require_system_admin()`，
-        #   也不许退到只问登录的 `_require_admin()`。
+        # ★ 服务端：那一页的接口分**两类**（用户 2026-09-13 第五轮）。
+        #   ⚠ 两类都不许退到只问登录的 `_require_admin()` —— 那个连只读玩家
+        #     都放行。
         source = io.open(web_admin.__file__, encoding="utf-8").read()
-        for name in ("_admin_player_search", "_admin_player_get",
-                     "_admin_player_save", "_admin_reward_players",
-                     "_admin_reward_send", "_admin_reward_history",
-                     "_admin_reward_history_clear"):
+
+        def guard_of(name):
             body = re.search(r"def %s\(self.*?\n(.*?)\n    def " % name,
                              source, re.S)
             self.assertIsNotNone(body, name)
-            self.assertIn("_require_editor()", body.group(1), name)
-            self.assertNotIn("_require_system_admin()", body.group(1), name)
+            return body.group(1)
+
+        # 看 + 发奖 —— 运营也能用。
+        for name in ("_admin_player_search", "_admin_reward_players",
+                     "_admin_reward_send", "_admin_reward_history",
+                     "_admin_reward_history_clear"):
+            body = guard_of(name)
+            self.assertIn("_require_editor()", body, name)
+            self.assertNotIn("_require_system_admin()", body, name)
+        # ★★ 改仓库那条路 —— **只有系统管理员**（读和写都是）。
+        for name in ("_admin_player_get", "_admin_player_save"):
+            body = guard_of(name)
+            self.assertIn("_require_system_admin()", body, name)
+            self.assertNotIn("_require_editor()", body, name)
 
     def test_the_config_tabs_in_the_page_match_the_server(self):
         # 前台 `CONFIGS` 和服务端 `CONFIG_FILES` 是同一份清单的两半 ——
@@ -1568,13 +1621,13 @@ class OperatorPermissionTests(_AdminCase):
         self.assertTrue(self.request("/admin/api/catalog")[1]["ok"])
         self.assertTrue(self.request("/admin/api/item?id=1120041")[1]["ok"])
 
-    def test_the_locker_page_is_open_to_operators(self):
-        """「玩家仓库」整页对运营开放（用户 2026-09-13）—— 找人 / 看资料 /
-        改资料 / 发奖 / 翻发奖记录，五件事都得真的走得通。
+    def test_an_operator_can_look_and_send_rewards_on_the_locker_page(self):
+        """「玩家仓库」对运营是**能看能发奖**（用户 2026-09-13）。
 
         ★ 这一页原来是系统管理员专档（D34）。放开的前提是同一天把
         「设为管理员（运营）」搬去了「管理员账号」页 —— 提权那颗钮和它的
         接口仍旧关着（见下面那条 403 用例里的 `from_player`）。
+        「改仓库」那条路也关着，由下一条用例守。
         """
         self.accounts.register("alice", "pw1")
         status, found = self.request("/admin/api/players?q=alice")
@@ -1585,12 +1638,36 @@ class OperatorPermissionTests(_AdminCase):
         #    弹窗（系统管理员专用）。发了就等于让运营从玩家列表里推断出整张
         #    管理员名单 —— 那张名单他本来就看不到。
         self.assertEqual([None], [p["admin_role"] for p in found["players"]])
-        self.assertTrue(self.request("/admin/api/player?name=alice")[1]["ok"])
-        self.assertTrue(self.request(
-            "/admin/api/player", {"name": "alice", "level": 3, "money": 50,
-                                  "materials": {}, "inventory": {}})[1]["ok"])
+        # 列表里照样看得到「他现在在哪」—— 那正是运营要的。
+        self.assertIn("place", found["players"][0])
         self.assertTrue(self.request("/admin/api/reward/players?q=")[1]["ok"])
         self.assertTrue(self.request("/admin/api/reward/history")[1]["ok"])
+
+    def test_an_operator_cannot_touch_anyone_locker(self):
+        """★★ 运营**改不了别人的仓库**（用户 2026-09-13 第五轮）。
+
+        前台把「修改仓库」那颗钮锁住了（`aria-disabled` + 一句 title），
+        但**锁住的按钮拦不住直接 POST** —— 这条用例就是直接打那两发。
+
+        ★ 连 `GET` 都关：那一发回的是那个人仓库里的每一件东西，既然改不了
+        也没必要看（最小权限）。发奖要的那份名单走 `/admin/api/reward/players`，
+        只有名字 / 昵称 / 等级 / 在不在线，是另一发。
+        """
+        self.accounts.register("alice", "pw1")
+        before = self.accounts.get_account("alice")[1]
+        money_before = account_store.player_money(before)
+        for path, payload in (
+                ("/admin/api/player?name=alice", None),
+                ("/admin/api/player", {"name": "alice", "level": 60,
+                                       "money": 99999999,
+                                       "materials": {}, "inventory": {}}),
+        ):
+            status, result = self.request(path, payload)
+            self.assertEqual(403, status, path)
+            self.assertFalse(result["ok"], path)
+        # ★ 判据落在**存档**上，不只是状态码：真被改了的话钱数会变。
+        after = self.accounts.get_account("alice")[1]
+        self.assertEqual(money_before, account_store.player_money(after))
 
     def test_every_system_only_api_is_403(self):
         """★★ 前台把那两个标签藏起来只是画面 —— 这条用例是**直接 POST**，

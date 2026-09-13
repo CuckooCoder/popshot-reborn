@@ -272,6 +272,19 @@ ul.help b, .hint b { color: var(--crimson); }
 .btn:disabled {
   opacity: .45; cursor: default; transform: none; box-shadow: 0 2px 0 #C98A1D;
 }
+/* ★★ 「锁住、但要能说明为什么」的钮（用户 2026-09-13 第五轮：运营的
+   「修改仓库」）。
+   ⚠⚠ **不能用 `disabled`** —— 浏览器不给 `disabled` 元素派发鼠标事件，
+     它上面的 `title` 那句提示**根本弹不出来**，而这颗钮的全部意义就是
+     告诉他「为什么点不了」。所以用 `aria-disabled` + 这身衣服：
+     长得和 `:disabled` 一模一样，但照样 hover 得到。
+   点不动靠的是**不绑 `onclick`**（键盘 Tab 过去按回车也一样没反应），
+   而真正的门在服务端 `_require_system_admin()`。 */
+.btn[aria-disabled="true"] {
+  opacity: .45; transform: none; box-shadow: 0 2px 0 #C98A1D;
+  cursor: not-allowed;
+}
+.btn[aria-disabled="true"]:hover { filter: none; }
 .btn-primary {
   background: linear-gradient(#FFDD79, var(--gold));
   border-color: var(--gold-edge); box-shadow: 0 2px 0 #B8830F;
