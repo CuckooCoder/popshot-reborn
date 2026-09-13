@@ -475,6 +475,96 @@ class TotalScopeTests(unittest.TestCase):
         self.assertEqual({}, bases)
 
 
+class ExplainTests(unittest.TestCase):
+    """★ 结算时那一段**调试日志**（用户 2026-09-14）：每张卡为什么给 / 为什么不给。
+
+    ★★ 它和 `due_grants` 走的是**同一套谓词**（`_applies` / `eval_conditions`）
+    —— 日志和真发的卡出自两次不同的计算，迟早会出现「日志说该发、玩家没
+    收到」那种查不动的事。这一组里最要紧的就是最后那条「两边结论一致」。
+    """
+
+    def say(self, rules, *, mode="pvp", stage=None, difficulty=None,
+            match=None, total=None, bases=None):
+        return "\n".join(cards.explain(
+            rules, mode=mode, stage=stage, difficulty=difficulty,
+            match=match or {}, total=total or {}, bases=bases or {}))
+
+    def test_a_match_condition_shows_what_it_got_and_what_it_needs(self):
+        text = self.say([rule(60001, cond("guards", threshold=30))],
+                        match={"guards": 12})
+        self.assertIn(cards.NO_MARK + " 不发", text)
+        self.assertIn("本局 12（要 30）", text)
+
+    def test_a_granted_card_says_so_and_names_the_reset(self):
+        text = self.say([rule(60001, cond("guards", threshold=5,
+                                          scope=shopcfg.CARD_SCOPE_TOTAL))],
+                        total={"pvp": {"guards": 7}})
+        self.assertIn(cards.OK_MARK + " 发 1 张", text)
+        # ★ 累计那一档三个数都要写：这一轮 / 阈值 / 从哪个基准起算。
+        self.assertIn("这一轮 7/5（累计 7 − 基准 0）", text)
+        self.assertIn("计数器归零 → guards=7", text)
+
+    def test_a_baseline_is_spelled_out(self):
+        """★★ 「累计 143 却只算 43」一眼看不出来就会被当成掉数 ——
+        上一次查「火焰弹少算一次」正是卡在这儿。"""
+        text = self.say([rule(60001, cond("kills", threshold=100,
+                                          scope=shopcfg.CARD_SCOPE_TOTAL))],
+                        total={"pvp": {"kills": 143}},
+                        bases={"60001": {"kills": 100}})
+        self.assertIn("这一轮 43/100（累计 143 − 基准 100）", text)
+
+    def test_a_switched_off_card_is_one_short_line(self):
+        text = self.say([rule(60001, listed=False)], match={"kills": 9})
+        self.assertIn("关着", text)
+        self.assertNotIn("本局", text, "关着的卡片不该再逐条算一遍")
+
+    def test_a_rule_that_does_not_apply_says_which_cell_missed(self):
+        """★ 只说「这一局不算」等于没说 —— 要说出**哪一格**没对上。"""
+        only = [rule(60001, mode="quest")]
+        self.assertIn("规则限「闯关」，本局是「对战」",
+                      self.say(only, mode="pvp"))
+        only = [rule(60001, mode="quest", stage=3)]
+        self.assertIn("规则限关卡 3，本局是 5",
+                      self.say(only, mode="quest", stage=5))
+        only = [rule(60001, mode="quest", difficulty=3)]
+        self.assertIn("规则限难度 3，本局是 1",
+                      self.say(only, mode="quest", difficulty=1))
+
+    def test_the_joiner_is_written_between_the_lines(self):
+        text = self.say([rule(60001, cond("kills", threshold=5),
+                              cond("deaths", "eq", 0,
+                                   join=shopcfg.CARD_JOIN_OR))],
+                        match={"kills": 9})
+        self.assertIn(shopcfg.CARD_JOIN_ZH[shopcfg.CARD_JOIN_OR], text)
+
+    def test_an_unknown_metric_is_reported_not_swallowed(self):
+        text = self.say([rule(60001, cond("nonsense"))], match={"kills": 9})
+        self.assertIn("⚠", text)
+        self.assertIn("nonsense", text)
+
+    def test_the_log_and_the_actual_grant_never_disagree(self):
+        """★★ 这一组的地基：**同一批规则、同一份数据**，日志说「发」的那些
+        必须正好是 `due_grants` 真发出去的那些。"""
+        rules = shopcfg.validate_cards(shopdefaults.default_cards())
+        cases = [
+            ({"guards": 30, "win": 1, "kills": 0}, {}),
+            ({"deaths": 0, "win": 1, "hits": 40}, {"pvp": {"kills": 900}}),
+            ({"kills@110001": 9, "shots": 3}, {"pvp": {"games": 77}}),
+        ]
+        for match, total in cases:
+            give, _bases, _warn = cards.due_grants(
+                rules, mode="pvp", stage=None, difficulty=None,
+                match=match, total=total, bases={})
+            lines = cards.explain(rules, mode="pvp", stage=None,
+                                  difficulty=None, match=match, total=total,
+                                  bases={})
+            said = set()
+            for line in lines:
+                if (cards.OK_MARK + " 发") in line:
+                    said.add(int(line.split("#", 1)[1].split(" ", 1)[0]))
+            self.assertEqual(set(give), said, "%r" % (match,))
+
+
 class CardProgressTests(unittest.TestCase):
     """「离下一次拿到还差多少」（用户 2026-09-13 第四轮）。
 

@@ -8790,6 +8790,27 @@ class Conn:
                 bases=account_store.card_bases(conn.account))
             for warning in card_warnings:
                 conn.log(f"   ⚠ cards.json: {warning}")
+            # ★★ **调试模式才打的那一大段**（用户 2026-09-14 点的题）：
+            #    每个人、每张卡、每条条件各自算了什么、得几、成不成立，
+            #    外加这个账号的**累计**战绩。出问题时不用再去拼包看时间线。
+            #    ⚠ 这个 `if` 不是多余的（同 `on_game_packet` 里那一处）：
+            #      `vlog` 自己也判 `VERBOSE`，但 `cards.explain()` 要真算一遍
+            #      17 条规则、拼几十行字符串 —— 不挡住的话正常模式也白算。
+            #    ★ 只给**真人**打：bot 没有账号，一辈子拿不到卡
+            #      （下面那句 `if conn.account_name` 才是发卡的门），
+            #      给它打 17 行只会把日志淹掉。
+            if VERBOSE and conn.account_name:
+                conn.vlog("   累计战绩 座位%d: %s"
+                          % (seat, _totals_line(after_stats)))
+                conn.vlog("   ── 称号卡片判定 座位%d（这一局：%s）"
+                          % (seat, _match_scope_line(stat_mode, quest_info)))
+                for line in cards.explain(
+                        card_rules, mode=stat_mode,
+                        stage=quest_info[0] if quest_info else None,
+                        difficulty=quest_info[1] if quest_info else None,
+                        match=gained_stats, total=after_stats,
+                        bases=account_store.card_bases(conn.account)):
+                    conn.vlog("      " + line)
             granted = {}
             # ★★ 经验 / 金币 / 材料 / 战绩 / 卡片**一把锁、一次写盘**（V0.3商店）。
             #    以前这里是 `add_quest_reward` + `add_materials` 两发，
@@ -11419,6 +11440,37 @@ def _stats_line(stats):
         label = shopcfg.card_metric_label(name, int(roh) if roh else None)
         bits.append("%s %s" % (label, stats[key]))
     return " ".join(bits)
+
+
+def _totals_line(stats):
+    """**累计**战绩打成一行，每个模式一段（V0.3商店，用户 2026-09-14）。
+
+    ★ 一格都没有的模式整段不写 —— 只打过对战的人不该在日志里看见
+    一串空的「闯关[]」。
+    """
+    parts = []
+    for mode in sorted(stats or {}):
+        bucket = stats[mode] or {}
+        if not bucket:
+            continue
+        parts.append("%s{%s}" % (shopcfg.CARD_MODE_ZH.get(mode, mode),
+                                 _stats_line(bucket)))
+    return " ".join(parts) or "（一格都没有）"
+
+
+def _match_scope_line(stat_mode, quest_info):
+    """判定日志的表头那半句：这一局是「对战」还是「闯关 3 · 普通」。
+
+    ★ 规则里那三格（模式 / 关卡 / 难度）就是拿它们比的（`cards._applies`），
+    所以「为什么这条规则这一局不算」在日志里对得上号。
+    """
+    text = shopcfg.CARD_MODE_ZH.get(stat_mode, stat_mode)
+    if not quest_info:
+        return text
+    stage, difficulty = quest_info[0], quest_info[1]
+    name = shopcfg.QUEST_ZH.get(stage)
+    text += " 关卡 %s" % ("%s · %s" % (stage, name) if name else stage)
+    return text + " / %s" % shopcfg.DIFFICULTY_ZH.get(difficulty, difficulty)
 
 
 def _item_label(item_id):

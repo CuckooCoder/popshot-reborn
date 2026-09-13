@@ -243,6 +243,92 @@ def due_grants(rules, *, mode, stage, difficulty, match, total, bases):
     return give, new_bases, warnings
 
 
+#: 判定日志里那两个记号。★ 写成常量，别在拼字符串时各写各的。
+OK_MARK = "✓"
+NO_MARK = "✗"
+
+
+def explain(rules, *, mode, stage, difficulty, match, total, bases):
+    """这一次判定**为什么给 / 为什么不给**，逐条说成人话（V0.3商店）。
+
+    返回一串不带缩进的行，调用方自己排版。**只给调试日志用**
+    （`gameserver.send_end_game()` 在 `--verbose` 下才打）——
+    一局 17 张卡 × 六个人，正常模式下打出来没人看得完。
+
+    ★★ **和 `due_grants` 走同一套谓词**（`_applies` / `eval_conditions`），
+    不是另写一份判定：日志和真发的卡出自两次不同的计算，迟早会出现
+    「日志说该发、玩家没收到」那种查不动的事。
+    ⚠ 但它是**另一次**求值 —— 只读，不改任何状态（`used` 收在本地丢掉），
+    所以放在 `due_grants` 后面调用不会重复发卡。
+    """
+    lines = []
+    for rule in rules or ():
+        card = rule.get("card")
+        if card is None:
+            continue
+        head = "%s #%s" % (shopcfg.item_name(card) or "?", card)
+        if not rule.get("listed"):
+            lines.append("%s  %s 关着（「能获得」= 否）" % (head, NO_MARK))
+            continue
+        why = _why_not_applies(rule, mode=mode, stage=stage,
+                               difficulty=difficulty)
+        if why:
+            lines.append("%s  %s 这一局不算 —— %s" % (head, NO_MARK, why))
+            continue
+        seen = []
+        holds, used, warnings = eval_conditions(
+            rule.get("conditions"), rule_mode=rule.get("mode"),
+            match=match, total=total,
+            base=(bases or {}).get(str(card)) or {}, seen=seen)
+        lines.append("%s  %s" % (head, ("%s 发 %d 张"
+                                        % (OK_MARK, shopcfg.CARD_GRANT_COUNT))
+                                 if holds else ("%s 不发" % NO_MARK)))
+        for note in warnings:
+            lines.append("    ⚠ %s" % note)
+        for at, note in enumerate(seen):
+            cond = note["cond"]
+            join = ("" if at == 0 else
+                    shopcfg.CARD_JOIN_ZH.get(cond.get("join",
+                                                      shopcfg.CARD_JOIN_AND),
+                                             "") + " ")
+            if "now" in note:
+                # 累计：说清这一轮攒了多少、以及它是从哪个基准起算的 ——
+                # 「累计 143 却只算 43」一眼看不出来就会被当成掉数。
+                got = ("这一轮 %d/%d（累计 %d − 基准 %d）"
+                       % (note["value"], note["threshold"], note["now"],
+                          note["base"]))
+            else:
+                got = "本局 %d（要 %d）" % (note["value"], note["threshold"])
+            lines.append("    %s%s %s  %s"
+                         % (join, shopcfg.card_condition_text(cond),
+                            OK_MARK if note["holds"] else NO_MARK, got))
+        if holds and used:
+            lines.append("    ★ 计数器归零 → %s"
+                         % "、".join("%s=%d" % (k, used[k])
+                                     for k in sorted(used)))
+    return lines
+
+
+def _why_not_applies(rule, *, mode, stage, difficulty):
+    """「对局模式」那三格是哪一格没对上；对上了就返回 `""`。
+
+    ★★ **`_applies()` 就是它**（`not _why_not_applies(...)`）—— 判定和
+    「为什么不算」出自同一组比较，想drift都drift不了。
+    ★ 对上的那一支一个字符串都不拼（直接 `return ""`），所以结算路径上
+      没有多余开销；拼字符串只发生在「这一局不算」那一支。
+    """
+    want = rule.get("mode")
+    if want is not None and want != mode:
+        return ("规则限「%s」，本局是「%s」"
+                % (shopcfg.CARD_MODE_ZH.get(want, want),
+                   shopcfg.CARD_MODE_ZH.get(mode, mode)))
+    if rule.get("stage") is not None and rule["stage"] != stage:
+        return "规则限关卡 %s，本局是 %s" % (rule["stage"], stage)
+    if rule.get("difficulty") is not None and rule["difficulty"] != difficulty:
+        return "规则限难度 %s，本局是 %s" % (rule["difficulty"], difficulty)
+    return ""
+
+
 def card_progress(rules, *, stats, bases, granted=None):
     """每张卡片「**离下一次拿到还差多少**」（用户 2026-09-13 第四轮）。
 
@@ -290,7 +376,7 @@ def card_progress(rules, *, stats, bases, granted=None):
     return out
 
 
-def eval_conditions(conditions, *, rule_mode, match, total, base):
+def eval_conditions(conditions, *, rule_mode, match, total, base, seen=None):
     """算这一串条件成不成立。返回 `(成不成立, {统计键: 当前累计值}, [警告])`。
 
     * 第二项是**这条规则用到的累计计数器现在读到多少** —— 发了卡就拿它
@@ -299,6 +385,10 @@ def eval_conditions(conditions, *, rule_mode, match, total, base):
     * **从上往下依次结合，没有括号**（用户拍板）：`A 或者 B 并且 C`
       = `(A 或者 B) 并且 C`。说明文那边（`shopcfg.card_conditions_text`）
       混用连接词时会把括号写出来，两边是同一个口径。
+
+    ★ `seen` 给一个列表时，**每条条件**算完往里塞一份「算了什么、得几、
+      成不成立」（`explain()` 拿它打调试日志）。判定本身一个分支都不变 ——
+      日志和决策必须出自**同一次**求值，各算一遍迟早对不上。
     """
     conditions = list(conditions or ())
     used = {}
@@ -314,7 +404,7 @@ def eval_conditions(conditions, *, rule_mode, match, total, base):
             warnings.append("认不出的指标 %r，整条规则跳过" % (metric,))
             return False, used, warnings
         got = _condition_holds(cond, rule_mode=rule_mode, match=match,
-                               total=total, base=base, used=used)
+                               total=total, base=base, used=used, seen=seen)
         if at == 0:
             value = got
         elif cond.get("join") == shopcfg.CARD_JOIN_OR:
@@ -324,7 +414,7 @@ def eval_conditions(conditions, *, rule_mode, match, total, base):
     return bool(value), used, warnings
 
 
-def _condition_holds(cond, *, rule_mode, match, total, base, used):
+def _condition_holds(cond, *, rule_mode, match, total, base, used, seen=None):
     """一条条件成不成立。顺带把**累计**那一档现在读到多少记进 `used`。"""
     metric = cond.get("metric")
     op = cond.get("op", shopcfg.CARD_OP_GE)
@@ -336,15 +426,26 @@ def _condition_holds(cond, *, rule_mode, match, total, base, used):
     weapon = cond.get("weapon")
     if not shopcfg.card_metric_needs_weapon(metric):
         weapon = None
+    note = {"cond": cond, "threshold": threshold}
     if cond.get("scope") != shopcfg.CARD_SCOPE_TOTAL:
-        return card_op_holds(op, _match_value(match, metric, weapon), threshold)
-    # 累计：**这一轮攒了多少** = 现在的累计值 − 上次归零时的累计值。
-    # ★ 取不到基准就按 0 算（第一轮）；基准比现在大（运营改过「模式」那一格
-    #   之后会出现）按 0 算，不让进度变成负数。
-    now = stat_of(total, rule_mode, metric, weapon)
-    key = stat_key(metric, weapon)
-    used[key] = now
-    return card_op_holds(op, max(0, now - int(base.get(key, 0))), threshold)
+        value = _match_value(match, metric, weapon)
+        holds = card_op_holds(op, value, threshold)
+    else:
+        # 累计：**这一轮攒了多少** = 现在的累计值 − 上次归零时的累计值。
+        # ★ 取不到基准就按 0 算（第一轮）；基准比现在大（运营改过「模式」
+        #   那一格之后会出现）按 0 算，不让进度变成负数。
+        now = stat_of(total, rule_mode, metric, weapon)
+        key = stat_key(metric, weapon)
+        used[key] = now
+        value = max(0, now - int(base.get(key, 0)))
+        note["now"] = now
+        note["base"] = int(base.get(key, 0))
+        holds = card_op_holds(op, value, threshold)
+    if seen is not None:
+        note["value"] = value
+        note["holds"] = holds
+        seen.append(note)
+    return holds
 
 
 def _match_value(match, metric, weapon):
@@ -369,12 +470,9 @@ def _applies(rule, *, mode, stage, difficulty):
 
     达成条件那一段不在这儿 —— 它要按每条条件各自的 `scope` 分成
     「本局」和「累计」两条路（`eval_conditions`）。
+
+    ★ 实现**就是** `_why_not_applies()`：调试日志要说出「哪一格没对上」，
+      两处各写一组比较迟早会不一致。
     """
-    want = rule.get("mode")
-    if want is not None and want != mode:
-        return False
-    if rule.get("stage") is not None and rule["stage"] != stage:
-        return False
-    if rule.get("difficulty") is not None and rule["difficulty"] != difficulty:
-        return False
-    return True
+    return not _why_not_applies(rule, mode=mode, stage=stage,
+                                difficulty=difficulty)

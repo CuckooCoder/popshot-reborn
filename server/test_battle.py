@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import cards                                                   # noqa: E402
 import gameserver                                              # noqa: E402
 from gameserver import (                                       # noqa: E402
     DEATH_REPORT_FORMAT, GAME_RESULT_CLEARED, GAME_RESULT_DEFEATED,
@@ -178,7 +179,11 @@ def make_conn(username, accounts=None):
     conn.log = conn.logged.append
     conn.online = lambda _msg: None
     conn.online_debug = lambda _msg: None
-    conn.vlog = lambda _msg: None
+    # ★ `vlog`（`--verbose` 才落盘的那一档）攒到**另一个**列表里：
+    #   断言「正常模式下一个字都不打」和「调试模式下打了什么」各看各的，
+    #   不会互相干扰（用户 2026-09-14 要的卡片判定日志就在这一档）。
+    conn.vlogged = []
+    conn.vlog = conn.vlogged.append
     # ★ 走**真的**换代钩子：换代模型的唯一迁移点就在 `Conn.send()` 里
     #   （§218 / D137）。假连接直接把 `send` 换成 `sent.append` 的话，
     #   开局链发出去的 0x0400 / 0x0403 就不会推进模型，测的就不是真接线了。
@@ -1938,12 +1943,10 @@ class MaterialRewardSettlementTests(BattleRoom):
         self.assertEqual(2, len(bodies(self.alice, OP_REP_GAME_RESULT)))
 
 
-class CardRewardSettlementTests(BattleRoom):
-    """★ 结算界面「合成材料」**下面**那一栏 —— 槽 1（V0.3商店 · 称号卡片）。
-
-    `0x041c` 的线偏移 +4 就是槽类型（FINDINGS §3）：`0` 合成材料 / `1` 称号卡片。
-    这一栏的协议早就逆出来了，V0.3 前半列在「本版不做」里，这一版接上。
-    """
+class _CardSettlementCase(BattleRoom):
+    """「称号卡片掉落」那几组用例共用的地基：一份临时 `cards.json`
+    + 一个格挡计数器 + 「再开一局」。**自己不带用例**（带的话每个
+    子类都会把它们重跑一遍）。"""
 
     session_type = 1
     arguments = (0, 3, 0)       # 个人战 + 夺分模式
@@ -1986,6 +1989,26 @@ class CardRewardSettlementTests(BattleRoom):
     def rewards(self, conn):
         return [reward_fields(b)
                 for b in bodies(conn, gameserver.OP_REWARD_RECEIVED)]
+
+    def restart(self):
+        """再开一局：清掉上一局的包和 `RoomQuest`，账号原样留着。
+
+        ★ `self.quest` 是只读属性（`self.room.quest` 的别名），所以换的是
+        **房间上那一份** —— 换完 `self.quest` 自然指向新的。
+        """
+        for conn in (self.alice, self.bob):
+            conn.sent[:] = []
+            conn.settled = False
+            conn.account = dict(self.accounts.saved[conn.account_name])
+        self.room.quest = gameserver.RoomQuest(seats=[0, 1])
+
+
+class CardRewardSettlementTests(_CardSettlementCase):
+    """★ 结算界面「合成材料」**下面**那一栏 —— 槽 1（V0.3商店 · 称号卡片）。
+
+    `0x041c` 的线偏移 +4 就是槽类型（FINDINGS §3）：`0` 合成材料 / `1` 称号卡片。
+    这一栏的协议早就逆出来了，V0.3 前半列在「本版不做」里，这一版接上。
+    """
 
     def test_a_qualifying_game_ships_the_card_in_slot_one(self):
         self.guard(0, 3)
@@ -2084,17 +2107,94 @@ class CardRewardSettlementTests(BattleRoom):
         self.assertEqual({str(self.CARD): {"guards": 12}},
                          self.accounts.saved["alice"]["card_bases"])
 
-    def restart(self):
-        """再开一局：清掉上一局的包和 `RoomQuest`，账号原样留着。
+class CardVerdictLogTests(_CardSettlementCase):
+    """★★ 结算时把**每张卡为什么给 / 为什么不给**写进日志（用户 2026-09-14）。
 
-        ★ `self.quest` 是只读属性（`self.room.quest` 的别名），所以换的是
-        **房间上那一份** —— 换完 `self.quest` 自然指向新的。
-        """
-        for conn in (self.alice, self.bob):
-            conn.sent[:] = []
-            conn.settled = False
-            conn.account = dict(self.accounts.saved[conn.account_name])
-        self.room.quest = gameserver.RoomQuest(seats=[0, 1])
+    「以后出问题调查方便」是这一段唯一的存在理由 —— 上一次查「火焰弹少算
+    一次击杀」花了大半个小时去拼 UDP 包的时间线，而答案（最后一击是谁打的、
+    哪条条件差多少）本来就该在结算日志里。
+
+    ★★ **只在 `--verbose`（`start-debug.bat`）下打**：一局 17 张卡 × 六个人，
+    正常模式下这一段会把结算日志整个淹掉（用户点名要求的）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # ★ 每条用例自己开关 `VERBOSE`，跑完还原 —— 它是模块级全局，
+        #   漏还原会让后面所有用例的日志量跟着变。
+        self.addCleanup(setattr, gameserver, "VERBOSE", gameserver.VERBOSE)
+
+    def verdict(self, conn=None):
+        """这一局打出来的**调试档**日志（`vlog` 那一支）。"""
+        return list((conn or self.alice).vlogged)
+
+    def test_nothing_extra_is_logged_outside_debug_mode(self):
+        """★ 正常模式一个字都不打 —— 这是用户点名的那一条。"""
+        gameserver.VERBOSE = False
+        self.guard(0, 3)
+        self.end()
+        self.assertEqual([], self.verdict())
+        # 正常那几行（本局战绩 / 获得卡片）照旧要有，别把它们一起关掉。
+        self.assertTrue([l for l in self.alice.logged if "本局战绩" in l])
+
+    def test_debug_mode_logs_the_totals_and_every_card(self):
+        gameserver.VERBOSE = True
+        self.guard(0, 3)
+        self.end()
+        text = "\n".join(self.verdict())
+        self.assertIn("累计战绩 座位0", text)
+        self.assertIn("称号卡片判定 座位0", text)
+        # 这一局是对战 ⇒ 表头写得出来（规则里那三格就是拿它比的）。
+        self.assertIn("对战", text)
+        # 那张卡发出去了：说「发」，而且把用到的条件和实测值都写出来。
+        self.assertIn("%s 发 1 张" % cards.OK_MARK, text)
+        self.assertIn("格挡次数", text)
+        self.assertIn("本局 3（要 3）", text)
+
+    def test_it_says_why_a_card_did_not_drop(self):
+        gameserver.VERBOSE = True
+        self.guard(0, 2)
+        self.end()
+        text = "\n".join(self.verdict())
+        self.assertIn("%s 不发" % cards.NO_MARK, text)
+        self.assertIn("本局 2（要 3）", text, "差多少要直接写出来")
+
+    def test_a_rule_that_does_not_apply_says_which_cell_missed(self):
+        """★ 「这一局不算」要说出**哪一格**没对上 —— 只说「不算」等于没说。"""
+        gameserver.VERBOSE = True
+        rule = self.rule()
+        rule["mode"] = "quest"          # 本局是对战 ⇒ 整条规则不参与
+        self.write_rules([rule])
+        self.guard(0, 9)
+        self.end()
+        text = "\n".join(self.verdict())
+        self.assertIn("这一局不算", text)
+        self.assertIn("规则限「闯关」，本局是「对战」", text)
+
+    def test_a_total_condition_shows_the_round_the_baseline_and_the_reset(self):
+        """★★ 累计那一档最容易被当成「掉数」：**这一轮攒了多少**和
+        **它从哪个基准起算**必须都写出来（上次查火焰弹就卡在这儿）。"""
+        gameserver.VERBOSE = True
+        self.write_rules([self.rule(scope="total", threshold=5)])
+        self.guard(0, 3)
+        self.end()
+        self.assertIn("这一轮 3/5（累计 3 − 基准 0）", "\n".join(self.verdict()))
+        # 第二局跨过线 ⇒ 发卡那一行还要写「计数器归零到多少」。
+        self.restart()
+        self.alice.vlogged[:] = []
+        self.guard(0, 3)
+        self.end()
+        text = "\n".join(self.verdict())
+        self.assertIn("这一轮 6/5（累计 6 − 基准 0）", text)
+        self.assertIn("计数器归零 → guards=6", text)
+
+    def test_a_bot_seat_gets_no_verdict_lines(self):
+        """★ bot 没有账号、一辈子拿不到卡 —— 给它打 17 行只会淹掉日志。"""
+        gameserver.VERBOSE = True
+        self.guard(0, 3)
+        self.end()
+        self.assertEqual([], self.verdict(self.bob)
+                         if self.bob.account_name is None else [])
 
 
 class PvpSettlementTests(BattleRoom):
