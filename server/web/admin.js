@@ -764,6 +764,10 @@ function choiceNode(spec, entry, onChange) {
     var node = el("option", null, option.label);
     node.value = String(option.value);
     values[node.value] = option.value;         // 数字选项别退化成字符串
+    // ★ 逐项说明（`SCHEMA` 里那个 `help`）挂成 tooltip —— 统计指标那一格
+    //   有 16 个选项，光看名字说不清「暴击」数的到底是什么。出处仍然只有
+    //   服务端那张表，前端一个字都不抄。
+    if (option.help) { node.title = option.help; }
     select.appendChild(node);
   });
   var current = entry[spec.key];
@@ -979,9 +983,10 @@ function fillCards() {
   (CAT.card_defaults || []).forEach(function (row) {
     if (have[row.card]) { return; }
     // ★ 拷一份：`CAT.card_defaults` 是全页共用的那一份（同 `fillRewards`）。
-    var copy = {};
-    Object.keys(row).forEach(function (name) { copy[name] = row[name]; });
-    CFG.cards.entries.push(copy);
+    //   ★★ 条件那一格是**数组**，得连里面的对象一起拷（`cardDraft` 同款）
+    //   —— 浅拷的话，在弹窗里改一条条件会把 catalog 里那份也改掉，
+    //   刷新之前谁也看不出来。
+    CFG.cards.entries.push(cardDraft(row));
     have[row.card] = true;
   });
 }
@@ -1391,7 +1396,10 @@ function renderToolbar(which) {
   // ★ 「金币 / 经验获取」页没有筛选条（D72）：档位固定 30 格，一屏就画完了，
   //   搜什么、筛什么都没有意义。工具条上只留下面那个「↻ 刷新」。
   //   金币 / 经验的切换在下一行（`paintCfgTabs`），不挤在这儿。
-  if (which !== "rewards") {
+  // ★ 称号卡片页 2026-09-13 第四轮也把筛选条清空了（用户点的题）：
+  //   17 行一屏就看完了，一排下拉换不来任何东西。留下的只有「全部 /
+  //   成就卡片 / 武器卡片」那个分组切换和一颗「查看本人达成进度」。
+  if (which !== "rewards" && which !== "cards") {
     var search = document.createElement("input");
     search.type = "text";
     search.placeholder = "搜 中文名 / 韩文名 / id";
@@ -1454,45 +1462,11 @@ function renderToolbar(which) {
     lockForPvp();
   }
   if (which === "cards") {
-    // 分组切换（成就 / 武器）排最左 —— 和「金币 / 经验」那个切换一个位置。
+    // ★★ 这一页的筛选条**只剩分组切换**（用户 2026-09-13 第四轮点的题）：
+    //   模式 / 关卡 / 难度 / 统计范围 / 武器 / 状态那六个下拉全删了。
+    //   17 行一屏就看完，一排下拉换不来任何东西；而且条件挪进弹窗之后，
+    //   「按武器筛」这种口径还得先解释「有没有哪条条件是这样的」。
     bar.appendChild(cardGroupSwitch());
-    var cardMode = selectFilter(filter, "mode", "全部模式",
-      [{value: "none", label: "不限"}].concat(cardSpec("mode").options || []));
-    bar.appendChild(cardMode);
-    // 关卡 / 难度：选项照 `SCHEMA.cards` 现取，和行内那两个下拉一个出处。
-    var cardScoped = ["stage", "difficulty"].map(function (key) {
-      var spec = cardSpec(key);
-      var options = [{value: "none", label: spec.empty_label || "不限"}];
-      (spec.options || []).forEach(function (option) { options.push(option); });
-      var select = selectFilter(filter, key, "全部" + (spec.label || key),
-                                options);
-      bar.appendChild(select);
-      return select;
-    });
-    bar.appendChild(selectFilter(filter, "scope", "全部统计范围",
-                                 cardSpec("scope").options || []));
-    bar.appendChild(selectFilter(filter, "gettable", "全部状态",
-      [{value: "on", label: "能获得"}, {value: "off", label: "关着的"}]));
-    // 对战没有关卡和难度（同 `dropRow` 的 `PVP_LOCKED_KEYS`）⇒ 筛成对战时
-    // 这两个下拉清空并锁住，和规则行上的表现一致。
-    var lockCardScope = function () {
-      var pvp = filter.mode === "pvp";
-      cardScoped.forEach(function (select, at) {
-        if (pvp) {
-          filter[["stage", "difficulty"][at]] = "";
-          select.value = "";
-        }
-        select.disabled = pvp;
-        select.title = pvp ? "对战没有关卡和难度" : "";
-      });
-    };
-    // `selectFilter` 自己的 onchange 先跑（写 `filter.mode` + 重画），
-    // 这一发排在它后面（和 `renderToolbar` 里掉落页那一段同款）。
-    cardMode.addEventListener("change", function () {
-      lockCardScope();
-      repaintList();
-    });
-    lockCardScope();
   }
   if (which === "rewards") {
     // ★ 「金币 / 经验」切换挪进工具条、放**最左边**（用户 2026-09-10，D72b）。
@@ -1520,6 +1494,21 @@ function renderToolbar(which) {
   refresh.onclick = function () { refreshConfigs(); };
   bar.appendChild(refresh);
 
+  // ★★ 这一行**最多只能有一个 `.grow`**（`margin-left: auto`）：两个的话
+  //   flex 会把空隙在它们之间平分，两样东西被拆到两处去（`.tool-right`
+  //   那段注释里记着同一个坑）。⇒ 称号卡片页拿这一格放那颗钮，
+  //   「筛出 x / y」那一小段就不画了（用户 2026-09-13 第六轮点名删掉的）。
+  if (which === "cards") {
+    // 「查看本人达成进度」：**只看自己**。它压根不发 `name`，服务端那一句
+    // （`_admin_card_progress`）才是「不能看别人」的门 ⇒ 三档身份都画。
+    // ★ 靠右贴着「已和服务端一致」那一组；只读身份下那一组整个藏起来
+    //   （`applyReadOnly`），这颗钮就自然落到整行最右边 —— 正是用户要的。
+    var mine = el("button", "btn btn-sm grow", "查看本人达成进度");
+    mine.title = "只看你自己那个同名游戏账号的进度";
+    mine.onclick = function () { openCardProgress(null); };
+    bar.appendChild(mine);
+    return;
+  }
   var shown = el("span", "grow");
   shown.id = "cfgShown";
   bar.appendChild(shown);
@@ -1581,8 +1570,9 @@ function dropdownsMatch(itemId, want) {
 function emptyFilter() {
   return {q: "", character: "", listing: "", big: -1, sub: null,
           mode: "", stage: "", difficulty: "",
-          // 称号卡片页：统计范围 / 能不能获得 / 看哪一组（成就 · 武器 · 全部）。
-          scope: "", gettable: "", group: CARD_GROUPS[0].id,
+          // 称号卡片页：武器 / 统计范围 / 能不能获得 / 看哪一组
+          // （成就 · 武器 · 全部）。
+          weapon: "", scope: "", gettable: "", group: CARD_GROUPS[0].id,
           // 「金币 / 经验获取」页当前看的是哪一半（`REWARD_VIEWS`）。
           view: REWARD_VIEWS[0].id};
 }
@@ -1594,16 +1584,6 @@ function dropSpec(key) {
     if (spec.key === key) { found = spec; }
   });
   return found || {key: key};
-}
-
-/** 称号卡片页的模式 / 关卡 / 难度筛选。和 `dropFieldMatches` 同一套口径
- *  （`""` 不筛 / `"none"` 只看「不限」的 / 其余相等），单独一份是因为这一页的
- *  值可能是字符串（`mode`）也可能是数字（`stage`），比较一律转成字符串。 */
-function cardFieldMatches(value, wanted) {
-  if (!wanted) { return true; }
-  var unset = (value === undefined || value === null || value === "");
-  if (wanted === "none") { return unset; }
-  return !unset && String(value) === String(wanted);
 }
 
 /** 掉落页的关卡 / 难度筛选：`""` = 不筛；`"none"` = 只看没指定的
@@ -1652,8 +1632,9 @@ function repaintList() {
   if (label) {
     // ★ 「筛出 x / y」只有**没有分类标签**的那几页写（用户 2026-09-09，D68a）：
     //   另外几页的分类标签上已经带着件数，再写一遍是重复的。一样多就不写。
-    //   ★ 称号卡片页的分组切换只数「这一组有几张」，不数筛完还剩几张 ⇒ 它也要。
-    var wantsCount = (CURRENT === "drops" || CURRENT === "cards");
+    //   ★ 称号卡片页 2026-09-13 第六轮不画了（用户点名删掉）——
+    //   那一格让给了「查看本人达成进度」，见 `renderToolbar`。
+    var wantsCount = (CURRENT === "drops");
     label.textContent = (wantsCount && rows.length !== total)
       ? ("筛出 " + rows.length + " / " + total) : "";
   }
@@ -1786,19 +1767,9 @@ function matches(which, entry) {
   // ★ 拿 `entryItemId` 不拿 `entry.id`：合成配方的 `id` 是配方号。以前这一句
   //   写的是 `entry.id`，那时只有物品库有「上架状态」筛选，没暴露出来。
   if (!dropdownsMatch(itemId, filter)) { return false; }
-  // ★ 两页的 `mode` 语义不一样，别共用这一句：掉落页的模式是**必填**
-  //   （不写 = 闯关），称号卡片页是**可选**（不写 = 不限，两种模式都算）。
-  //   共用的话「筛对战」会把所有「不限」的卡片当成闯关藏起来。
+  // ★ 称号卡片页 2026-09-13 第四轮只剩**一个**筛选（成就卡 / 武器卡）——
+  //   模式 / 关卡 / 难度 / 统计范围 / 武器 / 状态那六个下拉一起删了。
   if (which === "cards") {
-    if (!cardFieldMatches(entry.mode, filter.mode)) { return false; }
-    if (!cardFieldMatches(entry.stage, filter.stage)) { return false; }
-    if (!cardFieldMatches(entry.difficulty, filter.difficulty)) { return false; }
-    if (filter.scope && (entry.scope || "match") !== filter.scope) {
-      return false;
-    }
-    if (filter.gettable) {
-      if ((filter.gettable === "on") !== !!entry.listed) { return false; }
-    }
     if (filter.group && filter.group !== "all"
         && cardGroupOf(itemId) !== filter.group) {
       return false;
@@ -2277,6 +2248,22 @@ function dropRow(entry, index) {
        `fillCards()` 立刻补回来。「这一版不给」= 把「能获得」关掉。
      · **「能获得」排在最前**，紧挨卡片名：这一页多半时间是在看
        「哪些开着」，开关得一眼看得见。关着的行整行淡下去（`.off`）。
+
+   ★★ **2026-09-13 第三轮重排（用户点的题）：行里不放设置项。**
+     前两版都是把十来个下拉摊在行里 —— 第一版自由换行、第二版三段 grid。
+     格子再怎么对齐，一行十来个控件终究得人自己在脑子里读成一句话。
+     现在一行只有四样：**图标+名称 / 能获得 / 那句现算的说明 / 两颗钮**，
+     具体设置全在两个弹窗里（`openCardMode` / `openCardCond`）。
+
+   ★★ **那句说明的「词」全部来自服务端**（`CAT.card_text`，出处是
+     `shopcfg.CARD_PHRASES` 那一套）。句子的**骨架**这儿和
+     `shopcfg.describe_card_rule()` 各写了一遍 —— 因为弹窗要**实时**画它
+     （改一格就变），来回问服务端太慢。⇒ 所以这儿一个中文字都不写死：
+     改服务端那张表，游戏提示框和这一页同时改口。
+
+   ★ 两个弹窗里的格子**照 `SCHEMA.cards` 现画**（D16）：顶层字段除了
+     卡片 / 能获得 / 条件三样都归「对局模式」窗，条件的子字段表归
+     「达成条件」窗 —— 服务端加一格，画面上自动多一格。
    -------------------------------------------------------------------- */
 
 /** `SCHEMA.cards` 里某个字段的描述（下拉选项从这儿取，不另抄一份）。 */
@@ -2287,6 +2274,231 @@ function cardSpec(key) {
   });
   return found || {key: key, label: key, type: "int", options: []};
 }
+
+/** 「达成条件」里**一条条件**的某个字段描述（`SCHEMA.cards.conditions.fields`）。 */
+function cardCondSpec(key) {
+  var found = null;
+  (cardSpec("conditions").fields || []).forEach(function (spec) {
+    if (spec.key === key) { found = spec; }
+  });
+  return found || {key: key, label: key, type: "int", options: []};
+}
+
+/** 说明文用到的词表 / 判据参数。★ 两份都来自服务端，缺了也不要炸页面。 */
+function cardWords() { return CAT.card_text || {}; }
+function cardLimits() { return CAT.card_limits || {}; }
+
+/** 一条指标的描述（`CAT.card_metrics` 那一份）。 */
+function cardMetricInfo(metric) {
+  return (CAT.card_metrics || {})[metric] || {};
+}
+
+/** 这条规则的条件列表（永远是个数组，直接改它就是改模型）。 */
+function cardConditions(entry) {
+  if (!Array.isArray(entry.conditions)) { entry.conditions = []; }
+  return entry.conditions;
+}
+
+/* ---------------------------------------------- 那句说明文（实时算）
+
+   ★★ 和服务端 `shopcfg.card_mode_text` / `card_condition_text` /
+     `card_conditions_text` / `describe_card_rule` **一一对应**，
+     顺序和分支都照抄 —— 两边只要有一处念得不一样，运营在这一页看到的
+     和游戏里提示框写的就对不上了。改这儿先去改那边。 */
+
+/** 「在对战模式中，」这半句。 */
+function cardModeText(entry) {
+  var words = cardWords();
+  var phrases = words.phrases || {};
+  var text = (words.modes || {})[entry.mode];
+  text = text ? (text + (phrases.mode_suffix || "")) : (phrases.any_mode || "");
+  if (entry.stage !== undefined && entry.stage !== null) {
+    var quest = (words.quests || {})[String(entry.stage)];
+    text += "「" + (quest ? (entry.stage + " · " + quest) : entry.stage) + "」";
+  }
+  if (entry.difficulty !== undefined && entry.difficulty !== null) {
+    var hard = (words.difficulties || {})[String(entry.difficulty)];
+    text += (phrases.open || "") + (hard || entry.difficulty)
+            + (phrases.close || "");
+  }
+  return (phrases.head || "%s").replace("%s", text);
+}
+
+/** 一条条件念成人话。`withScope` 为假时不写「一局内的 / 玩家累计」。 */
+function cardCondText(cond, withScope) {
+  var words = cardWords();
+  var limits = cardLimits();
+  var info = cardMetricInfo(cond.metric);
+  var label = info.label || cond.metric || "";
+  // 带武器维度时加前缀（「左轮手枪（泰尔）击杀数」），和服务端
+  // `card_metric_label()` 同一个规矩：指标分不到武器时那一格不算数。
+  if (info.weapon && cond.weapon) {
+    label = ((words.weapons || {})[String(cond.weapon)] || cond.weapon) + label;
+  }
+  var head = withScope
+    ? ((words.scope_prefix || {})[cond.scope || limits.scope_match] || "") : "";
+  var values = info.values || [];
+  if (values.length) {
+    // 枚举指标没有「大于等于 1」这种说法：**本局结果为胜利 / 通关**。
+    var shown = String(cond.threshold);
+    values.forEach(function (option) {
+      if (option.value === cond.threshold) { shown = option.label; }
+    });
+    return head + label + ((words.phrases || {}).is || "") + shown;
+  }
+  var op = (cond.scope === limits.scope_total)
+    ? (words.every || "")
+    : ((words.ops || {})[cond.op || limits.op_ge] || "");
+  return head + label + op + cond.threshold + (info.unit || "");
+}
+
+/** 整串条件念成人话，**连接词混用时自己把括号写出来**。 */
+function cardCondsText(conditions) {
+  var words = cardWords();
+  var limits = cardLimits();
+  var phrases = words.phrases || {};
+  var list = conditions || [];
+  if (!list.length) { return ""; }
+  // 所有条件同一档统计范围 ⇒ 前缀提到最前面只写一次。
+  var scopes = {};
+  list.forEach(function (cond) {
+    scopes[cond.scope || limits.scope_match] = true;
+  });
+  var shared = (Object.keys(scopes).length === 1)
+    ? ((words.scope_prefix || {})[list[0].scope || limits.scope_match] || "")
+    : "";
+  var joins = {};
+  list.slice(1).forEach(function (cond) {
+    joins[cond.join || limits.join_and] = true;
+  });
+  var mixed = Object.keys(joins).length > 1;
+  var text = cardCondText(list[0], !shared);
+  list.slice(1).forEach(function (cond, at) {
+    // ★ `at` 从 0 起（切掉了第一条）⇒ 第三条开始才套括号，和服务端
+    //   那句 `at >= 2` 是同一个位置。
+    if (mixed && at >= 1) {
+      text = (phrases.open || "") + text + (phrases.close || "");
+    }
+    text += (words.joins || {})[cond.join || limits.join_and] || "";
+    text += cardCondText(cond, !shared);
+  });
+  return shared + text;
+}
+
+/** 整条规则那句话。★ 关着的 / 配得不对的各说一句固定的。 */
+function cardRuleText(entry) {
+  var phrases = cardWords().phrases || {};
+  if (!entry.listed) { return phrases.off || ""; }
+  if (cardRuleProblem(entry)) { return phrases.bad || ""; }
+  return cardModeText(entry) + cardCondsText(entry.conditions)
+         + (phrases.tail || "%s").replace("%s", phrases.card || "");
+}
+
+/* ---------------------------------------------- 「条件无效」的判据
+
+   ★★ 和服务端 `shopcfg._validate_card_conditions` 的护栏一一对应。
+     两边都在的理由：服务端那份**说了算**（保存时会拒），这一份是为了
+     「改一格就当场看得见哪儿不对、保存钮按不动」。判据的**参数**
+     （阈值下限、样本指标、条数上限）全从服务端拿（`CAT.card_limits`），
+     这儿只写那几句提示。 */
+
+/** 这条规则有没有毛病；没有就返回 `""`。 */
+function cardRuleProblem(entry) {
+  var limits = cardLimits();
+  var list = entry.conditions || [];
+  if (!Array.isArray(entry.conditions) || !list.length) {
+    return "至少要有一条达成条件";
+  }
+  if (limits.max_conditions && list.length > limits.max_conditions) {
+    return "最多 " + limits.max_conditions + " 条条件";
+  }
+  for (var at = 0; at < list.length; at += 1) {
+    var why = cardCondProblem(list[at], at);
+    if (why) { return "第 " + (at + 1) + " 条：" + why; }
+  }
+  // 比率指标（命中率）的样本下限：现在它是一条**普通条件**，
+  // 所以护栏也换成「这串条件里有没有它」。
+  var ratio = list.some(function (cond) {
+    return cardMetricInfo(cond.metric).ratio;
+  });
+  if (!ratio) { return ""; }
+  var ratioName = "";
+  list.forEach(function (cond) {
+    if (cardMetricInfo(cond.metric).ratio) {
+      ratioName = cardMetricInfo(cond.metric).label;
+    }
+  });
+  var sample = cardMetricInfo(limits.sample_metric).label || limits.sample_metric;
+  var floor = list.some(function (cond) {
+    return cond.metric === limits.sample_metric
+      && (cond.scope || limits.scope_match) === limits.scope_match
+      && (cond.op || limits.op_ge) === limits.op_ge && cond.threshold >= 1;
+  });
+  if (!floor) {
+    return "用了「" + ratioName + "」就必须再加一条「" + sample
+      + ((cardWords().ops || {})[limits.op_ge] || "") + " N」"
+      + "—— 开一枪中一枪也是 100%";
+  }
+  if (list.some(function (c) { return c.join === limits.join_or; })) {
+    return "用了「" + ratioName + "」的规则里不能出现「"
+      + ((cardWords().joins || {})[limits.join_or] || "") + "」"
+      + "—— 那样开枪数下限可以被绕开";
+  }
+  return "";
+}
+
+/** 一条条件有没有毛病；没有就返回 `""`。 */
+function cardCondProblem(cond, at) {
+  var limits = cardLimits();
+  var words = cardWords();
+  var info = cardMetricInfo(cond.metric);
+  if (!info.label) { return "还没选统计指标"; }
+  var scope = cond.scope || limits.scope_match;
+  var scopes = info.scopes || [];
+  if (scopes.length && scopes.indexOf(scope) < 0) {
+    var wanted = scopes.map(function (key) {
+      return choiceLabel(cardCondSpec("scope"), key);
+    }).join(" / ");
+    return "「" + info.label + "」只有" + wanted + "那一档才有意义";
+  }
+  var op = cond.op || limits.op_ge;
+  var values = info.values || [];
+  if (values.length && op !== limits.op_eq) {
+    return "「" + info.label + "」只有两种取值，比较符只能是「"
+      + ((words.ops || {})[limits.op_eq] || "") + "」";
+  }
+  if (scope === limits.scope_total && op !== limits.op_ge) {
+    return "累计那一档只有「" + (words.every || "") + "」";
+  }
+  if (typeof cond.threshold !== "number"
+      || Math.trunc(cond.threshold) !== cond.threshold) {
+    return "数值要填一个整数";
+  }
+  var low = (limits.op_min || {})[op];
+  if (low === undefined) { low = 1; }
+  if (cond.threshold < low) {
+    return "「" + ((words.ops || {})[op] || "") + "」的数值不能小于 " + low
+      + (low ? "（填 0 的话每局都成立，等于白送）" : "");
+  }
+  if (limits.max_threshold && cond.threshold > limits.max_threshold) {
+    return "数值最多 " + limits.max_threshold;
+  }
+  if (values.length && !values.some(function (o) {
+    return o.value === cond.threshold;
+  })) { return "「" + info.label + "」只能选表里那两种取值"; }
+  if (cond.weapon !== undefined && cond.weapon !== null) {
+    if (!info.weapon) { return "「" + info.label + "」分不到武器上"; }
+    if (op !== limits.op_ge) {
+      return "按武器统计时比较符只能是「"
+        + ((words.ops || {})[limits.op_ge] || "") + "」"
+        + "—— 别的方向对每一个没用过这把枪的人都成立";
+    }
+  }
+  if (at === 0 && cond.join !== undefined) { return "第一条不该有连接词"; }
+  return "";
+}
+
+/* ------------------------------------------------------------ 列表 */
 
 /** 工具条最左那个「全部 / 成就卡片 / 武器卡片」分段切换。 */
 function cardGroupSwitch() {
@@ -2318,8 +2530,7 @@ function renderCards(list, rows) {
   });
 }
 
-/** 改了「模式」或「统计指标」就把整行重画一遍 —— 哪几格该锁只在这一处
- *  决定，别在别处再写一份（同 `dropRow`）。 */
+/** 一张卡片一行：图标+名称 / 能获得 / 说明文 / 两颗钮。 */
 function cardRow(entry, index) {
   var row = el("div", "rule-row card-row" + (entry.listed ? "" : " off"));
   row.setAttribute("data-index", index);
@@ -2331,67 +2542,578 @@ function cardRow(entry, index) {
   who.appendChild(el("div", "nmz", itemName(entry.card)));
   row.appendChild(who);
 
+  var say = el("div", "card-say");
+  var paint = function () {
+    say.textContent = cardRuleText(entry);
+    say.classList.toggle("bad-text",
+                         !entry.listed || !!cardRuleProblem(entry));
+    // 配得不对时把原因挂成 tooltip —— 行里只写「条件无效」四个字
+    // （用户点名要的），到底哪儿不对进弹窗一看便知，鼠标停一下也能看见。
+    say.title = entry.listed ? cardRuleProblem(entry) : "";
+  };
+
   // 「能获得」一翻，整行跟着淡 / 亮，图标的上架底也跟着变（同 `renderRecipe`
   // 的 `relist`）—— 开关是 `label` 不是 `input`，收不到 `change` 事件。
-  var mark = function () {
+  row.appendChild(fieldNode(cardSpec("listed"), entry, function () {
     row.classList.toggle("off", !entry.listed);
     slot.classList.toggle("on", !!entry.listed);
+    paint();
     touched();
-  };
+  }));
 
-  var pvp = entry.mode === "pvp";
-  var metric = entry.metric;
-  var info = (CAT.card_metrics || {})[metric] || {};
-  var lockedKeys = [];
-  if (pvp) { lockedKeys = lockedKeys.concat(["stage", "difficulty"]); }
-  if (!info.weapon) { lockedKeys.push("weapon"); }
-  if (!info.ratio) { lockedKeys.push("min_shots"); }
-  // ★ 指标只在一种模式下有意义时（击杀怪物数只有闯关、零击杀获胜只有对战），
-  //   模式那一格也锁上。不锁的话人能点开另一档，一松手又被弹回来 ——
-  //   「点了没反应」比「点不动」难受得多。
-  //   ★ 只在**已经对上**的时候锁：磁盘上手改出来的「击杀怪物数 + 对战」
-  //     要留一条能自己改回来的路（同「只锁不改」那条规矩）。
-  var onlyMode = (info.modes && info.modes.length === 1) ? info.modes[0] : null;
-  if (onlyMode && entry.mode === onlyMode) { lockedKeys.push("mode"); }
-  var lockReason = {
-    mode: "指标「" + (info.label || entry.metric) + "」只有这一种模式下有意义",
-    stage: "对战没有关卡和难度 —— 模式改成「闯关」才能选",
-    difficulty: "对战没有关卡和难度 —— 模式改成「闯关」才能选",
-    weapon: "这个指标和武器无关",
-    min_shots: "只有命中率那种比率指标才用得上"
-  };
+  paint();
+  row.appendChild(say);
 
-  restFields("cards", entry, ["card"], mark).forEach(function (node) {
-    var key = node.getAttribute("data-key");
-    var control = node.querySelector
-      ? node.querySelector("select, input") : null;
-    if ((key === "mode" || key === "metric") && control) {
+  // ★ 两颗钮的字**取自 SCHEMA 的 label**（「对局模式」= `mode` 那一格、
+  //   「达成条件」= `conditions` 那一格），不在这儿写死 —— 服务端改了
+  //   叫法，钮上的字跟着改。
+  var acts = el("div", "card-acts");
+  [[cardSpec("mode"), openCardMode],
+   [cardSpec("conditions"), openCardCond]].forEach(function (pair) {
+    var button = el("button", "btn btn-sm", pair[0].label || pair[0].key);
+    if (pair[0].help) { button.title = pair[0].help; }
+    button.onclick = function () { pair[1](entry); };
+    acts.appendChild(button);
+  });
+  row.appendChild(acts);
+  return row;
+}
+
+/* ------------------------------------ 两个弹窗共用的那几件事 */
+
+//: 正开着的那个弹窗：`{which, entry, draft}`。两个窗不会同时开。
+var CARD_EDIT = null;
+
+/** 按键名排序的 JSON —— 拿来比「改没改过」。
+ *
+ * ★ 不能直接 `JSON.stringify` 比：改一格常常是**给对象补一个键**
+ *   （比如条件行补上 `join`），键的顺序一变，两串就不相等了 ——
+ *   那会变成「什么都没改也说有未保存的修改」。
+ */
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return "[" + value.map(stableJson).join(",") + "]";
+  }
+  if (value && typeof value === "object") {
+    return "{" + Object.keys(value).sort().map(function (key) {
+      return JSON.stringify(key) + ":" + stableJson(value[key]);
+    }).join(",") + "}";
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+/** 弹窗里那几格改过没有（`CARD_EDIT.keys` = 这个窗管着哪几个键）。 */
+function cardEditDirty() {
+  if (!CARD_EDIT) { return false; }
+  var pick = function (source) {
+    var out = {};
+    CARD_EDIT.keys.forEach(function (key) { out[key] = source[key]; });
+    return stableJson(out);
+  };
+  return pick(CARD_EDIT.entry) !== pick(CARD_EDIT.draft);
+}
+
+/** 弹窗里改的是**一份拷贝**：点「取消」就该什么都没发生。 */
+function cardDraft(entry) {
+  var copy = {};
+  Object.keys(entry).forEach(function (key) { copy[key] = entry[key]; });
+  copy.conditions = (entry.conditions || []).map(function (cond) {
+    var one = {};
+    Object.keys(cond).forEach(function (key) { one[key] = cond[key]; });
+    return one;
+  });
+  return copy;
+}
+
+/** 弹窗顶上那句实时说明（和行里那句是同一个函数算的）。 */
+function paintCardSay() {
+  if (!CARD_EDIT) { return; }
+  var cond = CARD_EDIT.which === "cond";
+  var box = $(cond ? "cardCondSay" : "cardModeSay");
+  var why = cardRuleProblem(CARD_EDIT.draft);
+  // ★ 弹窗里**当它是开着的**来念：这两个窗设的是「怎么才给」，而
+  //   「这一版给不给」是行上那个开关的事 —— 关着的时候也得看得见
+  //   自己正在配什么。
+  var shown = cardDraft(CARD_EDIT.draft);
+  shown.listed = true;
+  box.textContent = cardRuleText(shown);
+  box.classList.toggle("bad-text", !!why);
+  if (!cond) { return; }
+  // 「条件无效」四个字底下补一行说清哪儿不对 —— 只写四个字的话，
+  // 人得自己一格格试出来是哪一条错了。
+  $("cardCondWhy").textContent = why;
+  $("cardCondWhy").classList.toggle("hidden", !why);
+  // ★ 配不出来的东西**存不进去**（用户 2026-09-13：「此时无法保存」）。
+  $("cardCondSave").disabled = !!why;
+}
+
+/** 把弹窗里改好的那份写回规则，然后整页重画一遍。 */
+function saveCardEdit() {
+  if (!CARD_EDIT) { return; }
+  var entry = CARD_EDIT.entry;
+  var draft = CARD_EDIT.draft;
+  CARD_EDIT.keys.forEach(function (key) {
+    if (draft[key] === undefined) { delete entry[key]; }
+    else { entry[key] = draft[key]; }
+  });
+  // ★ 存完再关 —— 这时 `cardEditDirty()` 已经是假的，不会再弹「未保存」。
+  CARD_EDIT = null;
+  $("cardModeModal").classList.add("hidden");
+  $("cardCondModal").classList.add("hidden");
+  touched();
+  // ★ 整页重画而不是只改那一行：说明文变了以后，筛选条（统计范围 /
+  //   武器）该不该继续留着这一行也跟着变。
+  repaintList();
+}
+
+/** 关掉弹窗。**有没保存的改动就先问一句**（用户 2026-09-13 第五轮）。
+ *
+ * ★ 「取消」「✕」「Esc」三条路都走这儿 —— 三处各写一遍确认的话，
+ *   总有一条会漏（而漏掉的那条正好是手一滑最容易碰到的）。
+ * ★ 两个窗一个待遇：丢的都是「刚敲进去还没存的东西」。
+ */
+async function closeCardEdit() {
+  if (CARD_EDIT && cardEditDirty()) {
+    var go = await ask({
+      title: "有未保存的修改",
+      lead: "「" + CARD_EDIT.title + "」里改过的东西还没保存，关掉就丢了。",
+      ok: "关掉不保存", cancel: "回去接着改", danger: true});
+    if (!go) { return; }
+  }
+  CARD_EDIT = null;
+  $("cardModeModal").classList.add("hidden");
+  $("cardCondModal").classList.add("hidden");
+}
+
+/* ------------------------------------- 弹窗①「对局模式」：算哪一局
+
+   模式 / 关卡 / 难度三格。★ **关卡和难度只在选了「闯关」时才画** ——
+   对战没有关卡（服务端直接拒），而「不限」谈不上是哪一关。
+   ★ 格子照 `SCHEMA.cards` 现取（除了卡片 / 能获得 / 条件三样），
+     服务端加一个「算哪一局」的新字段，这个窗里自动多一格。 */
+
+//: 这两格只有「闯关」才有意义（同 `dropRow` 的 `PVP_LOCKED_KEYS`）。
+var CARD_QUEST_ONLY_KEYS = PVP_LOCKED_KEYS;
+//: 不归「对局模式」窗管的三样。
+var CARD_MODE_SKIP_KEYS = ["card", "listed", "conditions"];
+
+function openCardMode(entry) {
+  // ★ 这个窗管哪几个键**照 SCHEMA 现算**：服务端给「算哪一局」加一个字段，
+  //   它自动跟着存、也自动算进「改过没有」（D16）。
+  var keys = (((CAT.schema || {}).cards || {}).fields || [])
+    .map(function (spec) { return spec.key; })
+    .filter(function (key) { return CARD_MODE_SKIP_KEYS.indexOf(key) < 0; });
+  CARD_EDIT = {which: "mode", entry: entry, draft: cardDraft(entry),
+               keys: keys, title: cardSpec("mode").label || ""};
+  $("cardModeTitle").textContent =
+    CARD_EDIT.title + "　—— " + itemName(entry.card);
+  renderCardMode();
+  $("cardModeModal").classList.remove("hidden");
+}
+
+function renderCardMode() {
+  if (!CARD_EDIT || CARD_EDIT.which !== "mode") { return; }
+  var draft = CARD_EDIT.draft;
+  var host = $("cardModeFields");
+  host.textContent = "";
+  (((CAT.schema || {}).cards || {}).fields || []).forEach(function (spec) {
+    if (CARD_MODE_SKIP_KEYS.indexOf(spec.key) >= 0) { return; }
+    // ★ 关卡 / 难度只有「闯关」才画（用户点名的联动）。**但磁盘上真有值的
+    //   照画** —— 手改进来的值不能从画面上消失，不然那个人既看不见它、
+    //   也没法把它去掉（同上一版「用不上但有值就画出来」那条）。
+    if (CARD_QUEST_ONLY_KEYS.indexOf(spec.key) >= 0 && draft.mode !== "quest"
+        && draft[spec.key] === undefined) { return; }
+    var node = fieldNode(spec, draft, paintCardSay);
+    var control = node.querySelector ? node.querySelector("select, input") : null;
+    if (control && spec.key === "mode") {
+      // `choiceNode` 自己的 onchange 先跑（写进 draft），这一发排在后面。
       control.addEventListener("change", function () {
-        // `choiceNode` 自己的 onchange 先跑（写进 `entry`），这一发排在后面：
-        // 把这一档下没有意义的格子清掉，然后整行按新状态重画。
-        if (entry.mode === "pvp") {
-          delete entry.stage;
-          delete entry.difficulty;
+        // 对战 / 不限都没有关卡和难度 —— 切过去就把那两格清掉（留着的话
+        // 服务端会拒，而人看不出为什么）。
+        if (draft.mode !== "quest") {
+          CARD_QUEST_ONLY_KEYS.forEach(function (key) { delete draft[key]; });
         }
-        var now = (CAT.card_metrics || {})[entry.metric] || {};
-        if (!now.weapon) { delete entry.weapon; }
-        if (!now.ratio) { delete entry.min_shots; }
-        // 指标只在一种模式下有意义时（击杀怪物数 / 零击杀获胜），
-        // 模式跟着钉过去 —— 否则保存时服务端会拒，而人看不出为什么。
-        if (now.modes && now.modes.length === 1) { entry.mode = now.modes[0]; }
-        row.parentNode.replaceChild(cardRow(entry, index), row);
-        touched();
+        renderCardMode();
       });
     }
-    if (control && lockedKeys.indexOf(key) >= 0) {
-      // ★ 只锁不改：磁盘上手改出来的值照实显示（锁着），切一次模式 /
-      //   指标它才清掉。渲染时悄悄删会让页面一打开就「有未保存的修改」。
-      control.disabled = true;
-      control.title = lockReason[key] || "";
-    }
-    row.appendChild(node);
+    host.appendChild(node);
   });
+  paintCardSay();
+}
+
+/* -------------------------------- 弹窗②「达成条件」：一行一条 and / or */
+
+function openCardCond(entry) {
+  CARD_EDIT = {which: "cond", entry: entry, draft: cardDraft(entry),
+               keys: ["conditions"],
+               title: cardSpec("conditions").label || ""};
+  if (!cardConditions(CARD_EDIT.draft).length) {
+    CARD_EDIT.draft.conditions.push(cardNewCondition(0));
+  }
+  $("cardCondTitle").textContent =
+    CARD_EDIT.title + "　—— " + itemName(entry.card);
+  renderCardCond();
+  $("cardCondModal").classList.remove("hidden");
+}
+
+/** 新加一条条件时的样子。★ 指标取下拉里的**第一项**（服务端排的序），
+ *  别在这儿写死一个 key。 */
+function cardNewCondition(at) {
+  var limits = cardLimits();
+  var first = (cardCondSpec("metric").options || [])[0] || {};
+  var cond = {scope: limits.scope_match, metric: first.value,
+              op: limits.op_ge, threshold: 1};
+  if (at > 0) { cond.join = limits.join_and; }
+  cardCondFix(cond);
+  return cond;
+}
+
+function renderCardCond() {
+  if (!CARD_EDIT || CARD_EDIT.which !== "cond") { return; }
+  var list = cardConditions(CARD_EDIT.draft);
+  var host = $("cardCondRows");
+  host.textContent = "";
+  list.forEach(function (cond, at) {
+    host.appendChild(cardCondRow(cond, at, list));
+  });
+  var max = cardLimits().max_conditions || list.length;
+  var count = $("cardCondCount");
+  count.textContent = list.length + " / " + max;
+  count.classList.toggle("full", list.length >= max);
+  $("cardCondAdd").disabled = list.length >= max;
+  paintCardSay();
+}
+
+/** 「达成条件」弹窗里的一行。
+ *
+ * ★ 格子**照子字段表现画**（`SCHEMA.cards.conditions.fields`，顺序就是
+ *   服务端写的顺序，也就是 CSS 里那几列的顺序）。
+ * ★★ 用不上的格子画成**空白占位**（`.cond-gap`）而不是整个不画 ——
+ *   分不到武器的指标没有「武器」、枚举指标和累计档没有「比较」，
+ *   但那一列的位置得留着：不留的话换个指标整行都会横着跳一段。 */
+function cardCondRow(cond, at, list) {
+  var limits = cardLimits();
+  var info = cardMetricInfo(cond.metric);
+  var row = el("div", "card-cond");
+  var gap = function () { row.appendChild(el("div", "cond-gap")); };
+  (cardSpec("conditions").fields || []).forEach(function (spec) {
+    if (spec.key === "join") {
+      // 第一条没有连接词（服务端也拦着不许写）—— 空着，别摆个「连接」
+      // 在那儿，那看着像一个值。
+      if (at === 0) { return gap(); }
+      if (cond.join === undefined) { cond.join = limits.join_and; }
+    }
+    if (spec.key === "weapon" && !info.weapon) { return gap(); }
+    // ★ 「比较」那一格**永远画出来**（用户 2026-09-13 第五轮）：累计档和
+    //   「本局结果」各自只有一种说法，但空着一格看上去像是坏了 ——
+    //   改成**下拉里只剩那一项**（`cardOpOptions`），一眼就知道没得选。
+    if (spec.key === "op") { return row.appendChild(
+      cardCondField(cardOpOptions(cond, info), cond)); }
+    row.appendChild(spec.key === "threshold"
+      ? cardCondValueField(cond, info)
+      : cardCondField(spec.key === "metric" ? cardMetricOptions(cond) : spec,
+                      cond));
+  });
+
+  var kill = el("button", "kill", "✕");
+  if (list.length <= 1) {
+    // 只剩一条时不给删 —— 删光了这条规则就说不出「什么时候给」。
+    // ★ 用 `aria-disabled` 不用 `disabled`：浏览器不给 disabled 的钮派发
+    //   鼠标事件，那句 `title` 提示根本弹不出来（D97i 踩过）。
+    kill.setAttribute("aria-disabled", "true");
+    kill.title = "至少要留一条";
+  } else {
+    kill.title = "删掉这一条";
+    kill.onclick = function () {
+      list.splice(at, 1);
+      // 删掉的要是第一条，新的第一条不该再带连接词。
+      if (list.length) { delete list[0].join; }
+      renderCardCond();
+    };
+  }
+  row.appendChild(kill);
   return row;
+}
+
+/** 条件行里的一格（下拉）。改完把这条条件收拾干净、整块重画。 */
+function cardCondField(spec, cond) {
+  // ★ 改之**前**那个指标是什么，`cardCondFix` 要用它（见那边的注释）。
+  var was = cond.metric;
+  var node = fieldNode(spec, cond, paintCardSay);
+  var control = node.querySelector ? node.querySelector("select, input") : null;
+  if (control) {
+    // `choiceNode` 自己的 onchange 先跑（写进 cond），这一发排在后面。
+    control.addEventListener("change", function () {
+      cardCondFix(cond, was);
+      renderCardCond();
+    });
+  }
+  return node;
+}
+
+/** 「数值」那一格：枚举指标画成下拉，别的画数字框（带指标自己的单位）。 */
+function cardCondValueField(cond, info) {
+  var base = cardCondSpec("threshold");
+  var values = info.values || [];
+  if (values.length) {
+    // 枚举指标（「本局结果」）：值只有两个，下拉比数字框说得清。
+    return cardCondField({key: "threshold", label: base.label, type: "choice",
+                          options: values}, cond);
+  }
+  var spec = {};
+  Object.keys(base).forEach(function (name) { spec[name] = base[name]; });
+  // ★ 下限跟着比较符走（服务端是同一张 `CARD_OP_MIN`）：「大于等于 0」
+  //   恒成立所以卡在 1，而「小于等于 / 等于」要的正是 0。
+  var limits = cardLimits();
+  var low = (limits.op_min || {})[cond.op || limits.op_ge];
+  spec.min = (low === undefined) ? 1 : low;
+  // 单位来自指标表（命中率那个 `%`）—— 句子里和输入框后缀是同一个字。
+  if (info.unit) { spec.suffix = info.unit; }
+  // ★ 数字框走的是 `oninput`（不是 `change`）⇒ 说明文一边打字一边跟着变。
+  return fieldNode(spec, cond, paintCardSay);
+}
+
+/** 「统计指标」那一格：**按当前统计范围过滤选项**。
+ *
+ *  「对局数 / 胜利·通关次数」只有累计档有意义，「本局结果 / 命中率」只有
+ *  一局内有意义 —— 让人选得到，配出来的只能是废规则。判据来自服务端的
+ *  `scopes`，不是这儿写死的清单。
+ *
+ *  ★★ 多一个**空选项**（用户 2026-09-13 第五轮）：统计范围一改，原来那个
+ *  指标可能就不在表里了 —— 这时这一格空着等人重选，顶上写「条件无效」。
+ *  第一版是把统计范围**弹回去**，改都改不动，人只会以为下拉坏了。 */
+function cardMetricOptions(cond) {
+  var spec = cardCondSpec("metric");
+  var scope = cond.scope || cardLimits().scope_match;
+  var copy = {};
+  Object.keys(spec).forEach(function (name) { copy[name] = spec[name]; });
+  copy.optional = true;
+  copy.empty_label = "请选择";
+  copy.options = (spec.options || []).filter(function (option) {
+    var scopes = cardMetricInfo(option.value).scopes;
+    return !scopes || !scopes.length || scopes.indexOf(scope) >= 0;
+  });
+  return copy;
+}
+
+/** 「比较」那一格：**按指标和统计范围过滤选项**。
+ *
+ *  累计档只有「大于等于」（它念成「每满 N」），枚举指标只有「等于」。
+ *  ★ 格子照画、只是下拉里剩一项 —— 空着一格看上去像是坏了。 */
+function cardOpOptions(cond, info) {
+  var limits = cardLimits();
+  var spec = cardCondSpec("op");
+  var only = null;
+  if ((info.values || []).length) { only = limits.op_eq; }
+  else if (cond.scope === limits.scope_total) { only = limits.op_ge; }
+  var copy = {};
+  Object.keys(spec).forEach(function (name) { copy[name] = spec[name]; });
+  if (only !== null) {
+    copy.options = (spec.options || []).filter(function (option) {
+      return option.value === only;
+    });
+  }
+  return copy;
+}
+
+/* ------------------------------------- 达成进度弹窗（用户 2026-09-13 第四轮）
+
+   两个入口、**同一份内容**：
+     · 「玩家仓库」每一行那颗「卡片进度」—— 看那个玩家的（★系统管理员）；
+     · 「称号卡片掉落」工具条上那颗「查看本人达成进度」—— 只看自己的。
+
+   ★★ 「只能看自己」这件事**不靠前端**：那颗钮压根不发 `name`，而服务端
+     `_admin_card_progress` 里写死了「写了别人的名字才要系统管理员」。
+   ★ 进度**只有「玩家累计」那种条件才有**：一局内的攒不住（打完就清），
+     那一格写的是「每局游戏内计算」，不画一根永远停在 0 的进度条。 */
+
+//: 正开着的那一份：`{username, mine, rows, filter}`。
+var CARD_PROG = null;
+
+//: 统计范围那个筛选。★ 口径是「**含**」：一张卡片里只要有一条那一档的条件
+//  就列出来，而且**两种条件都照画** —— 用户点名要的（「累计条件和局内条件
+//  都显示」）。判据用的是服务端发下来的 `scope`，不是这儿另立的名目。
+var CARD_PROG_SCOPES = [
+  {id: "all", label: "全部"},
+  {id: "match", label: "含局内条件"},
+  {id: "total", label: "含累计条件"},
+];
+
+async function openCardProgress(username) {
+  var result = await api("/admin/api/cards/progress"
+    + (username ? ("?name=" + encodeURIComponent(username)) : ""));
+  if (bounced(result)) { return; }
+  if (!result.ok) { toast(result.message, false); return; }
+  CARD_PROG = {username: result.username, mine: !!result.mine,
+               nickname: result.nickname || "", rows: result.rows || [],
+               filter: {group: CARD_GROUPS[0].id, scope: "all"}};
+  renderCardProgress();
+  $("cardProgressModal").classList.remove("hidden");
+}
+
+function closeCardProgress() {
+  CARD_PROG = null;
+  $("cardProgressModal").classList.add("hidden");
+}
+
+/** 这张卡片过不过当前那两个筛选。 */
+function cardProgMatches(row) {
+  var filter = CARD_PROG.filter;
+  if (filter.group !== "all" && cardGroupOf(row.card) !== filter.group) {
+    return false;
+  }
+  if (filter.scope === "all") { return true; }
+  return (row.conditions || []).some(function (cond) {
+    return cond.scope === filter.scope;
+  });
+}
+
+function renderCardProgress() {
+  if (!CARD_PROG) { return; }
+  // 标题里写清**这是谁的** —— 两个入口长一个样，不写就分不出看的是谁。
+  var who = CARD_PROG.username
+    + (CARD_PROG.nickname ? ("（" + CARD_PROG.nickname + "）") : "");
+  $("cardProgressTitle").textContent =
+    (CARD_PROG.mine ? "我的卡片进度" : "卡片进度") + "　—— " + who;
+
+  var bar = $("cardProgressBar");
+  bar.textContent = "";
+  // 种类切换复用掉落页那一组（`CARD_GROUPS`）—— 同一件事只有一份说法。
+  [[CARD_GROUPS, "group"], [CARD_PROG_SCOPES, "scope"]].forEach(function (pair) {
+    var seg = el("span", "seg");
+    pair[0].forEach(function (item) {
+      var on = CARD_PROG.filter[pair[1]] === item.id;
+      var button = el("button", "cat" + (on ? " on" : ""), item.label);
+      button.appendChild(el("span", "n", String(
+        CARD_PROG.rows.filter(function (row) {
+          if (pair[1] === "group") {
+            return item.id === "all" || cardGroupOf(row.card) === item.id;
+          }
+          return item.id === "all" || (row.conditions || []).some(
+            function (cond) { return cond.scope === item.id; });
+        }).length)));
+      button.onclick = function () {
+        CARD_PROG.filter[pair[1]] = item.id;
+        renderCardProgress();
+      };
+      seg.appendChild(button);
+    });
+    bar.appendChild(seg);
+  });
+
+  var host = $("cardProgressBody");
+  host.textContent = "";
+  var shown = CARD_PROG.rows.filter(cardProgMatches);
+  if (!shown.length) {
+    host.appendChild(el("div", "list-empty", "没有符合筛选条件的卡片"));
+    return;
+  }
+  shown.forEach(function (row) { host.appendChild(cardProgRow(row)); });
+}
+
+function cardProgRow(row) {
+  var box = el("div", "card-prog" + (row.listed ? "" : " off"));
+  var who = tipFor(el("div", "who"), row.card);
+  who.appendChild(slotNode(row.card, 36, !!row.listed, false));
+  var name = el("div", "nmz", itemName(row.card));
+  name.appendChild(el("span", "got" + (row.granted ? "" : " none"),
+                      "已获得 " + row.granted + " 张"));
+  who.appendChild(name);
+  box.appendChild(who);
+
+  var list = el("div", "card-prog-conds");
+  if (!row.listed) {
+    // 关着的卡片没有「还差多少」可言 —— 说清是「拿不到」，不是「差 0」。
+    list.appendChild(el("div", "card-prog-none", row.text));
+  } else if (!(row.conditions || []).length) {
+    list.appendChild(el("div", "card-prog-none", row.text));
+  } else {
+    row.conditions.forEach(function (cond) {
+      list.appendChild(cardProgCond(cond));
+    });
+  }
+  box.appendChild(list);
+  return box;
+}
+
+function cardProgCond(cond) {
+  var line = el("div", "card-prog-cond");
+  line.appendChild(el("div", "txt", cond.text));
+  if (cond.need === undefined) {
+    // 一局内：攒不住，进度这回事对它不成立。
+    line.appendChild(el("div", "per-match", "每局游戏内计算"));
+    return line;
+  }
+  var have = Math.max(0, Number(cond.have) || 0);
+  var need = Math.max(1, Number(cond.need) || 1);
+  line.appendChild(el("div", "num", have + " / " + need));
+  var full = have >= need;
+  var bar = el("div", "card-prog-bar" + (full ? " full" : ""));
+  var fill = el("i");
+  fill.style.width = Math.min(100, Math.round(have * 100 / need)) + "%";
+  bar.appendChild(fill);
+  // 攒满了但还没结算 —— 说一声，免得有人以为卡住了。
+  bar.title = full ? "已经攒够，下一局结算时发" : (have + " / " + need);
+  line.appendChild(bar);
+  return line;
+}
+
+/** 改完一格之后，把这条条件里**跟着失效**的几格收拾干净。
+ *
+ * ★ 和服务端的护栏是同一套（`_validate_card_conditions`）：留着一个
+ *   「写了但不生效」的值就是 D17a 那一类 —— 保存时被拒，而人看不出为什么。
+ */
+function cardCondFix(cond, wasMetric) {
+  var limits = cardLimits();
+  // ★★ **统计范围永远改得动**（用户 2026-09-13 第五轮）：改完之后原来那个
+  //   指标要是不在新范围里，就**把指标清掉**等人重选（顶上写「条件无效」）。
+  //   第一版是反过来的 —— 把范围弹回指标那一档，于是那个下拉「怎么点都
+  //   不动、还一声不吭」，谁都会以为它坏了。
+  var scope = cond.scope || limits.scope_match;
+  var wants = (cardMetricInfo(cond.metric).scopes) || [];
+  if (cond.metric !== undefined && wants.length && wants.indexOf(scope) < 0) {
+    delete cond.metric;
+  }
+  var info = cardMetricInfo(cond.metric);
+  // ★★ **跨过「枚举 ↔ 数字」那条界**时，比较符和数值一起重来：
+  //   枚举指标（「本局结果」）会把比较符钉成「等于」、数值钉成 0/1。
+  //   从它切走之后那两格留着就成了「开枪次数 等于 1」—— 看着是个正常
+  //   条件，其实是上一个指标的残渣，而且把「命中率要配开枪数下限」那道
+  //   护栏顶得人莫名其妙（实测踩到）。
+  var wasEnum = ((cardMetricInfo(wasMetric).values || []).length > 0);
+  var nowEnum = ((info.values || []).length > 0);
+  if (wasMetric !== undefined && wasMetric !== cond.metric
+      && wasEnum !== nowEnum) {
+    delete cond.op;
+    delete cond.threshold;
+  }
+  // ★ 反方向（选了个只在另一档有意义的指标）不会发生：指标下拉本来就
+  //   **按当前范围过滤**（`cardMetricOptions`），选不到不合适的那些。
+  if (!info.weapon) { delete cond.weapon; }
+  var values = info.values || [];
+  if (values.length) {
+    // 枚举指标：比较符固定「等于」，值必须是表里那两个之一。
+    cond.op = limits.op_eq;
+    if (!values.some(function (o) { return o.value === cond.threshold; })) {
+      cond.threshold = values[0].value;
+    }
+    return;
+  }
+  if (cond.scope === limits.scope_total || cond.op === undefined) {
+    // 累计那一档只有「每满 N」。
+    // ★ 缺这一格时也**显式写回默认值**，别指望「下拉显示着大于等于」就
+    //   等于存着 `ge`：`choiceNode` 在值缺失时显示的是第一项，而条件里
+    //   什么都没有 ——「看到的」和「要存的」对不上是最难查的一种错。
+    cond.op = limits.op_ge;
+  }
+  // 按武器统计时比较符只能是「大于等于」（别的方向对没用过那把枪的人恒成立）。
+  if (cond.op !== limits.op_ge) { delete cond.weapon; }
+  // 阈值下限跟着比较符走，别让「大于等于 0」这种恒成立的留在画面上。
+  var low = (limits.op_min || {})[cond.op];
+  if (low === undefined) { low = 1; }
+  if (typeof cond.threshold !== "number" || cond.threshold < low) {
+    cond.threshold = low;
+  }
 }
 
 /* -------------------------------------------- 金币 / 经验获取：两张表格
@@ -3501,6 +4223,16 @@ function renderPlayerRows() {
     //   图快放在这儿，可它是账号管理，不是仓库）。这一格现在只剩这一个钮，
     //   `.acts` 那层右对齐留着 —— 表头那 110px 是按它量的。
     var acts = el("div", "acts");
+    // ★ 「成就卡片进度」排在「修改仓库」左边（用户 2026-09-13 第四轮）：
+    //   它是**只读**的一眼看，摆在会改东西的那颗钮前面。
+    //   ★★ **运营也看得见**（用户第六轮）：它只回「这个人离下一张卡还差
+    //     多少」，既不是仓库清单也改不了任何东西 —— 和「修改仓库」那道门
+    //     （D97i，系统管理员专用）不是一回事。真正的门在服务端
+    //     （`_admin_card_progress`：看别人要 `_require_editor()`）。
+    //   ⚠ 这一页只读玩家根本进不来（`applyRoleToTabs`），所以这儿不锁。
+    var progress = el("button", "btn btn-sm", "成就卡片进度");
+    progress.onclick = function () { openCardProgress(row.username); };
+    acts.appendChild(progress);
     var button = el("button", "btn btn-sm btn-primary", "修改仓库");
     // ★★ 运营进得了这一页、也能批量发奖，但**改不了别人的仓库**
     //   （用户 2026-09-13 第五轮）。
@@ -5768,6 +6500,10 @@ function wire() {
     // 管理员账号页那两张表单窗：有没提交的输入，但 Esc 是明确的「我不填了」。
     if (event.key === "Escape" && ADD_ADMIN_OPEN) { closeAddAdmin(); return; }
     if (event.key === "Escape" && SET_PW_OPEN) { closeSetPw(); return; }
+    // 称号卡片那两个设置窗：改的是一份拷贝，Esc = 丢掉这次的改动。
+    if (event.key === "Escape" && CARD_EDIT) { closeCardEdit(); return; }
+    // 达成进度是**只读**的一眼看，关掉不丢东西 ⇒ 排在只读那几张里。
+    if (event.key === "Escape" && CARD_PROG) { closeCardProgress(); return; }
     // 只读那几张排最后：它们不会盖在选择器上面。
     if (event.key === "Escape" && LEVEL_MODAL) { closeLevelModal(); return; }
     if (event.key === "Escape" && PROMOTE_OPEN) { closePromoteModal(); return; }
@@ -5782,6 +6518,31 @@ function wire() {
   $("setPwOpenBtn").onclick = function () { openSetPw(); };
   $("setPwClose").onclick = closeSetPw;
   $("setPwCancel").onclick = closeSetPw;
+
+  // 称号卡片那两个设置窗（用户 2026-09-13 第三轮）。
+  // ★ 两张都有没保存的改动 ⇒ **只认 ✕ / 取消 / Esc，不认遮罩**（本页约定）。
+  $("cardModeClose").onclick = closeCardEdit;
+  $("cardModeCancel").onclick = closeCardEdit;
+  $("cardModeSave").onclick = function () { saveCardEdit(); };
+  $("cardCondClose").onclick = closeCardEdit;
+  $("cardCondCancel").onclick = closeCardEdit;
+  $("cardCondAdd").onclick = function () {
+    if (!CARD_EDIT || CARD_EDIT.which !== "cond") { return; }
+    var list = cardConditions(CARD_EDIT.draft);
+    list.push(cardNewCondition(list.length));
+    renderCardCond();
+  };
+  // 达成进度弹窗：**只读** ⇒ ✕ / Esc / 点遮罩都能关（同「等级经验对应表」）。
+  $("cardProgressClose").onclick = closeCardProgress;
+  $("cardProgressModal").onclick = function (event) {
+    if (event.target === $("cardProgressModal")) { closeCardProgress(); }
+  };
+  $("cardCondSave").onclick = function () {
+    // 「条件无效」时这颗钮是灰的（`paintCardSay`），这儿再兜一道 ——
+    // 键盘也能按到它。
+    if (!CARD_EDIT || cardRuleProblem(CARD_EDIT.draft)) { return; }
+    saveCardEdit();
+  };
 
   $("addAdmin").onclick = async function () {
     if (!passwordsMatch("newAdminPass", "newAdminPass2")) { return; }

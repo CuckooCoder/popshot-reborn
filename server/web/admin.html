@@ -277,12 +277,14 @@
             <!-- ★ 「状态」列（用户 2026-09-13）：在线的人现在停在哪个界面
                  —— 大厅 / 商店界面 / 待机房间·任务|对战 / 游戏中·任务|对战。
                  判据全在服务端（`gameserver.conn_place()`），这里只画。
-                 ★ 末列从 236 收到 110：「设为管理员（运营）」搬去「管理员
-                 账号」页了（同一天的第 2 件事），这一格只剩「修改仓库」。 -->
+                 ★ 末列 236 → 110 →（2026-09-13 第六轮）**216**：先是
+                 「设为管理员（运营）」搬去了「管理员账号」页，后来又加回
+                 一颗「成就卡片进度」。216 = 两颗钮**左右排**放得下的宽度
+                 —— 窄了它们会换行摞成上下两排（`td .acts` 本来会 wrap）。 -->
             <thead><tr>
               <th>用户名</th><th>昵称</th><th style="width:150px">状态</th>
               <th style="width:64px">等级</th>
-              <th style="width:96px">金币</th><th style="width:110px"></th>
+              <th style="width:96px">金币</th><th style="width:216px"></th>
             </tr></thead>
             <tbody id="playerRows"></tbody>
           </table>
@@ -876,6 +878,83 @@
            「确定」都是这一身。深棕只留给**工具条上那个入口钮**（`setPwOpenBtn`）：
            那儿它要和旁边几个钮区分开，而进了窗之后已经没什么可混淆的了。 -->
       <button class="btn btn-primary" id="setPw">改密码</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 称号卡片：对局模式（用户 2026-09-13 第三轮）============
+     「称号卡片掉落」那一行右边第一颗钮。里面只有三格 —— 模式 / 关卡 / 难度
+     —— 而**关卡和难度只在选了「闯关」时才画出来**（对战没有关卡，不限也
+     谈不上哪一关）。三格由 admin.js 照 `SCHEMA.cards` 现画，页面里不留静态框。
+     ★ 顶上那句说明是**整条规则**现算出来的（条件那一半也算进去），
+       所以改完模式立刻看得见「在闯关模式「3 · …」（困难）中，…」。
+     ★ 有没保存的改动 ⇒ **点遮罩不关**（同「修改仓库」那一窗的规矩），
+       Esc 和 ✕ 当取消。 -->
+<div class="modal hidden" id="cardModeModal">
+  <div class="panel card-mode-panel">
+    <div class="panel-title">
+      <h2 id="cardModeTitle">对局模式</h2>
+      <button class="icon-btn" id="cardModeClose" aria-label="关闭"
+              title="取消">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="card-say-box" id="cardModeSay"></div>
+      <div id="cardModeFields"></div>
+    </div>
+    <div class="panel-foot">
+      <button class="btn" id="cardModeCancel">取消</button>
+      <button class="btn btn-primary" id="cardModeSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 称号卡片：达成条件（用户 2026-09-13 第三轮）============
+     一行一条条件，条件之间的连接逻辑（并且 / 或者）自己选，**没有括号**
+     —— 从上往下依次结合。顶上那句说明是实时算的；条件配得不对时它变成
+     「条件无效」，底下补一行说清哪儿不对，而且**保存钮按不动**。
+     ★ 行和「＋ 添加条件」都由 admin.js 现画。 -->
+<div class="modal hidden" id="cardCondModal">
+  <div class="panel card-cond-panel">
+    <div class="panel-title">
+      <h2 id="cardCondTitle">达成条件</h2>
+      <button class="icon-btn" id="cardCondClose" aria-label="关闭"
+              title="取消">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="card-say-box" id="cardCondSay"></div>
+      <!-- 「条件无效」四个字底下补一行说清**哪儿不对** —— 只写四个字的话，
+           人得自己一格格试出来是哪一条错了。 -->
+      <div class="card-say-why hidden" id="cardCondWhy"></div>
+      <div class="card-cond-rows" id="cardCondRows"></div>
+      <div class="card-cond-foot">
+        <button class="btn btn-sm" id="cardCondAdd">＋ 添加条件</button>
+        <span class="card-cond-count" id="cardCondCount"></span>
+      </div>
+    </div>
+    <div class="panel-foot">
+      <button class="btn" id="cardCondCancel">取消</button>
+      <button class="btn btn-primary" id="cardCondSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 称号卡片：达成进度（用户 2026-09-13 第四轮）============
+     两个入口，**同一份内容**：
+       · 「玩家仓库」每一行的「卡片进度」—— 看**那个玩家**的（★系统管理员）；
+       · 「称号卡片掉落」工具条上的「查看本人达成进度」—— 只看**自己**的。
+     内容由 admin.js 的 `renderCardProgress()` 打开时现画，数来自
+     `/admin/api/cards/progress`，页面里不留静态表格。
+     ★ 纯只读 ⇒ 点遮罩 / Esc / ✕ 都能关（同「等级经验对应表」那一窗）。 -->
+<div class="modal hidden" id="cardProgressModal">
+  <div class="panel card-prog-panel">
+    <div class="panel-title">
+      <h2 id="cardProgressTitle">卡片进度</h2>
+      <button class="icon-btn" id="cardProgressClose" aria-label="关闭"
+              title="关闭（点旁边的空白处也行）">✕</button>
+    </div>
+    <div class="panel-body">
+      <div class="toolbar" id="cardProgressBar"></div>
+      <div class="card-prog-scroll" id="cardProgressBody"></div>
     </div>
   </div>
 </div>

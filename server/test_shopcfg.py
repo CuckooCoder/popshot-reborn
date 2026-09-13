@@ -1256,7 +1256,8 @@ class SchemaTests(unittest.TestCase):
 
     def test_field_types_are_ones_the_page_can_draw(self):
         # 前台认得的就这几种；写错一个字，那一格会变成空白。
-        known = {"item", "text", "int", "bool", "choice", "materials"}
+        known = {"item", "text", "int", "bool", "choice", "materials",
+                 "conditions"}
         for which in shopcfg.SCHEMA:
             for field in shopcfg.SCHEMA[which]["fields"]:
                 self.assertIn(field["type"], known,

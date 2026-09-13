@@ -2214,7 +2214,7 @@ class QuestDifficultyTests(unittest.TestCase):
 
         def apply_battle(self, username, *, experience=0, money=0,
                          materials=None, stats_mode=None, stats_gained=None,
-                         cards=None, card_targets=None):
+                         cards=None, card_bases=None):
             """结算那一发（V0.3商店）。三元组，和 `AccountStore` 一样。
 
             ★ 材料照旧记进 `material_calls` —— 本组有用例断言「没通关时

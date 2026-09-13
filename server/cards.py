@@ -15,27 +15,44 @@ V0.3 第一稿把「按概率掉卡片」整片砍掉了（D44a）——「本�
 本模块**不碰网络、不读盘、不写盘**：规则表由调用方从 `shopcfg.cards()` 读好
 传进来（结算时读一次），统计值由调用方从 `RoomQuest` 取好传进来。
 
-## 两种统计范围
+## ★★ 一条规则 = 对局模式 + 一串条件（用户 2026-09-13 第三轮）
 
-* **一局内**（`match`）：这一局打到这个数就给。一局一次机会，
+管理页那一行右边两颗钮就是这两段：
+
+    对局模式   mode / stage / difficulty   ← `_applies`，这一局算不算数
+    达成条件   conditions（and / or 串起来）← `eval_conditions`
+
+**达成一次固定发一张**（`shopcfg.CARD_GRANT_COUNT`）—— 没有「数量」
+也没有「累计上限」两格，页面上只看那句现算的说明文。
+
+## 两种统计范围（**每条条件各有一个**）
+
+* **一局内**（`match`）：这一局打到这个数。一局一次机会，
   `quest.settled` 保证一局只结算一次 ⇒ 天然去重。
-* **玩家累计**（`total`）：**里程碑，可重复**（用户 2026-09-13 拍板）——
-  每满一个阈值给一次。
+* **玩家累计**（`total`）：**从上一次拿到这张卡之后重新攒**（用户原话：
+  「发过奖励后，两个计数器同时归零，重新开始新一轮计数」）。
 
-      应发总数 = min(上限, 累计值 // 阈值) × 每次给几张
-      本局发   = max(0, 应发总数 − 这个账号已经从这条规则拿过几张)
+      这一轮攒了多少 = 现在的累计值 − 上次归零时的累计值（存档里的 `card_bases`）
 
-  这三行同时满足三件事：**幂等**（同一份统计再算一遍发 0 张）、
-  **运营调高阈值不倒扣**（已经发出去的留在玩家仓库里，收回去等于抢东西）、
-  **调低阈值下一局一次补齐欠账**（不用扫全表、不用离线任务）。
+  所以它念成「每满 N」而不是「累计达到 N」。★★ 正因为会归零，
+  它才拼得进 and / or：「累计击杀每满 100 **并且** 累计对局每满 10」
+  问的是「两个计数器是不是都攒够了」，攒够就发一张、两个一起归零。
+  归零之后进度都是 0 ⇒ **一次结算最多发一张**，运营把阈值调小也不会
+  瞬间刷出一堆（不需要循环，也不需要一个「上限」来兜底）。
 
-## ★ 只有「达到」一种比较，没有「不超过」
+## ★★ 条件 = 统计范围 + 指标 + 比较符 + 数值
 
-「零死亡获胜」「零击杀获胜」这类条件靠 **0 / 1 的旗标指标**表达
-（`perfect_win` / `carried`，见 `shopcfg.CARD_FLAG_METRICS`）。
-这样既少一个下拉，也躲开了「阈值填 0 时『不超过』恒成立、那条规则每局
-白送一张而且没人看得出为什么」那个很难查的坑 ——
-对应地 `validate_cards` 把阈值下限卡在 1。
+指标表里**只留原子计数**，条件靠比较符拼：
+「死亡次数 · 等于 · 0」并且「本局结果 · 为 · 胜利 / 通关」就是完美胜利。
+
+当初躲着不做 `≤` 是怕「阈值填 0 时恒成立、每局白送一张、页面上还看着正常」。
+那个坑用**结构性护栏**堵（都在 `shopcfg._validate_card_conditions` 里）：
+
+    ge 大于等于  阈值下限 1     ←「≥ 0」恒成立，配不出来
+    le / eq      阈值下限 0     ←「一次都没死」要的正是 0
+    累计条件只能 ge（念「每满 N」）← 刚归零那一刻别的方向对谁都成立
+    le / eq 不许带武器维度      ← 取不到的键是 0，见 `_match_value`
+    命中率必须配一条「开枪次数 ≥ N」，且整条规则不许出现「或者」
 
 ## 铁律：只用标准库
 
@@ -52,17 +69,36 @@ WEAPON_SEP = "@"
 
 
 def stat_key(metric, weapon=None):
-    """`("kills", None)` → `"kills"`；`("kills", 110001)` → `"kills@110001"`。"""
+    """`("kills", None)` → `"kills"`；`("kills", 110001)` → `"kills@110001"`。
+
+    ★ 指标名和统计键**不一定同名**（`shopcfg.card_metric_stat`）：
+    「本局结果」和「胜利 / 通关次数」读的是同一格 `win`，所以存档里
+    不会因为多一个指标就多一个计数器。
+    """
+    name = shopcfg.card_metric_stat(metric)
     if weapon is None:
-        return str(metric)
-    return "%s%s%d" % (metric, WEAPON_SEP, int(weapon))
+        return str(name)
+    return "%s%s%d" % (name, WEAPON_SEP, int(weapon))
+
+
+def card_op_holds(op, value, threshold):
+    """这个数满不满足条件。**全项目唯一的比较落点**。
+
+    ★ 认不出的比较符按「大于等于」算 —— 规则表里 `op` 缺省就是它。
+    """
+    if op == shopcfg.CARD_OP_LE:
+        return value <= threshold
+    if op == shopcfg.CARD_OP_EQ:
+        return value == threshold
+    return value >= threshold
 
 
 def stat_of(stats, mode, metric, weapon=None):
     """从累计战绩里取一个数。`mode` 给 `None` 时**两种模式相加**（= 规则不限模式）。
 
-    ★ 命中率是**现算**的（`hits × 100 ÷ shots`）—— 存比率的话两局
-    50% 和 100% 加起来会变成 150%（`account_store` 那边也写着这一条）。
+    ★★ **比率是现算的，绝不许存**（全表只有「命中率」一条）：存进去的话
+    两局 50% 和 100% 加起来会变成 150%。所以累计战绩里只有 `hits` / `shots`
+    两个分量，比率在读的时候才除（`account_store` 那边写着同一条）。
     """
     if metric == "accuracy":
         shots = stat_of(stats, mode, "shots", weapon)
@@ -108,50 +144,52 @@ def match_stats(quest, seat, *, won, quest_mode, score):
 
     `quest` 是 `gameserver.RoomQuest`。**只读，不改它**。
 
-    ★ 旗标指标（`win` / `perfect_win` / `carried` / `games`）在这儿算成 0 / 1
-    —— 它们既是「一局内」的条件，累计起来又正好是「赢了几场 / 打了几场」，
-    一个口径两用。
+    ★ `win` / `games` 在这儿算成 0 / 1。「一共赢了几场」是从每局这一笔
+    累加出来的，不写就没有。★★ 一局内那个「本局结果」指标（`won`）读的
+    **就是 `win` 这一格**（`shopcfg.CARD_METRIC_STAT`）—— 两个指标共一个
+    计数器，存档里不会因此多一个键。
+
+    ★★ **`kills` 是杀人 + 杀怪的和**（用户 2026-09-13 第二轮）：
+    对战里怪恒 0、闯关里人恒 0，所以在**任何一个模式桶**里它都正好等于
+    「这个模式下的击杀数」——「杀人还是杀怪」由规则里那个「模式」格子回答，
+    不需要两个指标。
+    ⚠ **别再单独写一份 `mob_kills`**：那一格已经加进 `kills` 了，
+    两边都写以后谁给 `kills` 加一次读时求和就会重复计数。
     """
     deaths = _cell(quest.deaths, seat)
-    kills = _cell(quest.enemy_kills, seat) + _cell(quest.mob_kills, seat)
-    hits = _cell(quest.hits, seat)
-    shots = _cell(quest.shots, seat)
     out = {
-        "kills": _cell(quest.enemy_kills, seat),
-        "mob_kills": _cell(quest.mob_kills, seat),
+        "kills": _cell(quest.enemy_kills, seat) + _cell(quest.mob_kills, seat),
         "team_kills": _cell(quest.team_kills, seat),
         "suicides": _cell(quest.suicides, seat),
         "deaths": deaths,
-        "shots": shots,
-        "hits": hits,
+        "shots": _cell(quest.shots, seat),
+        "hits": _cell(quest.hits, seat),
         "splash_hits": _cell(quest.splash_hits, seat),
         "damage": _cell(quest.damage_out, seat),
         "crits": _cell(quest.crits, seat),
         "guards": _cell(quest.guards, seat),
-        "dashes": _cell(quest.dashes, seat),
+        # ★ 只数**命中**（`dash_hits`），不数发动：空房间连点就达标的成就
+        #   没有意义（用户 2026-09-13）。`quest.dashes` 还在，只是不再当指标。
+        "dash_hits": _cell(quest.dash_hits, seat),
         "hearts": _cell(quest.hearts, seat),
         "coins": _cell(quest.coins, seat),
         "score": max(0, int(score or 0)),
         "games": 1,
         "win": 1 if won else 0,
-        # 「完美胜利」= 赢了而且一次都没死；「零击杀获胜」= 赢了但一个都没杀。
-        # ★ 闯关里 `kills` 恒 0（怪走 `mob_kills`），所以 `carried` 在闯关下
-        #   会对任何一次通关都成立 —— `CARD_METRICS` 因此把它限定成只有对战
-        #   才有意义，validator 也照那张表拦着。
-        "perfect_win": 1 if (won and deaths == 0) else 0,
-        "carried": 1 if (won and kills == 0) else 0,
     }
     for (stat_seat, roh), cell in (quest.weapon_stats or {}).items():
         if stat_seat != seat:
             continue
-        for name, metric in (("shots", "shots"), ("kills", "weapon_kills"),
-                             ("damage", "weapon_damage")):
+        # ★ 武器维度的键名**和主指标同名**（`kills@110001`）—— 武器只是
+        #   一个筛选维度，不是另一个指标。`note_weapon_kill` 对怪和人都调，
+        #   所以 `kills@族号` 天然也是「人 + 怪」，和上面的 `kills` 一个口径。
+        for name in ("shots", "kills", "damage"):
             value = int(cell.get(name, 0))
             if value > 0:
-                out[stat_key(metric, roh)] = value
+                out[stat_key(name, roh)] = value
         # ★ 「某武器命中数」没有单独的计数器（`rpExplode` 里没有武器 id，
-        #   归账靠的是「最近一发开的什么枪」）—— 所以按武器的命中率
-        #   拿不到，`CARD_METRICS` 里也就没有那一项。
+        #   归账靠的是「最近一发开的什么枪」）—— 所以 `hits` / `splash_hits`
+        #   在 `CARD_METRICS` 里标的是「分不了武器」。
     return dict((key, value) for key, value in out.items() if value)
 
 
@@ -162,68 +200,162 @@ def _cell(row, seat):
         return 0
 
 
-def due_grants(rules, *, mode, stage, difficulty, won, match, total, granted):
-    """该发这个玩家几张卡。返回 `({卡片: 张数}, {卡片: 新的累计目标}, [警告])`。
+def due_grants(rules, *, mode, stage, difficulty, match, total, bases):
+    """该发这个玩家几张卡。返回 `({卡片: 张数}, {卡片: 新的计数器基准}, [警告])`。
 
-    * `rules`   —— `shopcfg.cards()` 读出来的那一份
-    * `mode`    —— 这一局是 `"pvp"` 还是 `"quest"`
-    * `match`   —— `match_stats()` 算出来的本局战绩
-    * `total`   —— 这个账号**加上本局之后**的累计战绩
-    * `granted` —— `{卡片 id 字符串: 已经从这条规则拿过几张}`
+    * `rules`  —— `shopcfg.cards()` 读出来的那一份
+    * `mode`   —— 这一局是 `"pvp"` 还是 `"quest"`
+    * `match`  —— `match_stats()` 算出来的本局战绩
+    * `total`  —— 这个账号**加上本局之后**的累计战绩
+    * `bases`  —— `{卡片 id 字符串: {统计键: 上次归零时的累计值}}`
 
-    第二个返回值是「累计档的新目标」，调用方把它交给
-    `account_store.apply_battle()`，由存档层在**同一把锁里**算
-    `max(0, 目标 − 已发)` 并落盘 —— 这样存储层完全不认识规则，也不用回调。
+    第二个返回值只有**真的发了卡而且那条规则带累计条件**的卡片才有：
+    存档层拿它把「计数器归零」这件事落盘（用户 2026-09-13 原话：
+    「发过奖励后，两个计数器同时归零，重新开始新一轮计数」）。
+    存档层完全不认识规则，也就没有回调和重入。
+
+    ★★ **一次结算最多发一张**：归零之后每个累计条件的进度都是 0，
+    表达式当场就不成立了 ⇒ 不需要循环、也不需要「上限」那一格来兜底。
     """
     give = {}
-    targets = {}
+    new_bases = {}
     warnings = []
     for rule in rules or ():
         if not rule.get("listed"):
             continue
         card = rule.get("card")
-        metric = rule.get("metric")
-        if card is None or metric not in shopcfg.CARD_METRICS:
-            warnings.append("规则里有认不出的指标 %r，已跳过" % (metric,))
+        if card is None:
             continue
-        if not _applies(rule, mode=mode, stage=stage, difficulty=difficulty,
-                        won=won, match=match):
+        if not _applies(rule, mode=mode, stage=stage, difficulty=difficulty):
             continue
-        threshold = max(1, int(rule.get("threshold", 1)))
-        count = max(1, int(rule.get("count", 1)))
-        limit = max(0, int(rule.get("limit", 0)))
-        weapon = rule.get("weapon")
-        if not shopcfg.card_metric_needs_weapon(metric):
-            weapon = None
-        scope = rule.get("scope", shopcfg.CARD_SCOPE_MATCH)
-        done = int((granted or {}).get(str(card), 0))
-        if scope == shopcfg.CARD_SCOPE_TOTAL:
-            # 里程碑：`应发总数 − 已发`。★ 目标算在这儿、减法留给存档层
-            #   （见 docstring）—— 存档层不认识规则，也就不会有回调和重入。
-            times = stat_of(total, rule.get("mode"), metric, weapon) // threshold
-            if limit:
-                times = min(times, limit)
-            target = times * count
-            targets[card] = target
-            if target > done:
-                give[card] = give.get(card, 0) + (target - done)
+        base = (bases or {}).get(str(card)) or {}
+        holds, used, bad = eval_conditions(
+            rule.get("conditions"), rule_mode=rule.get("mode"),
+            match=match, total=total, base=base)
+        for note in bad:
+            warnings.append("卡片 %s 的规则：%s" % (card, note))
+        if not holds:
             continue
-        # 一局内：达标就给。`limit` 是这个账号一辈子的上限。
-        value = _match_value(match, metric, weapon)
-        if value < threshold:
+        give[card] = give.get(card, 0) + shopcfg.CARD_GRANT_COUNT
+        if used:
+            # 这条规则带累计条件 ⇒ 发了就把那几个计数器的基准挪到当前值。
+            new_bases[card] = used
+    return give, new_bases, warnings
+
+
+def card_progress(rules, *, stats, bases, granted=None):
+    """每张卡片「**离下一次拿到还差多少**」（用户 2026-09-13 第四轮）。
+
+    管理页两处弹窗（玩家仓库那一行的「卡片进度」、称号卡片页的
+    「查看本人达成进度」）画的就是这一份 —— **同一个出处**，两处长一个样。
+
+    返回 `[{card, listed, text, granted, conditions: [...]}]`，其中每条条件：
+
+        {scope, text}                 一局内 —— 进度是「每局现算」，攒不住
+        {scope, text, have, need}     玩家累计 —— 这一轮攒了多少 / 要多少
+
+    ★ `have` 是**这一轮**攒的（累计值 − 上次归零时的基准），不是账号总数：
+      页面上问的是「还差多少」，而计数器在拿到卡的那一刻就归零了。
+    """
+    out = []
+    for rule in rules or ():
+        card = rule.get("card")
+        if card is None:
             continue
-        if limit and done >= limit * count:
-            continue
-        amount = count
-        if limit:
-            amount = min(amount, limit * count - done)
-        if amount > 0:
-            give[card] = give.get(card, 0) + amount
-    return give, targets, warnings
+        base = (bases or {}).get(str(card)) or {}
+        rows = []
+        for cond in rule.get("conditions") or ():
+            metric = cond.get("metric")
+            scope = cond.get("scope", shopcfg.CARD_SCOPE_MATCH)
+            row = {"scope": scope, "text": shopcfg.card_condition_text(cond)}
+            if scope == shopcfg.CARD_SCOPE_TOTAL:
+                weapon = cond.get("weapon")
+                if not shopcfg.card_metric_needs_weapon(metric):
+                    weapon = None
+                now = stat_of(stats, rule.get("mode"), metric, weapon)
+                row["have"] = max(0, now - int(base.get(
+                    stat_key(metric, weapon), 0)))
+                row["need"] = max(shopcfg.card_op_min(shopcfg.CARD_OP_GE),
+                                  int(cond.get("threshold", 1)))
+            rows.append(row)
+        out.append({
+            "card": card,
+            "listed": bool(rule.get("listed")),
+            "text": shopcfg.describe_card_rule(rule),
+            # 「已经拿过几张」—— 「直到**下一次**获得」这句话本身就预设了
+            # 前面可能已经拿过，不说的话看的人没有参照。
+            "granted": int((granted or {}).get(str(card), 0)),
+            "conditions": rows,
+        })
+    return out
+
+
+def eval_conditions(conditions, *, rule_mode, match, total, base):
+    """算这一串条件成不成立。返回 `(成不成立, {统计键: 当前累计值}, [警告])`。
+
+    * 第二项是**这条规则用到的累计计数器现在读到多少** —— 发了卡就拿它
+      当新的基准（「归零」）。⚠ 它**不受短路影响**：`A 或者 B` 里 `A`
+      成立时 `B` 也要收进来，否则那个计数器会一直攒下去永远不清。
+    * **从上往下依次结合，没有括号**（用户拍板）：`A 或者 B 并且 C`
+      = `(A 或者 B) 并且 C`。说明文那边（`shopcfg.card_conditions_text`）
+      混用连接词时会把括号写出来，两边是同一个口径。
+    """
+    conditions = list(conditions or ())
+    used = {}
+    warnings = []
+    if not conditions:
+        # 一条条件都没有的规则**不发卡**：那等于「每局白送」，而画面上
+        # 那句说明写的正是「条件无效」。
+        return False, used, ["一条达成条件都没有，不发卡"]
+    value = None
+    for at, cond in enumerate(conditions):
+        metric = cond.get("metric")
+        if metric not in shopcfg.CARD_METRICS:
+            warnings.append("认不出的指标 %r，整条规则跳过" % (metric,))
+            return False, used, warnings
+        got = _condition_holds(cond, rule_mode=rule_mode, match=match,
+                               total=total, base=base, used=used)
+        if at == 0:
+            value = got
+        elif cond.get("join") == shopcfg.CARD_JOIN_OR:
+            value = value or got
+        else:
+            value = value and got
+    return bool(value), used, warnings
+
+
+def _condition_holds(cond, *, rule_mode, match, total, base, used):
+    """一条条件成不成立。顺带把**累计**那一档现在读到多少记进 `used`。"""
+    metric = cond.get("metric")
+    op = cond.get("op", shopcfg.CARD_OP_GE)
+    # ★★ 下限**跟着比较符走**，别写死 `max(1, …)`：写死的话
+    #   「死亡次数 等于 0」会被悄悄提成「等于 1」—— 那条卡就成了
+    #   「死一次才给」，而页面上、日志里都看不出来。
+    #   （校验器那边是同一张 `CARD_OP_MIN`，这儿只是兜手改进来的文件。）
+    threshold = max(shopcfg.card_op_min(op), int(cond.get("threshold", 1)))
+    weapon = cond.get("weapon")
+    if not shopcfg.card_metric_needs_weapon(metric):
+        weapon = None
+    if cond.get("scope") != shopcfg.CARD_SCOPE_TOTAL:
+        return card_op_holds(op, _match_value(match, metric, weapon), threshold)
+    # 累计：**这一轮攒了多少** = 现在的累计值 − 上次归零时的累计值。
+    # ★ 取不到基准就按 0 算（第一轮）；基准比现在大（运营改过「模式」那一格
+    #   之后会出现）按 0 算，不让进度变成负数。
+    now = stat_of(total, rule_mode, metric, weapon)
+    key = stat_key(metric, weapon)
+    used[key] = now
+    return card_op_holds(op, max(0, now - int(base.get(key, 0))), threshold)
 
 
 def _match_value(match, metric, weapon):
-    """本局战绩里那一个数。命中率现算（和累计那一侧同一个口径）。"""
+    """本局战绩里那一个数。
+
+    ⚠ **取不到就是 0** —— 这正是「小于等于 / 等于」不许配武器维度的原因
+    （`shopcfg.validate_cards` 拦着）：没拿过那把枪的人 `kills@族号` 根本
+    不存在，「只算左轮打出的击杀数为 0」会对绝大多数人成立。
+
+    ★ 命中率现算，和累计那一侧（`stat_of`）同一个口径。
+    """
     if metric == "accuracy":
         shots = int((match or {}).get(stat_key("shots", weapon), 0))
         if shots <= 0:
@@ -232,8 +364,12 @@ def _match_value(match, metric, weapon):
     return int((match or {}).get(stat_key(metric, weapon), 0))
 
 
-def _applies(rule, *, mode, stage, difficulty, won, match):
-    """这条规则管不管这一局。"""
+def _applies(rule, *, mode, stage, difficulty):
+    """这条规则管不管这一局。**只看「对局模式」那个弹窗里的三格**。
+
+    达成条件那一段不在这儿 —— 它要按每条条件各自的 `scope` 分成
+    「本局」和「累计」两条路（`eval_conditions`）。
+    """
     want = rule.get("mode")
     if want is not None and want != mode:
         return False
@@ -241,15 +377,4 @@ def _applies(rule, *, mode, stage, difficulty, won, match):
         return False
     if rule.get("difficulty") is not None and rule["difficulty"] != difficulty:
         return False
-    if rule.get("win_only") and not won:
-        return False
-    floor = int(rule.get("min_shots", 0) or 0)
-    if floor:
-        # ★ 样本下限看的是**本局**开枪数，累计档也一样 —— 「一局只开三枪
-        #   的人不该靠命中率拿卡」说的就是这一局，不是他这辈子。
-        weapon = rule.get("weapon")
-        if not shopcfg.card_metric_needs_weapon(rule.get("metric")):
-            weapon = None
-        if int((match or {}).get(stat_key("shots", weapon), 0)) < floor:
-            return False
     return True

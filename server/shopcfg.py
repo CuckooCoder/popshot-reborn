@@ -622,27 +622,113 @@ ACHIEVEMENT_CARDS = tuple(range(60001, 60009))
 #: 判据自动认得，这张表只是没跟上而已。
 ALL_CARDS = ACHIEVEMENT_CARDS + WEAPON_CARDS
 
-#: 统计范围。`match` = 这一局打到这个数就给；`total` = 账号累计，
-#: **每满一个阈值给一次**（里程碑，用户 2026-09-13 拍板）。
+#: 统计范围（**每一条条件各有一个**，用户 2026-09-13 第三轮）。
+#:
+#: * `match` 一局内 —— 这一局打到这个数。
+#: * `total` 玩家累计 —— **从上一次发这张卡之后重新攒**（用户原话：
+#:   「发过奖励后，两个计数器同时归零，重新开始新一轮计数」）。
+#:   所以它念成「每满 N」，而不是「累计达到 N」：达到 N 发一张、清零、再攒。
+#:
+#: ★★ 这条语义正是「累计」能和 and / or 拼在一起的原因：一条规则里
+#: 「累计击杀每满 100 **并且** 累计对局每满 10」问的是「这两个计数器
+#: 是不是都攒够了」—— 攒够了就发一张、两个一起归零。
+#: 归零之后每个累计条件的进度都是 0 ⇒ **一次结算最多发一张**，
+#: 运营把阈值调小也不会瞬间刷出一堆（没有循环，也不需要「上限」那一格）。
 CARD_SCOPE_MATCH = "match"
 CARD_SCOPE_TOTAL = "total"
 CARD_SCOPES = (CARD_SCOPE_MATCH, CARD_SCOPE_TOTAL)
 CARD_SCOPE_ZH = {CARD_SCOPE_MATCH: "一局内", CARD_SCOPE_TOTAL: "玩家累计"}
+#: 念成一句话时的前缀。★ 「的」写进表里而不是拼句子时加 ——
+#: 「一局内的击杀数」通顺，「玩家累计的对局数」不通顺。
+CARD_SCOPE_PREFIX_ZH = {CARD_SCOPE_MATCH: "一局内的", CARD_SCOPE_TOTAL: "玩家累计"}
 
 #: 规则里的模式。空 = 不限（对战和闯关都算，累计时两边相加）。
 CARD_MODES = ("pvp", "quest")
 CARD_MODE_ZH = {"pvp": "对战", "quest": "闯关"}
 
-#: ★★ **统计指标表**。`key -> (中文名, 适用模式, 要不要武器, 是不是比率, 说明)`
+#: 条件之间的连接词（用户 2026-09-13 第三轮）。
 #:
-#: * **适用模式** = 这个指标在哪几种模式下有意义（`()` = 都有意义）。
-#:   管理页照它锁「模式」下拉，校验器照它拦「写了也永远不会成立」的组合。
-#: * **要不要武器** = 规则里那个「武器」下拉有没有用（`weapon_*` 那两条）。
-#: * **是不是比率** = 值域是 0..100 的百分比，样本太少时没意义 ⇒ 要配
-#:   「最少开枪数」一起用。
+#: ★★ **从上往下依次结合，没有括号**（用户原话：「不需要考虑带括号的
+#: 过于复杂的形式」）。所以 `A 或者 B 并且 C` 念的是 `(A 或者 B) 并且 C`
+#: —— 和程序语言里「与优先于或」**不一样**，运营不该被要求知道优先级。
+#: ⇒ 混用两种连接词时，说明文里**自己把括号写出来**
+#: （`card_rule_text`），看的人不用猜。
+CARD_JOIN_AND = "and"
+CARD_JOIN_OR = "or"
+CARD_JOINS = (CARD_JOIN_AND, CARD_JOIN_OR)
+CARD_JOIN_ZH = {CARD_JOIN_AND: "并且", CARD_JOIN_OR: "或者"}
+
+#: ★★ **比较符**（用户 2026-09-13 第二轮重构）。
+#:
+#: 这一页原来只有「达到」一种比较（D100）：怕的是「阈值填 0 时 `≤` 恒成立、
+#: 每局白送一张卡而且页面上看着完全正常」。代价是「零死亡获胜」「零击杀获胜」
+#: 这类条件只能各开一个**专用旗标指标**顶上 —— 于是每张卡片都带一个
+#: 只有它自己用得到的指标，设置页就变成了「怎么设都得选那个专属指标」。
+#:
+#: ★ 现在换成**结构性护栏**，不再靠「少一个方向」躲：
+#:
+#:     ge  大于等于  阈值下限 **1**   ← 「≥ 0」恒成立，配不出来
+#:     le  小于等于  阈值下限 0
+#:     eq  等于      阈值下限 0       ← 「一次都没死」要的正是 0
+#:
+#: 另外两条只有 `le` / `eq` 才会踩的坑，也一并在校验器里堵死（见 `validate_cards`）：
+#: **累计条件只能用「大于等于」**（它念成「每满 N」，见 `CARD_SCOPE_MATCH`
+#: 那一段；「累计死亡数小于等于 3」在刚归零那一刻恒成立）、
+#: **`le` / `eq` 不许带武器维度**（取不到的键返回 0 ⇒「只算左轮打出的击杀数为 0」
+#: 对每一个没拿过左轮的人都成立，而那是绝大多数人）。
+CARD_OP_GE = "ge"
+CARD_OP_LE = "le"
+CARD_OP_EQ = "eq"
+CARD_OPS = (CARD_OP_GE, CARD_OP_LE, CARD_OP_EQ)
+#: ★ 就用数学上那三个说法（用户 2026-09-13）——「达到 / 不超过」这种词
+#: 既不专业又要人猜方向，而运营天天看的是「≥ 30」这种东西。
+CARD_OP_ZH = {CARD_OP_GE: "大于等于", CARD_OP_LE: "小于等于",
+              CARD_OP_EQ: "等于"}
+#: 这个方向填 0 会不会恒成立 —— 阈值下限就是照它定的（见上）。
+CARD_OP_MIN = {CARD_OP_GE: 1, CARD_OP_LE: 0, CARD_OP_EQ: 0}
+#: 累计条件念出来的样子：「对局数**每满**10」。★ 它不是第四个比较符 ——
+#: 存进 json 的仍然是 `ge`，这只是「攒够就归零」那条语义的说法。
+CARD_EVERY_ZH = "每满"
+
+
+def card_op_min(op):
+    """这个比较方向的阈值下限。认不出的按最严的那一档算。"""
+    return CARD_OP_MIN.get(op, CARD_OP_MIN[CARD_OP_GE])
+
+
+def card_op_zh(op, scope=CARD_SCOPE_MATCH):
+    """比较符念成人话。**累计那一档念「每满」**（全项目唯一出处）。"""
+    if scope == CARD_SCOPE_TOTAL:
+        return CARD_EVERY_ZH
+    return CARD_OP_ZH.get(op, CARD_OP_ZH[CARD_OP_GE])
+
+#: ★★ **统计指标表**。`key -> (中文名, 适用统计范围, 能不能按武器细分, 说明)`
+#:
+#: ★★ **这张表里只放「原子计数」**（用户 2026-09-13 第二轮拍板）。
+#: 第一稿有 22 条，其中 6 条是别的指标排列组合就能表达的 ——
+#: 「完美胜利」= 死亡次数为 0 + 只有胜利、「零击杀获胜」= 击杀数为 0 + 只有胜利、
+#: 「击杀怪物数」= 击杀数 + 模式选闯关、「某武器击杀 / 某武器伤害」= 击杀 / 伤害 +
+#: 武器那一格、「命中率」= 命中 ÷ 开枪。于是**每张卡片都带一个只有它自己用得到的
+#: 专属指标**，设置页变成了「怎么设都得选那个专属指标」，那就没有设置页的意义了。
+#: ⇒ 这一版把那 6 条全删掉，条件改由「指标 + 比较符 + 数值」拼出来。
+#:
+#: * **适用统计范围** = 这个指标在哪几档下有意义（`()` = 两档都有）。
+#:   `games` / `win` 是 `("total",)`：「打完一局 = 1」在一局内只配得出
+#:   「每局白送一张」—— 真想要「每局都给」就明写「玩家累计对局数每满 1」，
+#:   看得出来。`won` 反过来只有 `("match",)`，见下。
+#: * **能不能按武器细分** = 规则里那个「武器」下拉对这条指标有没有用。
+#:   ★★ **只有 `kills` / `shots` / `damage` 三条**，判据是
+#:   `RoomQuest.weapon_stat()` 就只记这三个计数器。第一稿把 `hits` /
+#:   `splash_hits` / `accuracy` 也标成 True，可 `hits@族号` **从来没被写过**
+#:   ⇒ 那几条规则配得出来、取到的永远是 0、永远不发卡、也不报错
+#:   （D17a 那一类）。`test_cards` 现在拿那三个计数器钉着这一列。
 #:
 #: ★ 数据全部来自 `RoomQuest`（`gameserver.py`）。加一个指标要同时动三处：
 #:   这张表、`RoomQuest` 的计数器、`cards.match_stats()` 的取值。
+#:
+#: ⚠ **没有「适用模式」这一列**：`kills` 合并掉 `mob_kills` 之后，
+#:   再没有哪一条指标只在一种模式下有意义了 —— 对战 = 杀敌人、闯关 = 杀怪，
+#:   「模式」那一格自己就把两者分开了。留一列没人用的限制只会变成死代码。
 #:
 #: ⚠ **别把「暴击」和 `EquipBonus` 的 `Critical` 搞混**（2026-09-13 差点搞错）：
 #:   `Critical`（idx 3）是**死属性** —— 名字表里有、三份 `EquipBonus` 里零条、
@@ -654,50 +740,99 @@ CARD_MODE_ZH = {"pvp": "对战", "quest": "闯关"}
 #:   （`PVP_MODE_ZH`），`PvpMode==2 격투` 根本进不去 ⇒ 不提供按对战子模式
 #:   细分的指标（同理 `560002 [格斗达人]` 那个称号穿上去也是 +0）。
 CARD_METRICS = {
-    "kills":        ("击杀敌人数", ("pvp",), False, False,
-                     "打死别队玩家的次数。自杀和误伤不算（那是另外两个指标）"),
-    "mob_kills":    ("击杀怪物数", ("quest",), False, False,
-                     "闯关里打死的怪。对战没有怪"),
-    "team_kills":   ("击杀队友数", (), False, False,
-                     "误伤队友致死的次数。组队战才可能不为 0"),
-    "suicides":     ("自杀次数", (), False, False, "把自己炸死的次数"),
-    "deaths":       ("死亡次数", (), False, False, "本局死了几次"),
-    "shots":        ("开枪次数", (), True, False, "发射的子弹数（散射按一次算）"),
-    "hits":         ("命中次数", (), True, False,
-                     "直接命中**玩家**的次数。打中怪和箱子不算"),
-    "splash_hits":  ("溅射命中数", (), True, False,
-                     "溅射 / 近身打中**玩家**的次数"),
-    "accuracy":     ("命中率（%）", (), True, True,
-                     "命中 ÷ 开枪。★ 开一枪中一枪也是 100%，"
-                     "所以要配「最少开枪数」一起用"),
-    "damage":       ("造成的伤害", (), True, False,
+    "kills":        ("击杀数", (), True,
+                     "对战 = 打死别队玩家，闯关 = 打死的怪。自杀和误伤不算"
+                     "（那是另外两个指标）。★ 两者数量级差很多"
+                     "（闯关一局几十只怪），累计档建议把「模式」指定死"),
+    "team_kills":   ("误伤队友致死数", (), False,
+                     "误伤队友致死的次数。组队才可能不为 0"),
+    "suicides":     ("自杀次数", (), False, "把自己炸死的次数"),
+    "deaths":       ("死亡次数", (), False, "本局死了几次"),
+    "shots":        ("开枪次数", (), True, "发射的子弹数（散射按一次算）"),
+    "hits":         ("命中次数", (), False,
+                     "直接命中**玩家**的次数。打中怪和箱子不算。"
+                     "★ 按不了武器 —— 命中那一发包里没有武器 id"),
+    "splash_hits":  ("溅射命中数", (), False,
+                     "溅射 / 近身打中**玩家**的次数。★ 同样按不了武器"),
+    # ★★ 全表**唯一**的派生值（用户 2026-09-13 第四轮要回来的）。两条限制
+    #   都不是随便加的，去掉哪一条它就变成一个白送的指标：
+    #   ① **只在「一局内」** —— 比率不能进累计（两局 50% 和 100% 加起来会
+    #      变成 150%），而且「累计命中率每满 60」这句话本身就不通；
+    #   ② **必须和一条「开枪次数 大于等于 N」用「并且」拼在一起** ——
+    #      开一枪中一枪也是 100%。第一稿这是每行都摆着的一格 `min_shots`；
+    #      用户 2026-09-13 第三轮给的例子「命中率大于等于50%并且开枪数大于30」
+    #      正好把它写成了一条普通条件 ⇒ 那一格删掉，护栏挪进校验器。
+    #   ③ **按不了武器** —— `hits@族号` 根本没人写过（§106），配了永远是 0。
+    "accuracy":     ("命中率", (CARD_SCOPE_MATCH,), False,
+                     "命中 ÷ 开枪，取整。★ 开一枪中一枪也是 100%，"
+                     "**必须再加一条「开枪次数 大于等于 N」**。"
+                     "⚠ 闯关那一路打的全是怪、不算命中，别拿它当闯关的门槛"),
+    "damage":       ("造成的伤害", (), True,
                      "打出去的伤害总和（打怪和箱子也算）"),
-    "crits":        ("暴击次数", (), False, False,
+    "crits":        ("暴击次数", (), False,
                      "攻击加成触发的那几发。穿了加攻击力的装备之后，"
                      "每一发有 15% 概率让加成生效，生效时伤害按加成放大"
                      "——身上没有加攻击的装备就永远是 0"),
-    "guards":       ("格挡次数", (), False, False,
+    "guards":       ("格挡次数", (), False,
                      "按下格挡的次数（按住不放算一次）"),
-    "dashes":       ("突击技次数", (), False, False, "双击方向键的近身攻击次数"),
-    "hearts":       ("捡到「心」的次数", (), False, False, "捡起地上回血道具的次数"),
-    "coins":        ("捡到的金币", (), False, False, "本局在地上捡到的金币总额"),
-    "score":        ("本局得分", (), False, False,
+    # ★★ **只数命中，不数发动**（用户 2026-09-13）：「发动次数」空房间连点
+    #   就达标，当成就没有意义。判据见 `gameserver.RoomQuest.note_dash()`。
+    "dash_hits":    ("突击技命中数", (), False,
+                     "双击方向键那一下**打中玩家**的次数。"
+                     "★ 一次突击技对同一个人最多算一次"),
+    "hearts":       ("捡到「心」的次数", (), False, "捡起地上回血道具的次数"),
+    "coins":        ("捡到的金币", (), False, "本局在地上捡到的金币总额"),
+    "score":        ("本局得分", (), False,
                      "对战是净杀敌数（自杀 / 误伤会倒扣），闯关是关卡分数"),
-    "win":          ("胜利 / 通关", (), False, False,
-                     "赢了 = 1，没赢 = 0。填 1 就是「赢了就给」"),
-    "perfect_win":  ("完美胜利（零死亡获胜）", (), False, False,
-                     "赢了而且一次都没死 = 1"),
-    "carried":      ("零击杀获胜", ("pvp",), False, False,
-                     "赢了但一个人都没打死 = 1"),
-    "games":        ("对局数", (), False, False,
-                     "打完一局 = 1。★ 只有「玩家累计」才有意义"),
-    "weapon_kills": ("某武器击杀数", (), True, False,
-                     "用选中的那一族武器打死的数量（口径同客户端的"
-                     "「最后一发子弹是哪一族」）"),
-    "weapon_damage": ("某武器造成伤害", (), True, False,
-                      "用选中的那一族武器打出的伤害。★ 弹体还在飞时换枪"
-                      "会算到新枪头上"),
+    # ★★ **「这一局赢没赢」**（用户 2026-09-13 第三轮：原来那个
+    #   「必须胜利 / 通关」开关改成一行条件）。它是全表唯一的**枚举**指标
+    #   —— 值只有 0 / 1，所以画成下拉、比较符固定「等于」
+    #   （`CARD_ENUM_METRICS`）。
+    #   ★ 它和 `win` 数的是**同一格**（`CARD_METRIC_STAT`），只是
+    #     一个问「这一局」一个问「一共几场」，所以没有多出一个计数器。
+    "won":          ("本局结果", (CARD_SCOPE_MATCH,), False,
+                     "这一局赢没赢 / 通没通关。"
+                     "★ 「死亡次数等于 0」这类条件几乎都要再配上它 ——"
+                     "不配的话，输掉的那些局也算数"),
+    "games":        ("对局数", (CARD_SCOPE_TOTAL,), False,
+                     "打完一局算一场。「每满 1」= 每局都给，「每满 50」="
+                     "打满 50 场给一张"),
+    "win":          ("胜利 / 通关次数", (CARD_SCOPE_TOTAL,), False,
+                     "累计赢了几场。★ 「这一局赢没赢」是上面的「本局结果」"),
 }
+
+#: **枚举指标** —— 取值是一张定死的表，所以条件行画成下拉、比较符固定
+#: 「等于」、数值框整个不画。`{指标: ((值, 中文名), …)}`
+#:
+#: ★ 写成一张独立的表而不是 `CARD_METRICS` 里多一列：全表只有一条是枚举，
+#:   多一列就是 16 个 `None`（同 `CARD_RATIO_METRICS` 的理由）。
+CARD_ENUM_METRICS = {
+    "won": ((1, "胜利 / 通关"), (0, "失败 / 未通关")),
+}
+
+#: 指标 → **统计键**。只有「本局结果」和「胜利 / 通关次数」不同名却同格：
+#: 每局写进去的就是 0 / 1，一局内读它 = 这局赢没赢，累计读它 = 赢了几场。
+#: ⇒ 存档里**不会**因为多一个指标就多一个计数器。
+CARD_METRIC_STAT = {"won": "win"}
+
+#: 指标的**单位**，念句子和输入框后缀都用它。★ 只有命中率有
+#: （所以说明文写得出用户要的「命中率大于等于50%」）。
+CARD_METRIC_UNIT = {"accuracy": "%"}
+
+
+def card_metric_stat(metric):
+    """这个指标读哪一个统计键。**全项目唯一出处**（`cards.stat_key`）。"""
+    return CARD_METRIC_STAT.get(metric, metric)
+
+
+def card_metric_values(metric):
+    """枚举指标的取值表 `((值, 中文名), …)`；不是枚举就是 `()`。"""
+    return CARD_ENUM_METRICS.get(metric, ())
+
+
+def card_metric_unit(metric):
+    """这个指标的单位（没有就是空串）。"""
+    return CARD_METRIC_UNIT.get(metric, "")
 
 #: 指标 key -> 中文名（给 `describe_card_rule` 和管理页用）。
 CARD_METRIC_ZH = dict((key, spec[0]) for key, spec in CARD_METRICS.items())
@@ -708,14 +843,13 @@ CARD_METRIC_ZH = dict((key, spec[0]) for key, spec in CARD_METRICS.items())
 #: ★ 表里有而这儿漏了的排在最后（加指标忘了登记也不会从画面上消失）。
 CARD_METRIC_ORDER = (
     # 战果
-    "kills", "mob_kills", "team_kills", "suicides", "deaths",
+    "kills", "team_kills", "suicides", "deaths",
     # 输出
     "shots", "hits", "splash_hits", "accuracy", "damage", "crits",
-    "weapon_kills", "weapon_damage",
     # 局内动作
-    "guards", "dashes", "hearts", "coins",
+    "guards", "dash_hits", "hearts", "coins",
     # 一局的结果 / 只对累计有意义的
-    "score", "win", "perfect_win", "carried", "games",
+    "score", "won", "games", "win",
 )
 
 
@@ -725,39 +859,80 @@ def card_metric_keys():
     rest = [key for key in sorted(CARD_METRICS) if key not in CARD_METRIC_ORDER]
     return known + rest
 
-#: **0 / 1 的旗标指标**。念人话时它们不说「达到 1」（那是废话），
-#: 只说事件本身：「完美胜利（零死亡获胜）」。
-#: ★ 它们也是本页不设「≤」比较符的原因：「零死亡」「零击杀」这类条件
-#: 全靠它们表达 —— 只有一个「达到」就没有「阈值填 0 时恒成立」那个坑。
-CARD_FLAG_METRICS = frozenset(("win", "perfect_win", "carried", "games"))
+#: **退役的指标** → 该改用什么。只用来把校验器的报错说成人话
+#: （用户 2026-09-13 第二轮把这 6 条砍了，见 `CARD_METRICS` 的表头）。
+#:
+#: ★★ **故意不做自动翻译**。`accuracy` 那一条说明了为什么：旧阈值 `60` 是
+#: 「60%」，映射到 `hits` 就成了「60 次」—— 单位悄悄换了，一张稀有卡会变成
+#: 白送或者永远拿不到，而页面上、日志里都看不出来。宁可让运营看见一句
+#: 说人话的报错，自己重填一遍。
+RETIRED_CARD_METRICS = {
+    "perfect_win": "改用「死亡次数 等于 0」并且「本局结果 = 胜利 / 通关」两条条件",
+    "carried": "改用「击杀数 等于 0」并且「本局结果 = 胜利 / 通关」两条条件",
+    "dashes": "改用「突击技命中数」—— 发动次数空房间连点就达标，当成就没意义",
+    "mob_kills": "并进「击杀数」了 —— 把「模式」选成闯关，它数的就是怪",
+    "weapon_kills": "改用「击杀数」+ 右边那个「武器」下拉",
+    "weapon_damage": "改用「造成的伤害」+ 右边那个「武器」下拉",
+}
 
-#: 武器类指标的中文名里那三个字，念人话时换成具体武器名
-#: （「某武器击杀数」+ 左轮手枪 → 「左轮手枪击杀数」）。
-_CARD_ANY_WEAPON = "某武器"
 
-
-def card_metric_modes(metric):
-    """这个指标在哪几种模式下有意义；`()` = 都有意义。"""
+def card_metric_scopes(metric):
+    """这个指标在哪几档统计范围下有意义；`()` = 两档都有。"""
     spec = CARD_METRICS.get(metric)
     return spec[1] if spec else ()
 
 
+#: **比率指标** —— 值域是 0..100 的百分比，样本太少时没意义，
+#: 所以必须再配一条「开枪次数 大于等于 N」（`validate_cards` 拦着）。
+#:
+#: ★ 写成一个集合而不是 `CARD_METRICS` 里多一列：全表只有它一条是
+#:   比率，多一列就是一堆 `False` —— 和当初删掉「适用模式」那一列
+#:   同一个理由。
+CARD_RATIO_METRICS = frozenset(("accuracy",))
+
+#: 比率指标的**样本下限**得由哪个指标来卡。★ 写成常量而不是在校验器里
+#: 写死字符串：`accuracy` 是 `hits ÷ shots`，分母换了这儿要跟着换。
+CARD_SAMPLE_METRIC = "shots"
+
+
+def card_metric_is_ratio(metric):
+    """这个指标是不是比率（要配一条「开枪次数 大于等于 N」）。"""
+    return metric in CARD_RATIO_METRICS
+
+
 def card_metric_needs_weapon(metric):
+    """这个指标能不能按武器细分（「武器」那一格对它有没有用）。"""
     spec = CARD_METRICS.get(metric)
     return bool(spec and spec[2])
 
 
-def card_metric_is_ratio(metric):
-    spec = CARD_METRICS.get(metric)
-    return bool(spec and spec[3])
+def card_metric_label(metric, weapon=None):
+    """指标念成人话。带武器维度时**加前缀**：「左轮手枪（泰尔）击杀数」。
+
+    ★ 全项目唯一出处 —— `describe_card_rule`（管理页浮窗 / 游戏提示框 /
+    合并冲突提示）和结算日志的 `_stats_line` 念的是同一句。第一稿是把指标名里
+    写死的「某武器」三个字替换掉，指标表一改名那套替换就**默默失效**
+    （日志里 `kills` 和 `kills@110001` 会打成两行一模一样的「击杀数」）。
+    """
+    label = CARD_METRIC_ZH.get(metric, str(metric))
+    if weapon is None or not card_metric_needs_weapon(metric):
+        return label
+    return "%s%s" % (weapon_roh_label(weapon), label)
 
 
 def card_metrics_for_admin():
-    """指标表发给管理页的样子（`/admin/api/catalog` 里那一格）。"""
+    """指标表发给管理页的样子（`/admin/api/catalog` 里那一格）。
+
+    ★ `values` / `unit` 也发过去 —— 条件行画成「下拉」还是「数字框 + 单位」
+    由**服务端这张表**说了算，前端一个字都不抄（D16）。
+    """
     return dict(
-        (key, {"label": spec[0], "modes": list(spec[1]),
-               "weapon": bool(spec[2]), "ratio": bool(spec[3]),
-               "help": spec[4]})
+        (key, {"label": spec[0], "scopes": list(spec[1]),
+               "weapon": bool(spec[2]), "ratio": card_metric_is_ratio(key),
+               "unit": card_metric_unit(key),
+               "values": [{"value": value, "label": label}
+                          for value, label in card_metric_values(key)],
+               "help": spec[3]})
         for key, spec in CARD_METRICS.items())
 
 
@@ -803,12 +978,113 @@ def weapon_card_options():
             for roh in WEAPON_CARDS]
 
 
-def describe_card_rule(rule, card_name=None):
+#: ★★ 说明文里那些**固定的字**，一处定义。管理页要**实时**把同一句话画出来
+#: （条件一改，popup 顶上立刻变），所以那边不得不自己拼一遍 ——
+#: 但**词是这儿发过去的**（`/admin/api/catalog` 的 `card_phrases`），
+#: 前端一个中文字都不写死。改这儿 = 两边同时改口。
+CARD_PHRASES = {
+    "any_mode": "任意模式",
+    "mode_suffix": "模式",
+    "head": "在%s中，",          # 在对战模式中，
+    "tail": "时，获得一张%s。",   # 时，获得一张卡片。
+    "card": "卡片",
+    "off": "暂时无法获得",
+    "bad": "条件无效",
+    "is": "为",                  # 本局结果**为**胜利 / 通关
+    "open": "（", "close": "）",  # 混用连接词时自己把括号写出来
+}
+
+
+def card_mode_text(rule):
+    """规则那半句「算哪一局」：`在对战模式中，` / `在闯关模式「3 · …」（困难）中，`。"""
+    mode = (rule or {}).get("mode")
+    if mode in CARD_MODE_ZH:
+        text = CARD_MODE_ZH[mode] + CARD_PHRASES["mode_suffix"]
+    else:
+        text = CARD_PHRASES["any_mode"]
+    stage = (rule or {}).get("stage")
+    if stage is not None:
+        name = QUEST_ZH.get(stage)
+        text += "「%s」" % ("%s · %s" % (stage, name) if name else stage)
+    difficulty = (rule or {}).get("difficulty")
+    if difficulty is not None:
+        text += "%s%s%s" % (CARD_PHRASES["open"],
+                            DIFFICULTY_ZH.get(difficulty, difficulty),
+                            CARD_PHRASES["close"])
+    return CARD_PHRASES["head"] % text
+
+
+def card_condition_text(cond, with_scope=True):
+    """一条条件念成人话：`一局内的命中率大于等于50%`。
+
+    `with_scope=False` 时不写「一局内的 / 玩家累计」—— 整条规则的条件
+    都在同一档时，前缀由调用方提到最前面只写一次（用户给的例子就是
+    「一局内的命中率大于等于50%并且开枪数大于30」）。
+    """
+    cond = cond or {}
+    metric = cond.get("metric")
+    scope = cond.get("scope", CARD_SCOPE_MATCH)
+    # ★ 带上角色（「左轮手枪（泰尔）击杀数」）—— 武器族本来就绑角色，
+    #   说出来省得有人以为「用左轮」这条别的角色也够得着。
+    label = card_metric_label(metric, cond.get("weapon"))
+    head = CARD_SCOPE_PREFIX_ZH.get(scope, "") if with_scope else ""
+    values = card_metric_values(metric)
+    if values:
+        # 枚举指标没有「大于等于 1」这种说法：**本局结果为胜利 / 通关**。
+        want = cond.get("threshold")
+        shown = str(want)
+        for value, name in values:
+            if value == want:
+                shown = name
+        return "%s%s%s%s" % (head, label, CARD_PHRASES["is"], shown)
+    return "%s%s%s%s%s" % (head, label,
+                           card_op_zh(cond.get("op", CARD_OP_GE), scope),
+                           cond.get("threshold"), card_metric_unit(metric))
+
+
+def card_conditions_text(conditions):
+    """整串条件念成人话，**连接词混用时自己把括号写出来**。
+
+    没有括号语法（用户拍板），所以求值就是**从上往下依次结合** ——
+    `A 或者 B 并且 C` = `(A 或者 B) 并且 C`。只有一种连接词时不画括号
+    （那时候括号只是噪音）。
+    """
+    conditions = list(conditions or ())
+    if not conditions:
+        return ""
+    # 所有条件同一档统计范围 ⇒ 前缀提到最前面只写一次。
+    scopes = set(cond.get("scope", CARD_SCOPE_MATCH) for cond in conditions)
+    shared = CARD_SCOPE_PREFIX_ZH.get(conditions[0].get(
+        "scope", CARD_SCOPE_MATCH), "") if len(scopes) == 1 else ""
+    joins = set(cond.get("join", CARD_JOIN_AND) for cond in conditions[1:])
+    mixed = len(joins) > 1
+    text = card_condition_text(conditions[0], with_scope=not shared)
+    for at, cond in enumerate(conditions[1:], start=1):
+        # ★ 第二条不用套括号（那时候 `text` 还只是一条条件，套了是噪音）；
+        #   从第三条起把**已经拼好的那一截**括起来，这正是「从上往下依次
+        #   结合」那句话画出来的样子。
+        if mixed and at >= 2:
+            text = CARD_PHRASES["open"] + text + CARD_PHRASES["close"]
+        text += CARD_JOIN_ZH.get(cond.get("join", CARD_JOIN_AND),
+                                 CARD_JOIN_ZH[CARD_JOIN_AND])
+        text += card_condition_text(cond, with_scope=not shared)
+    return shared + text
+
+
+def describe_card_rule(rule, card_name=None, with_tail=True):
     """一条获得规则念成一句人话。**全项目唯一的出处**（V0.3商店）。
 
-    管理页的物品浮窗、游戏里的物品提示框（`item_desc_zh`）、
-    三方合并的冲突提示（`cfgmerge.label_of`）三处都念它 —— 三处各写一遍
-    的话，改了条件之后总有一处还在说旧话。
+        在对战模式中，一局内的命中率大于等于50%并且开枪次数大于等于30时，
+        获得一张卡片。
+
+    管理页那一行中间的说明、物品浮窗、游戏里的物品提示框（`item_desc_zh`）、
+    三方合并的冲突提示（`cfgmerge.label_of`）都念它 —— 各写一遍的话，
+    改了条件之后总有一处还在说旧话。
+
+    ★ `with_tail=False` 砍掉末尾那句「时，获得一张卡片。」：**游戏里的
+    提示框**就是停在那张卡上弹出来的，前面又已经写着「获得条件：」——
+    再说一遍「获得一张卡片」纯属占那 234 px 的宽度（`ITEM_DESC_MAX_LINES`
+    只有 5 行，`test_cards` 按字数卡着一道软上限）。
 
     ⚠ **结果里绝不能出现 `|`** —— 客户端拿它当说明的分段符
     （`wcstok`，`0x5fa904`），混进去会把一段说明拦腰切开。
@@ -816,43 +1092,16 @@ def describe_card_rule(rule, card_name=None):
     if not isinstance(rule, dict):
         return ""
     if not rule.get("listed"):
-        return "暂时无法获得"
-    parts = []
-    mode = rule.get("mode")
-    parts.append(CARD_MODE_ZH.get(mode, "对战 / 闯关都算"))
-    stage = rule.get("stage")
-    if stage is not None:
-        parts.append("关卡%s %s" % (stage, QUEST_ZH.get(stage, "")).strip())
-    difficulty = rule.get("difficulty")
-    if difficulty is not None:
-        parts.append(DIFFICULTY_ZH.get(difficulty, "难度 %s" % difficulty))
-    metric = rule.get("metric")
-    label = CARD_METRIC_ZH.get(metric, str(metric))
-    weapon = rule.get("weapon")
-    if weapon is not None and card_metric_needs_weapon(metric):
-        # ★ 带上角色（「左轮手枪（泰尔）」）—— 武器族本来就绑角色，
-        #   说出来省得有人以为「用左轮」这条别的角色也够得着。
-        label = label.replace(_CARD_ANY_WEAPON, weapon_roh_label(weapon))
-    scope = CARD_SCOPE_ZH.get(rule.get("scope"), CARD_SCOPE_ZH[CARD_SCOPE_MATCH])
-    threshold = int(rule.get("threshold", 1))
-    if metric in CARD_FLAG_METRICS and threshold == 1:
-        # 「完美胜利 达到 1」是废话 —— 旗标指标只说事件本身。
-        parts.append("%s%s" % (scope, label))
-    else:
-        parts.append("%s%s 达到 %s" % (scope, label, threshold))
-    if rule.get("min_shots"):
-        parts.append("且开枪不少于 %d 次" % int(rule["min_shots"]))
-    if rule.get("win_only"):
-        parts.append("且获胜 / 通关")
-    head = " · ".join(parts)
-    count = int(rule.get("count", 1))
-    # ★ `card_name` 不给 = 调用方**已经知道说的是哪张卡**（物品提示框就是
-    #   停在那张卡上弹出来的）—— 再写一遍名字只会把那 234 px 挤满。
-    tail = ("获得 %s ×%d" % (card_name, count) if card_name
-            else "获得 %d 张" % count)
-    if rule.get("scope") == CARD_SCOPE_TOTAL:
-        tail += "（每满一次给一次）"
-    text = "%s → %s" % (head, tail)
+        return CARD_PHRASES["off"]
+    body = card_conditions_text(rule.get("conditions"))
+    if not body:
+        # 一条条件都没有 = 这条规则说不出「什么时候给」，画面上同样显示这句。
+        return CARD_PHRASES["bad"]
+    text = card_mode_text(rule) + body
+    if with_tail:
+        # ★ `card_name` 不给 = 调用方**已经知道说的是哪张卡**。
+        text += CARD_PHRASES["tail"] % (
+            ("「%s」" % card_name) if card_name else CARD_PHRASES["card"])
     # 段分隔符绝不能混进正文（见 docstring）。名字是运营改的，真有可能带。
     return text.replace(DESC_SEPARATOR, "/")
 
@@ -1045,8 +1294,9 @@ def _card_desc_lines(item, card_rules, recipes_table):
             break
     if rule is None:
         return [], []
-    # 名字不传 —— 提示框就是停在那张卡上弹出来的，再写一遍名字是废话。
-    how = describe_card_rule(rule)
+    # 名字和末尾那句「获得一张卡片」都不要 —— 提示框就是停在那张卡上弹出来
+    # 的，前面还写着「获得条件：」，再说一遍纯占宽度（见 `describe_card_rule`）。
+    how = describe_card_rule(rule, with_tail=False)
     stats = ["获得条件：" + how] if how else []
     pairs = card_recipes(item.id, recipes_table)
     if not pairs:
@@ -1607,12 +1857,14 @@ def validate_sell_price(raw):
         raise ConfigError(str(error)) from None
 
 
-#: 一条规则最多能给几张卡（和 `drops.count` / 配方材料数同一个上限）。
-MAX_CARD_COUNT = 800
 #: 阈值上限。累计指标（总伤害、总开枪数）够得着六位数，留一个数量级余量。
 MAX_CARD_THRESHOLD = 1000000
-#: 「一辈子最多从这条规则拿几张」的上限。`0` = 不限。
-MAX_CARD_LIMIT = 100000
+#: 一条规则最多几条条件。★ 不是「够用就行」的随手数：没有括号语法，
+#: 条件一多那句说明文就长得没人读得完了（8 条已经能拼出两行）。
+MAX_CARD_CONDITIONS = 8
+#: ★ 一次达成**固定发一张**（用户 2026-09-13 第三轮：「获得数量固定为 1，
+#: 累计上限的设置项删掉不要了」）。写成常量而不是散在几处的字面量 `1`。
+CARD_GRANT_COUNT = 1
 
 
 def is_card(item_id):
@@ -1628,6 +1880,138 @@ def is_card(item_id):
     return shop.warehouse_category_of(item_id) == shop.WAREHOUSE_CARD
 
 
+def _validate_card_conditions(entry, where):
+    """一条规则里那串条件。返回洗干净的列表；有一条不对就抛 `ConfigError`。
+
+    护栏全在这儿（**结构上就配不出恒成立的规则**，D110 那一套的延续）：
+
+        大于等于   阈值下限 1      ←「≥ 0」恒成立
+        小于等于 / 等于   下限 0   ←「一次都没死」要的正是 0
+        累计条件只能「大于等于」    ← 它念成「每满 N」，归零那一刻别的方向恒成立
+        小于等于 / 等于 不许带武器  ← 取不到的键是 0，对没碰过那把枪的人恒成立
+        命中率必须配一条「开枪次数 大于等于 N」，而且整条规则不许出现「或者」
+    """
+    raw = entry.get("conditions")
+    if raw is None:
+        raise ConfigError("%s 缺少 conditions（至少要有一条达成条件）" % where)
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError("%s.conditions 必须是一个非空列表" % where)
+    if len(raw) > MAX_CARD_CONDITIONS:
+        raise ConfigError("%s.conditions 最多 %d 条，给了 %d 条"
+                          % (where, MAX_CARD_CONDITIONS, len(raw)))
+    out = []
+    for at, item in enumerate(raw):
+        spot = "%s.conditions[%d]" % (where, at)
+        if not isinstance(item, dict):
+            raise ConfigError("%s 不是对象" % spot)
+        metric = item.get("metric")
+        if metric not in CARD_METRICS:
+            extra = ""
+            if metric in RETIRED_CARD_METRICS:
+                extra = "（%s）" % RETIRED_CARD_METRICS[metric]
+            raise ConfigError("%s.metric 不认识：%r%s（认得的有 %s）"
+                              % (spot, metric, extra,
+                                 "、".join(sorted(CARD_METRICS))))
+        scope = item.get("scope", CARD_SCOPE_MATCH)
+        if scope not in CARD_SCOPES:
+            raise ConfigError("%s.scope 只能是 %s：%r"
+                              % (spot, " 或 ".join(CARD_SCOPES), scope))
+        wants = card_metric_scopes(metric)
+        if wants and scope not in wants:
+            raise ConfigError(
+                "%s：指标「%s」只有%s那一档才有意义"
+                % (spot, CARD_METRIC_ZH[metric],
+                   " / ".join(CARD_SCOPE_ZH.get(s, s) for s in wants)))
+        op = item.get("op", CARD_OP_GE)
+        if op not in CARD_OPS:
+            raise ConfigError("%s.op 只能是 %s：%r"
+                              % (spot, " / ".join(CARD_OPS), op))
+        values = card_metric_values(metric)
+        if values and op != CARD_OP_EQ:
+            # 枚举指标（「本局结果」）只有「是不是」，没有大小。
+            raise ConfigError("%s：指标「%s」只有 %s 两种取值，比较符只能是「%s」"
+                              % (spot, CARD_METRIC_ZH[metric],
+                                 " / ".join(name for _v, name in values),
+                                 CARD_OP_ZH[CARD_OP_EQ]))
+        if scope == CARD_SCOPE_TOTAL and op != CARD_OP_GE:
+            # 累计条件念的是「每满 N」：刚归零那一刻累计值是 0，
+            # 「小于等于 3」「等于 0」对**每一个人**都成立（D110 那一类）。
+            raise ConfigError(
+                "%s：「%s」的条件只能用「%s」（念成「%s N」）—— 刚归零那一刻"
+                "累计值是 0，别的方向对谁都成立"
+                % (spot, CARD_SCOPE_ZH[CARD_SCOPE_TOTAL],
+                   CARD_OP_ZH[CARD_OP_GE], CARD_EVERY_ZH))
+        cond = {"scope": scope, "metric": metric, "op": op,
+                # ★★ 阈值下限**跟着比较符走**（`CARD_OP_MIN`）：
+                #   「大于等于 0」恒成立 ⇒ 那条规则每局白送一张、而且没人
+                #   看得出为什么，所以 `ge` 卡在 1；而「小于等于 0」「等于 0」
+                #   要的正是 0（「一次都没死」），那两个方向放开到 0。
+                "threshold": _as_int(item.get("threshold", 1),
+                                     spot + ".threshold",
+                                     low=card_op_min(op),
+                                     high=MAX_CARD_THRESHOLD)}
+        if values and cond["threshold"] not in [v for v, _n in values]:
+            raise ConfigError("%s.threshold 只能是 %s：%r"
+                              % (spot, " / ".join("%s（%s）" % (v, n)
+                                                  for v, n in values),
+                                 cond["threshold"]))
+        if at == 0:
+            # 第一条没有「和谁连」这回事 —— 写了也当没写，免得画面上多出
+            # 一个改了什么都不会发生的下拉。
+            if item.get("join") is not None:
+                raise ConfigError("%s：第一条条件前面没有连接词，join 不该写"
+                                  % spot)
+        else:
+            join = item.get("join", CARD_JOIN_AND)
+            if join not in CARD_JOINS:
+                raise ConfigError("%s.join 只能是 %s：%r"
+                                  % (spot, " / ".join(CARD_JOINS), join))
+            cond["join"] = join
+        weapon = item.get("weapon")
+        if weapon is not None:
+            weapon = _as_int(weapon, spot + ".weapon", low=1)
+            if weapon not in WEAPON_CARDS:
+                raise ConfigError("%s.weapon 不是武器族号：%r（认得的是 %s）"
+                                  % (spot, weapon,
+                                     "、".join(str(r) for r in WEAPON_CARDS)))
+            if not card_metric_needs_weapon(metric):
+                raise ConfigError("%s：指标「%s」和武器无关，不该写 weapon"
+                                  % (spot, CARD_METRIC_ZH[metric]))
+            # ★★ 「小于等于 / 等于」+ 武器 = **白送给所有没碰过那把枪的人**：
+            #   取不到的统计键返回 0，所以「只算左轮打出的击杀数为 0」对
+            #   每一个没拿左轮的玩家都成立 —— 而那是绝大多数人。
+            #   0 在武器维度下是**常态**不是例外，所以这条必须拦死。
+            if op != CARD_OP_GE:
+                raise ConfigError(
+                    "%s：「%s」配上武器会对每一个没用过这把枪的人都成立"
+                    "（他那一格永远是 0）—— 按武器统计时比较符只能是「%s」"
+                    % (spot, CARD_OP_ZH[op], CARD_OP_ZH[CARD_OP_GE]))
+            cond["weapon"] = weapon
+        out.append(cond)
+    # ★★ 比率指标的样本下限（原来那一格 `min_shots`）：现在它是一条**普通
+    #   条件**，所以护栏也换成「这串条件里有没有它」。
+    #   两半缺一不可：没有开枪数下限 ⇒ 开一枪中一枪也是 100%；
+    #   中间夹了「或者」⇒ 那个下限可以被绕过去（求值是从上往下依次结合的）。
+    if any(card_metric_is_ratio(cond["metric"]) for cond in out):
+        floor = any(cond["metric"] == CARD_SAMPLE_METRIC
+                    and cond["scope"] == CARD_SCOPE_MATCH
+                    and cond["op"] == CARD_OP_GE and cond["threshold"] >= 1
+                    for cond in out)
+        if not floor:
+            raise ConfigError(
+                "%s：用了「%s」就必须再加一条「%s %s N」—— 开一枪中一枪"
+                "也是 100%%，不卡样本这条规则每局白送"
+                % (where, CARD_METRIC_ZH["accuracy"],
+                   CARD_METRIC_ZH[CARD_SAMPLE_METRIC], CARD_OP_ZH[CARD_OP_GE]))
+        if any(cond.get("join") == CARD_JOIN_OR for cond in out):
+            raise ConfigError(
+                "%s：用了「%s」的规则里不能出现「%s」—— 那样开枪数下限"
+                "可以被绕开，等于没卡"
+                % (where, CARD_METRIC_ZH["accuracy"],
+                   CARD_JOIN_ZH[CARD_JOIN_OR]))
+    return out
+
+
 def validate_cards(raw):
     """`cards.json` → `[规则…]`；有一条不对就抛 `ConfigError`。
 
@@ -1635,6 +2019,10 @@ def validate_cards(raw):
     结算时每种卡片只发一发 `0x041c`（同 id 发两次客户端会累加，§3），
     两条规则服务端说不清该按哪一条；而且「一张卡一条规则」让卡片 id
     成了自然主键，三方合并、补齐默认值、发放去重才都有着落。
+
+    一条规则两段：**算哪一局**（`mode` / `stage` / `difficulty`，管理页那个
+    「对局模式」弹窗）+ **要达成什么**（`conditions`，「达成条件」弹窗）。
+    达成一次固定给一张（`CARD_GRANT_COUNT`），所以没有「数量」「上限」两格。
     """
     if not isinstance(raw, dict):
         raise ConfigError("cards.json 的最外层必须是一个对象")
@@ -1657,29 +2045,10 @@ def validate_cards(raw):
                 "一张卡片只能有一条获得规则"
                 % (where, item_name(card) or card, seen[card]))
         seen[card] = where
-        metric = entry.get("metric")
-        if metric not in CARD_METRICS:
-            raise ConfigError("%s.metric 不认识：%r（认得的有 %s）"
-                              % (where, metric, "、".join(sorted(CARD_METRICS))))
-        scope = entry.get("scope", CARD_SCOPE_MATCH)
-        if scope not in CARD_SCOPES:
-            raise ConfigError("%s.scope 只能是 %s：%r"
-                              % (where, " 或 ".join(CARD_SCOPES), scope))
         rule = {
             "card": card,
             "listed": bool(entry.get("listed", False)),
-            "scope": scope,
-            "metric": metric,
-            # ★ 下限是 **1**，不是 0：这一页只有「达到」一种比较，
-            #   阈值 0 恒成立 ⇒ 那条规则每局白送一张，而且没人看得出为什么。
-            "threshold": _as_int(entry.get("threshold", 1),
-                                 where + ".threshold",
-                                 low=1, high=MAX_CARD_THRESHOLD),
-            "win_only": bool(entry.get("win_only", False)),
-            "count": _as_int(entry.get("count", 1), where + ".count",
-                             low=1, high=MAX_CARD_COUNT),
-            "limit": _as_int(entry.get("limit", 0), where + ".limit",
-                             low=0, high=MAX_CARD_LIMIT),
+            "conditions": _validate_card_conditions(entry, where),
         }
         mode = entry.get("mode")
         if mode is not None:
@@ -1687,18 +2056,8 @@ def validate_cards(raw):
                 raise ConfigError("%s.mode 只能是 %s，或者整个不写（= 不限）：%r"
                                   % (where, " / ".join(CARD_MODES), mode))
             rule["mode"] = mode
-        # ★ 指标本身就只在某一种模式下有意义时，模式**必须**是那一种 ——
-        #   「闯关的杀怪数 + 对战」写得出来但永远不成立，那正是 D17a 说的
-        #   「配得出来却永远命中不了」的那种档。
-        limited = card_metric_modes(metric)
-        if limited and rule.get("mode") not in limited:
-            raise ConfigError(
-                "%s：指标「%s」只有%s才有意义，模式得选它"
-                % (where, CARD_METRIC_ZH[metric],
-                   " / ".join(CARD_MODE_ZH.get(m, m) for m in limited)))
         for key, low, high in (("stage", 1, None),
-                               ("difficulty", 1, max(DIFFICULTY_ZH)),
-                               ("min_shots", 0, MAX_CARD_THRESHOLD)):
+                               ("difficulty", 1, max(DIFFICULTY_ZH))):
             value = entry.get(key)
             if value is not None:
                 rule[key] = _as_int(value, "%s.%s" % (where, key), low, high)
@@ -1708,19 +2067,6 @@ def validate_cards(raw):
                 if rule.pop(key, None) is not None:
                     raise ConfigError("%s：对战没有关卡和难度，%s 不该写"
                                       % (where, key))
-        weapon = entry.get("weapon")
-        if weapon is not None:
-            weapon = _as_int(weapon, where + ".weapon", low=1)
-            if weapon not in WEAPON_CARDS:
-                raise ConfigError("%s.weapon 不是武器族号：%r（认得的是 %s）"
-                                  % (where, weapon,
-                                     "、".join(str(r) for r in WEAPON_CARDS)))
-            if not card_metric_needs_weapon(metric):
-                raise ConfigError("%s：指标「%s」和武器无关，不该写 weapon"
-                                  % (where, CARD_METRIC_ZH[metric]))
-            rule["weapon"] = weapon
-        if entry.get("note"):
-            rule["note"] = str(entry["note"])
         out.append(rule)
     return out
 
@@ -1892,9 +2238,15 @@ SCHEMA = {
             "两条规则服务端说不清该按哪一条。",
             "关掉「能获得」= 这一版拿不到这张卡；**17 张全关掉就是整个功能停掉**，"
             "不用重启服务端、也不用发新版客户端。",
-            "「一局内」= 这一局打到这个数就给；「玩家累计」= 账号总数"
-            "每满一个阈值给一次 —— 把阈值调高不会收回已经发出去的，"
-            "调低会在玩家下一局结算时一次性补齐。",
+            "行中间那句话是**照设置现算的**：右边两颗钮"
+            "（**对局模式** / **达成条件**）改完，句子跟着变。"
+            "达成一次**固定给一张**，所以没有「数量」「上限」两格。",
+            "条件**从上往下依次结合，没有括号** —— 「A 或者 B 并且 C」"
+            "算的是「（A 或者 B）并且 C」。两种连接词混用时，说明文里"
+            "会自己把括号写出来。",
+            "「一局内」= 这一局打到这个数；「玩家累计」= **从上次拿到这张卡"
+            "之后重新攒**，攒够就发一张、几个计数器同时归零、再攒下一轮。"
+            "★ 所以累计那一档念的是「每满 N」，也就没有别的比较符。",
             "★ 卡片的提示框上会写着这里设的条件。改完保存即刻生效，"
             "但**已经在线的玩家要重新登录**才看得到新说明"
             "（客户端把物品说明缓存住了）。",
@@ -1905,14 +2257,12 @@ SCHEMA = {
              "kinds": ["material"], "readonly": True,
              "help": "17 张卡片是原版定死的，加不出新的"},
             {"key": "listed", "label": "能获得", "type": "bool"},
-            {"key": "scope", "label": "统计范围", "type": "choice",
-             "options": [{"value": key, "label": CARD_SCOPE_ZH[key]}
-                         for key in CARD_SCOPES]},
-            {"key": "mode", "label": "模式", "type": "choice",
+            # -------------------------------- ①「对局模式」弹窗：算哪一局
+            {"key": "mode", "label": "对局模式", "type": "choice",
              "optional": True, "empty_label": "不限",
              "options": [{"value": key, "label": CARD_MODE_ZH[key]}
                          for key in CARD_MODES]},
-            # 关卡 / 难度只有闯关才有意义；选了对战前台会清空并锁住
+            # 关卡 / 难度只有闯关才有意义；选了对战 / 不限前台就不画它们
             # （和「材料掉落」那一页同一套 `PVP_LOCKED_KEYS`）。
             {"key": "stage", "label": "关卡", "type": "choice",
              "optional": True, "empty_label": "不限",
@@ -1922,27 +2272,47 @@ SCHEMA = {
              "optional": True, "empty_label": "不限",
              "options": [{"value": n, "label": "%d · %s" % (n, name)}
                          for n, name in sorted(DIFFICULTY_ZH.items())]},
-            {"key": "metric", "label": "统计指标", "type": "choice",
-             "options": [{"value": key, "label": CARD_METRICS[key][0]}
-                         for key in card_metric_keys()]},
-            {"key": "weapon", "label": "武器", "type": "choice",
-             "optional": True, "empty_label": "不限",
-             "help": "只有「某武器…」那两个指标用得上",
-             "options": weapon_card_options()},
-            {"key": "threshold", "label": "达到", "type": "int",
-             "min": 1, "max": MAX_CARD_THRESHOLD,
-             "help": "不能填 0 —— 这一页只有「达到」一种比较，0 恒成立"},
-            {"key": "min_shots", "label": "最少开枪数", "type": "int",
-             "optional": True, "min": 0, "max": MAX_CARD_THRESHOLD,
-             "help": "命中率那种比率指标的样本下限；不填 = 不要求"},
-            {"key": "win_only", "label": "只有胜利 / 通关才给", "type": "bool"},
-            {"key": "count", "label": "获得数量", "type": "int",
-             "min": 1, "max": MAX_CARD_COUNT, "suffix": "张"},
-            {"key": "limit", "label": "累计上限", "type": "int",
-             "min": 0, "max": MAX_CARD_LIMIT, "suffix": "张",
-             "help": "这个账号一辈子最多从这条规则拿几张。0 = 不限"},
-            {"key": "note", "label": "备注", "type": "text", "optional": True,
-             "help": "只给人看，服务端不读它"},
+            # ------------------------------ ②「达成条件」弹窗：一行一条
+            # ★★ 子字段表和「合成材料」那几格（`type: "materials"`）
+            #   同一个套路：**一条条件长什么样由服务端说了算**，
+            #   前端照着画（D16）。加一格 = 弹窗里自动多一格。
+            {"key": "conditions", "label": "达成条件", "type": "conditions",
+             "max": MAX_CARD_CONDITIONS,
+             "help": "从上往下依次结合，没有括号",
+             "fields": [
+                 # ★ 第一条没有连接词（校验器拦着不许写），前端不画它。
+                 {"key": "join", "label": "连接", "type": "choice",
+                  "options": [{"value": key, "label": CARD_JOIN_ZH[key]}
+                              for key in CARD_JOINS]},
+                 {"key": "scope", "label": "统计范围", "type": "choice",
+                  "options": [{"value": key, "label": CARD_SCOPE_ZH[key]}
+                              for key in CARD_SCOPES]},
+                 # ★ 每一条指标那句说明挂成 `option.title`（`choiceNode`）——
+                 #   出处只有 `CARD_METRICS` 那一列，前端一个字都不抄。
+                 {"key": "metric", "label": "统计指标", "type": "choice",
+                  "options": [{"value": key, "label": CARD_METRICS[key][0],
+                               "help": CARD_METRICS[key][3]}
+                              for key in card_metric_keys()]},
+                 {"key": "weapon", "label": "武器", "type": "choice",
+                  "optional": True, "empty_label": "不限",
+                  "help": "只统计用这一族枪打出来的。"
+                          "★ 只有 击杀数 / 开枪次数 / 造成的伤害 分得到武器",
+                  "options": weapon_card_options()},
+                 # ★ **不是 `optional`**：留空就等于「大于等于」，再画一个
+                 #   空选项会让下拉里出现两个。缺这一格时 `choiceNode`
+                 #   显示的正是第一项，和校验器补的默认值一个意思。
+                 {"key": "op", "label": "比较", "type": "choice",
+                  "help": "「玩家累计」那一档只有「每满」",
+                  "options": [{"value": key, "label": CARD_OP_ZH[key]}
+                              for key in CARD_OPS]},
+                 # ★ `min` 写 0，真正的下限由比较符决定（`CARD_OP_MIN`），
+                 #   前台在切比较符时把 `input.min` 改过去。写死 1 的话
+                 #   「等于 0」那一格会一直亮着 `:invalid`。
+                 {"key": "threshold", "label": "数值", "type": "int",
+                  "min": 0, "max": MAX_CARD_THRESHOLD,
+                  "help": "「大于等于」不能填 0（那样每局都成立，等于白送）；"
+                          "「小于等于」「等于」可以填 0"},
+             ]},
         ],
     },
     # ----------------------------------------------------------------- 奖励

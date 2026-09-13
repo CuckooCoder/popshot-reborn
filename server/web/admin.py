@@ -26,6 +26,8 @@
     GET  /admin/api/players?q=名字&page=0&online=…  找玩家（一页 10 行）    ★运营
     GET  /admin/api/player?name=alice  一个玩家的可编辑资料                 ★系统
     POST /admin/api/player            {name, level, money, ...}             ★系统
+    GET  /admin/api/cards/progress[?name=alice]  称号卡片达成进度
+                                      不写 name = 看自己 ☆三档；写了别人 ★运营
     GET  /admin/api/reward/players?q=名字&online=all|on|off  发奖弹窗左栏的名单 ★运营
     POST /admin/api/reward/send       {players, items, exp, money, message}  ★运营
     GET  /admin/api/reward/history    发奖记录：{ok, records, max}           ★运营
@@ -156,6 +158,7 @@ import time
 import urllib.parse
 
 import account_store
+import cards
 import cfgmerge
 import databackup
 import eventlog
@@ -1205,6 +1208,9 @@ class AdminRoutes:
         if path == "/admin/api/player":
             self._admin_player_get(query)
             return True
+        if path == "/admin/api/cards/progress":
+            self._admin_card_progress(query)
+            return True
         if path == "/admin/api/reward/players":
             self._admin_reward_players(query)
             return True
@@ -1338,6 +1344,40 @@ class AdminRoutes:
             #   前台照它锁「武器」和「模式」两个下拉（同 `PVP_LOCKED_KEYS` 的道理）。
             "card_metrics": shopcfg.card_metrics_for_admin(),
             "weapon_cards": list(shopcfg.WEAPON_CARDS),
+            # ★★ 说明文用到的**每一个中文词**（V0.3商店，用户 2026-09-13
+            #   第三轮）。「达成条件」弹窗要**实时**把同一句话画出来，所以
+            #   那边不得不自己拼一遍 —— 但词是这儿发过去的，`admin.js` 里
+            #   一个中文字都不写死（D16 的同一条）。改 `shopcfg` 的表 =
+            #   游戏提示框和管理页同时改口。
+            "card_text": {
+                "phrases": shopcfg.CARD_PHRASES,
+                "modes": shopcfg.CARD_MODE_ZH,
+                "scope_prefix": shopcfg.CARD_SCOPE_PREFIX_ZH,
+                "ops": shopcfg.CARD_OP_ZH,
+                "every": shopcfg.CARD_EVERY_ZH,
+                "joins": shopcfg.CARD_JOIN_ZH,
+                "quests": {str(k): v for k, v in shopcfg.QUEST_ZH.items()},
+                "difficulties": {str(k): v
+                                 for k, v in shopcfg.DIFFICULTY_ZH.items()},
+                # 武器名带角色（「左轮手枪（泰尔）」）—— 和条件行那个下拉
+                # 同一个出处 `weapon_roh_label()`。
+                "weapons": {str(roh): shopcfg.weapon_roh_label(roh)
+                            for roh in shopcfg.WEAPON_CARDS},
+            },
+            # 前台那道「条件无效」的判据参数：阈值下限跟着比较符走、
+            # 比率指标要配哪个指标当样本下限…… 都从服务端拿，别在页面上写死。
+            "card_limits": {
+                "op_min": shopcfg.CARD_OP_MIN,
+                "op_ge": shopcfg.CARD_OP_GE,
+                "op_eq": shopcfg.CARD_OP_EQ,
+                "join_and": shopcfg.CARD_JOIN_AND,
+                "join_or": shopcfg.CARD_JOIN_OR,
+                "scope_match": shopcfg.CARD_SCOPE_MATCH,
+                "scope_total": shopcfg.CARD_SCOPE_TOTAL,
+                "sample_metric": shopcfg.CARD_SAMPLE_METRIC,
+                "max_conditions": shopcfg.MAX_CARD_CONDITIONS,
+                "max_threshold": shopcfg.MAX_CARD_THRESHOLD,
+            },
             # ★ 等级曲线（D72a）：「金币 / 经验获取」的经验那一页拿它画一张
             #   **只读**参照表 —— 调「一局给多少经验」的人要看得见这些经验
             #   换算成多少级。曲线只在 `account_store` 定义一处，页面不自己算。
@@ -1946,6 +1986,51 @@ class AdminRoutes:
             self._reply(False, f"没有叫 {username!r} 的账号", status=404)
             return
         self._send_json({"ok": True, "player": _player_view(username, account)})
+
+    def _admin_card_progress(self, query):
+        """`/admin/api/cards/progress?name=…` —— 一个人的称号卡片达成进度。
+
+        ★★ **不写 `name` = 看自己**，任何登录进来的人都能看（连只读玩家
+        也能看自己那一份）。写了别人的名字才要**运营以上**。
+        ⇒ 称号卡片页那颗「查看本人达成进度」因此不需要任何权限判断：
+          它压根不发 `name`，服务端这一句就保证了「只能看自己」。
+
+        ★ 看别人这一档**放到运营**（用户 2026-09-13 第六轮），和
+        「修改仓库」那道门（D97i，系统管理员专用）**不是一回事**：
+        这一发回的只有「离下一张卡还差多少」—— 既不是仓库清单、也改不了
+        任何东西，而运营本来就在管掉落规则，看不到进度就没法判断规则配得
+        合不合适。⇒ 只读玩家仍旧看不了别人（`_require_editor`）。
+
+        ★ 「自己」指的是**同名的游戏账号**（同 D96 那个昵称）：管理员表和
+        玩家表是两张表，一个只在管理员表里的名字没有战绩可言 —— 那时说清
+        「没有同名的游戏账号」，别回一份全 0 的进度让人以为自己白打了。
+        """
+        me = self._require_admin()
+        if me is None:
+            return
+        wanted = (urllib.parse.parse_qs(query or "").get("name") or [""])[0]
+        wanted = wanted.strip()
+        mine = (not wanted) or wanted == me
+        if not mine and self._require_editor() is None:
+            return
+        username = wanted or me
+        _name, account = self.accounts.get_account(username)
+        if account is None:
+            self._reply(False,
+                        f"没有叫 {username!r} 的游戏账号"
+                        if not mine else
+                        f"管理员 {username!r} 没有同名的游戏账号 ——"
+                        f"卡片进度是按游戏账号记的",
+                        status=404)
+            return
+        rules, _warnings = shopcfg.cards()
+        rows = cards.card_progress(
+            rules,
+            stats=account_store.battle_stats(account),
+            bases=account_store.card_bases(account),
+            granted=account_store.card_grants(account))
+        self._send_json({"ok": True, "username": username, "mine": mine,
+                         "nickname": self._nickname(username), "rows": rows})
 
     def _admin_player_save(self, data):
         """`POST /admin/api/player` —— 改等级 / 金币 / 材料 / 仓库物品。

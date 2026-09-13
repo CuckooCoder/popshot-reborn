@@ -374,8 +374,30 @@ TITLE = {
 }
 
 
+def card_cond(metric, op=shopcfg.CARD_OP_GE, threshold=1, *,
+              scope=shopcfg.CARD_SCOPE_MATCH, weapon=None, join=None):
+    """写一条达成条件。★ 只是让下面那张表看得清，没有别的逻辑。"""
+    cond = {"scope": scope, "metric": metric, "op": op,
+            "threshold": threshold}
+    if weapon is not None:
+        cond["weapon"] = weapon
+    if join is not None:
+        cond["join"] = join
+    return cond
+
+
+#: 「并且赢了 / 通关了」这条条件出现了三次，写成一个名字免得抄错。
+#: ⚠ 它**很关键**：旧的 `perfect_win` / `carried` 把「赢了」焊在指标里，
+#: 拆成「死亡次数 等于 0」之后那一半得由它承担 —— 漏了就变成
+#: 「输了没死也给」，而页面上看不出来。
+_WON = card_cond("won", shopcfg.CARD_OP_EQ, 1, join=shopcfg.CARD_JOIN_AND)
+
 #: ★★ **17 张卡片的默认获得条件**（V0.3商店 · 称号卡片）：
-#: `{卡片 id: (模式, 统计范围, 指标, 阈值, 只有胜利才给, 张数, 武器, 备注)}`
+#: `{卡片 id: (模式, [达成条件…])}`
+#:
+#: ★ 条件是一串（用户 2026-09-13 第三轮）：「零死亡获胜」就是
+#:   「死亡次数 等于 0」**并且**「本局结果 为 胜利 / 通关」两条 ——
+#:   不再需要专属指标，也不再需要「必须胜利」那个单独的开关。
 #:
 #: 条件是**按韩文原名反推**的 —— 原版每张卡片的名字本身就是那个成就：
 #:
@@ -388,36 +410,30 @@ TITLE = {
 #:   「按概率掉卡片」就是这个理由）。所以这张表里没有「概率」这一格。
 #: ★ `60004 幸运卡片` 那条是**用户 2026-09-13 指定**的（对战每局格挡 ≥ 30
 #:   且胜利），因为它换的 `[幸运幸存者]` 是全表最强的称号。
+#: ★ `60002 斗士` 数的是**突击技命中**不是发动（用户 2026-09-13）：
+#:   发动次数空房间连点就达标，不算成就。阈值 3 也是因为这个 ——
+#:   近身打中比发动难得多。
+#: ★ `60003 射手` 用命中数不用命中率：开一枪中一枪也是 100%。
 #: ★ 武器卡**只给对战**：闯关一局里怪成打，「用左轮打死 5 个」等于「参战就给」，
 #:   那张卡就没有含义了。运营想放宽在管理页把模式改成不限即可。
 CARD_RULES = {
-    # 卡片:    (模式,    范围,      指标,            阈值, 胜利, 张数, 武器, 备注)
-    60001:  ("pvp",   "match", "perfect_win",      1, False, 1, None,
-             "무적승리자 无敌胜利者：一局一次都没死还赢了"),
-    60002:  ("pvp",   "match", "dashes",          10, False, 1, None,
-             "파이터 斗士：近身格斗（突击技）打满 10 次"),
-    60003:  (None,    "match", "hits",            30, False, 1, None,
-             "슈터 射手：命中 30 次。★ 用命中数不用命中率 —— "
-             "开一枪中一枪也是 100%"),
-    60004:  ("pvp",   "match", "guards",          30, True,  1, None,
-             "럭키가이：对战一局格挡 30 次以上并获胜（用户 2026-09-13 指定）"),
-    60005:  ("pvp",   "match", "carried",          1, False, 1, None,
-             "빈대 蹭客：一个人都没打死却赢了"),
-    60006:  (None,    "match", "hearts",          10, False, 1, None,
-             "하트마니아 红心狂：一局捡 10 颗心"),
-    60007:  ("pvp",   "match", "team_kills",       3, False, 1, None,
-             "팀킬쟁이 队杀鬼：一局误伤队友 3 次"),
-    60008:  (None,    "match", "suicides",         3, False, 1, None,
-             "제풀쟁이 自爆鬼：一局把自己炸死 3 次"),
+    # 卡片:   (模式,  [达成条件…])
+    60001:  ("pvp",  [card_cond("deaths", shopcfg.CARD_OP_EQ, 0), _WON]),
+    60002:  ("pvp",  [card_cond("dash_hits", threshold=3)]),
+    60003:  (None,   [card_cond("hits", threshold=30)]),
+    60004:  ("pvp",  [card_cond("guards", threshold=30), _WON]),
+    60005:  ("pvp",  [card_cond("kills", shopcfg.CARD_OP_EQ, 0), _WON]),
+    60006:  (None,   [card_cond("hearts", threshold=10)]),
+    60007:  ("pvp",  [card_cond("team_kills", threshold=3)]),
+    60008:  (None,   [card_cond("suicides", threshold=3)]),
 }
 #: 武器卡：一局内用那一族武器打死 N 个人。三档按武器称号的加成强弱分
 #: （+15% 的最难、+3% 的最容易），和 `TITLE` 那张表同一个梯度。
+#: ★ 指标就是普通的「击杀数」，「用哪把枪」由条件里那一格 `weapon` 回答。
 _WEAPON_CARD_KILLS = {1: 5, 2: 4, 3: 3}
 for _roh in shopcfg.WEAPON_CARDS:
-    CARD_RULES[_roh] = (
-        "pvp", "match", "weapon_kills", _WEAPON_CARD_KILLS[_roh % 10],
-        False, 1, _roh, "一局内用这一族武器打死 %d 个人"
-                        % _WEAPON_CARD_KILLS[_roh % 10])
+    CARD_RULES[_roh] = ("pvp", [card_cond(
+        "kills", threshold=_WEAPON_CARD_KILLS[_roh % 10], weapon=_roh)])
 
 
 def build_cards():
@@ -429,19 +445,13 @@ def build_cards():
     for card in sorted(CARD_RULES):
         if not shopdata.exists(card):
             continue
-        mode, scope, metric, threshold, win_only, count, weapon, note = \
-            CARD_RULES[card]
-        rule = {"card": card, "listed": True, "scope": scope,
-                "metric": metric}
+        mode, conditions = CARD_RULES[card]
+        rule = {"card": card, "listed": True,
+                # ★ 拷一份：上面那张表是模块级常量，`_WON` 还被三条规则
+                #   共用着 —— 直接交出去的话，谁改一下就三条一起变。
+                "conditions": [dict(cond) for cond in conditions]}
         if mode is not None:
             rule["mode"] = mode
-        if weapon is not None:
-            rule["weapon"] = weapon
-        rule["threshold"] = threshold
-        rule["win_only"] = win_only
-        rule["count"] = count
-        rule["limit"] = 0
-        rule["note"] = note
         rules.append(rule)
     return rules
 

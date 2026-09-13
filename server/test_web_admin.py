@@ -255,6 +255,9 @@ class AdminAuthTests(_AdminCase):
                 ("/admin/api/players?q=a", None),
                 ("/admin/api/player?name=alice", None),
                 ("/admin/api/player", {"name": "alice", "money": 1}),
+                # ★ 卡片进度「看自己」三档身份都能用，但没登录就没有「自己」。
+                ("/admin/api/cards/progress", None),
+                ("/admin/api/cards/progress?name=alice", None),
                 ("/admin/api/reward/players?q=a", None),
                 ("/admin/api/reward/send", {"players": ["alice"], "exp": 1}),
                 ("/admin/api/reward/history", None),
@@ -1690,6 +1693,33 @@ class OperatorPermissionTests(_AdminCase):
         after = self.accounts.get_account("alice")[1]
         self.assertEqual(money_before, account_store.player_money(after))
 
+    def test_an_operator_may_read_anyone_card_progress(self):
+        """★★ 「成就卡片进度」**运营也能看**（用户 2026-09-13 第六轮），
+        和「修改仓库」那道门不是一回事。
+
+        它回的只有「离下一张卡还差多少」—— 既不是仓库清单也改不了任何东西，
+        而运营本来就在管掉落规则，看不到进度就没法判断规则配得合不合适。
+        """
+        self.accounts.register("alice", "pw1")
+        status, result = self.request("/admin/api/cards/progress?name=alice")
+        self.assertEqual(200, status, result)
+        self.assertTrue(result["ok"])
+        self.assertEqual("alice", result["username"])
+        self.assertFalse(result["mine"])
+
+    def test_anyone_may_look_at_their_own_card_progress(self):
+        """★ 反过来：**看自己**那一份谁都能看 —— 称号卡片页那颗
+        「查看本人达成进度」压根不发 `name`，三档身份都点得动。"""
+        self.accounts.register("carol", "pw1")     # 和管理员同名的游戏账号
+        status, result = self.request("/admin/api/cards/progress")
+        self.assertEqual(200, status)
+        self.assertTrue(result["ok"])
+        self.assertEqual("carol", result["username"])
+        self.assertTrue(result["mine"])
+        # 写自己的名字和不写是同一回事。
+        self.assertTrue(self.request(
+            "/admin/api/cards/progress?name=carol")[1]["ok"])
+
     def test_every_system_only_api_is_403(self):
         """★★ 前台把那两个标签藏起来只是画面 —— 这条用例是**直接 POST**，
         证明藏掉的按钮背后真的有一道门。
@@ -1938,6 +1968,16 @@ class PlayerReadOnlyTests(_AdminCase):
             before,
             account_store.player_money(self.accounts.get_account("alice")[1]))
 
+    def test_a_player_sees_his_own_card_progress_but_not_anyone_else(self):
+        """★ 「查看本人达成进度」那颗钮只读玩家也点得动 —— 它不发 `name`。
+        换个名字进去就是 403（那道门在服务端，不在按钮上）。"""
+        self.accounts.register("bob", "pw2")
+        status, mine = self.request("/admin/api/cards/progress")
+        self.assertEqual(200, status, mine)
+        self.assertEqual("alice", mine["username"])
+        self.assertEqual(403, self.request(
+            "/admin/api/cards/progress?name=bob")[0])
+
 
 class AdminBackupApiTests(_AdminCase):
     """管理页「数据备份」页的五个接口（V0.3商店，用户 2026-09-07）。
@@ -2145,6 +2185,90 @@ class AdminItemLookupTests(_AdminCase):
     def test_a_non_numeric_id_is_refused(self):
         result = self.request("/admin/api/item?id=abc")[1]
         self.assertFalse(result["ok"])
+
+
+class AdminCardProgressTests(_AdminCase):
+    """「卡片进度」那一发（用户 2026-09-13 第四轮）。
+
+    ★ 两个入口同一发接口：玩家仓库那一行的「卡片进度」带 `name`，
+    称号卡片页那颗「查看本人达成进度」不带 —— 权限差别全在带不带上。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.accounts.register("alice", "pw1", display_name="爱丽丝")
+        self.login()
+
+    def rules(self, rows):
+        shopcfg.write_json(
+            shopcfg.path_of(shopcfg.CARDS_FILENAME, self.data_dir),
+            {"format": shopcfg.FORMAT, "rules": rows})
+        shopcfg.invalidate()
+
+    def progress(self, name="alice"):
+        status, result = self.request(
+            "/admin/api/cards/progress?name=" + urllib.parse.quote(name))
+        self.assertEqual(200, status, result)
+        self.assertTrue(result["ok"], result)
+        return {row["card"]: row for row in result["rows"]}
+
+    def test_a_match_condition_has_no_progress_to_show(self):
+        """★ 一局内的条件攒不住 ⇒ **不发 have / need**，前台照这个画
+        「每局游戏内计算」而不是一根永远停在 0 的进度条。"""
+        self.rules([{"card": 60001, "listed": True, "conditions": [
+            {"scope": "match", "metric": "kills", "op": "ge",
+             "threshold": 5}]}])
+        row = self.progress()[60001]
+        self.assertEqual("match", row["conditions"][0]["scope"])
+        self.assertNotIn("have", row["conditions"][0])
+        self.assertNotIn("need", row["conditions"][0])
+        self.assertTrue(row["conditions"][0]["text"])
+
+    def test_a_total_condition_says_how_far_this_round_got(self):
+        """★★ `have` 是**这一轮**攒的（累计 − 上次归零时的基准），
+        不是账号总数 —— 页面上问的是「离下一张还差多少」。"""
+        self.rules([{"card": 60001, "listed": True, "conditions": [
+            {"scope": "total", "metric": "kills", "op": "ge",
+             "threshold": 100}]}])
+        self.accounts.apply_battle("alice", stats_mode="pvp",
+                                   stats_gained={"kills": 143})
+        row = self.progress()[60001]
+        self.assertEqual(143, row["conditions"][0]["have"])
+        self.assertEqual(100, row["conditions"][0]["need"])
+
+    def test_the_counter_reset_shows_up_as_a_fresh_round(self):
+        self.rules([{"card": 60001, "listed": True, "conditions": [
+            {"scope": "total", "metric": "kills", "op": "ge",
+             "threshold": 100}]}])
+        self.accounts.apply_battle("alice", stats_mode="pvp",
+                                   stats_gained={"kills": 143},
+                                   cards={60001: 1},
+                                   card_bases={60001: {"kills": 143}})
+        row = self.progress()[60001]
+        self.assertEqual(0, row["conditions"][0]["have"], "归零之后重新攒")
+        self.assertEqual(1, row["granted"], "已经拿过几张也要说")
+
+    def test_a_switched_off_card_says_it_cannot_be_earned(self):
+        self.rules([{"card": 60001, "listed": False, "conditions": [
+            {"scope": "match", "metric": "kills", "op": "ge",
+             "threshold": 5}]}])
+        row = self.progress()[60001]
+        self.assertFalse(row["listed"])
+        self.assertEqual(shopcfg.CARD_PHRASES["off"], row["text"])
+
+    def test_an_unknown_player_is_a_404(self):
+        status, result = self.request("/admin/api/cards/progress?name=nobody")
+        self.assertEqual(404, status)
+        self.assertFalse(result["ok"])
+
+    def test_an_admin_without_a_game_account_is_told_why(self):
+        """★ 「自己」指的是**同名的游戏账号**。管理员表和玩家表是两张表 ——
+        只在管理员表里的名字没有战绩可言，那时说清楚，别回一份全 0 的进度
+        让人以为自己白打了。"""
+        status, result = self.request("/admin/api/cards/progress")
+        self.assertEqual(404, status)
+        self.assertFalse(result["ok"])
+        self.assertIn("同名的游戏账号", result["message"])
 
 
 class AdminPlayerTests(_AdminCase):

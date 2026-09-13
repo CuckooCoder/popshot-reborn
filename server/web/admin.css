@@ -641,9 +641,47 @@ input.bad { border-color: var(--crimson); background: #FFF2F2; }
 /* ★ 只淡不隐：关着的规则照样要能改（不然怎么重新开）。开关自己不淡，
    否则「怎么把它打开」这件事在画面上就没有落点了。 */
 .card-row.off .toggle { opacity: 1; }
+/* 画出来却锁着的格子 = 磁盘上那一格有值，而当前设置下它不生效
+   （用不上**而且**没值的格子根本不画，见 `admin.js` 的 `cardIdleKeys`）。 */
 .card-row select:disabled, .card-row input:disabled {
   background: var(--paper-2); color: var(--cocoa-soft); cursor: not-allowed;
 }
+
+/* ---- 一行四格（用户 2026-09-13 第三轮重排）
+
+   前两版都是**把设置项摊在行里**：第一版 14 格自由换行、第二版三段 grid。
+   格子再怎么对齐，一行十来个下拉终究要人自己在脑子里把它们读成一句话。
+   ⇒ 这一版**行里不放设置项**，只放读得懂的东西，具体设置挪进两个弹窗：
+
+       ┌──────────┬────────┬────────────────────────────┬───────────────┐
+       │ 图标+名称 │ 能获得 │ 照设置现算的那句说明（最宽）│ 对局模式/达成条件│
+       └──────────┴────────┴────────────────────────────┴───────────────┘
+
+   列位置写死（和上一版同一个理由：17 行的边界要逐像素对齐），中间那栏
+   `minmax(0,1fr)` 吃掉所有剩余宽度 —— 说明文才是这一页真正要看的东西。 */
+.card-row {
+  display: grid;
+  grid-template-columns: 158px auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  /* `.rule-row` 右边那 34px 是给删除按钮留的，这一页没有删除。 */
+  padding: 10px 12px;
+}
+/* ⚠⚠ `.rule-row .who` 是 `flex: 0 0 156px`，在这个 grid 里那 156 会和
+   列宽打架 —— 让它占满自己那一列就行。 */
+.card-row .who { flex: 1 1 auto; min-width: 0; }
+/* 「能获得」：开关自己一列，不跟着说明文左右跑。 */
+.card-row > .toggle { white-space: nowrap; }
+/* 说明文。★ **不截断、不省略号** —— 这一页现在只剩它一句话，
+   截掉就等于什么都没说。长了就折行，行自己变高。 */
+.card-row > .card-say {
+  font-size: 13px; line-height: 1.5; color: var(--cocoa);
+  min-width: 0; word-break: break-word;
+}
+/* 「条件无效」/「暂时无法获得」那两句：红字 + 加粗，和正常那句分开 */
+.card-row > .card-say.bad-text { color: var(--crimson); font-weight: 700; }
+/* 右边两颗钮：**不换行**（换行的话行高会跟着跳，17 行就参差不齐）。 */
+.card-row > .card-acts { display: flex; gap: 8px; white-space: nowrap; }
 
 /* ---------------------------------------- 金币 / 经验获取：两张表格
    用户 2026-09-10（D72）。别的配置页是一条一张卡，这一页是两张**固定的**
@@ -1145,6 +1183,12 @@ td .acts {
   display: flex; gap: 6px; flex-wrap: wrap;
   align-items: center; justify-content: flex-end;
 }
+/* ★ 玩家仓库那一列的两颗钮**必须一排**（用户 2026-09-13 第六轮）：
+   `flex-wrap: wrap` 是给「指定玩家为管理员」那张表留的（那儿按钮文字随
+   权限变），这一页放不下就摞成上下两排，看着像坏了。⇒ 这一页关掉换行，
+   宽度由 `<th style="width:216px">` 兜着。 */
+.player-list td .acts { flex-wrap: nowrap; }
+.player-list td .acts .btn { white-space: nowrap; }
 /* ★ 「状态」列（用户 2026-09-13）：圆点 + 他现在在哪。
    圆点和工具条右端那个「当前在线」**共用一套** —— 琥珀色，见上面
    `.online-tally .dot` 那段注释里写死的「别改回绿」。
@@ -1565,4 +1609,130 @@ ul.help li.ro-note { color: var(--crimson); font-weight: 700; }
 /* 列表自己滚，工具条和换页栏钉住不动 —— 和玩家仓库那一页一个手感。 */
 .promote-list { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .promote-panel .panel-body { display: flex; flex-direction: column; min-height: 0; }
+
+/* ============ 称号卡片的两个设置弹窗（用户 2026-09-13 第三轮）============
+   「对局模式」= 算哪一局；「达成条件」= 一行一条、and / or 串起来。
+   两个窗共用这一套皮，**顶上都钉着那句现算的说明文** —— 改一格就看见
+   句子跟着变，不用点保存再回去看。
+   ⚠ 盖 `.modal .panel` 的宽高必须写**三个类**（同 `#sellPriceModal` /
+     `#promoteModal` 踩过两次的坑）：只写一个类权重不够。 */
+.modal .panel.card-mode-panel { width: min(560px, 100%); height: auto; }
+.modal .panel.card-cond-panel { width: min(1000px, 100%); height: auto; }
+.card-mode-panel .panel-body,
+.card-cond-panel .panel-body { display: flex; flex-direction: column; gap: 12px; }
+/* 条件多起来之后让列表自己滚，顶上那句说明和底下的钮**不跟着滚**
+   （同「卖出价格设置」那一版的第②条）。 */
+.card-cond-panel .panel-body { max-height: calc(100vh - 220px); }
+.card-cond-rows { overflow: auto; min-height: 0; }
+
+/* ---- 顶上那句实时说明。★ 它是这两个窗的主角，所以比正文大一档、
+        有自己的底和边，一眼分得出「这是结果」而不是又一个输入框。 */
+.card-say-box {
+  padding: 11px 13px; border-radius: 9px;
+  background: var(--paper-2); border: 2px solid var(--line);
+  font-size: 14px; line-height: 1.55; font-weight: 600; color: var(--cocoa-ink);
+}
+/* 「条件无效」：整块转红。★ 底下再补一行**说清哪儿不对** —— 只写四个字
+   「条件无效」的话，人得自己一格格试出来是哪一条错了。 */
+.card-say-box.bad-text {
+  background: #FBE9E9; border-color: var(--crimson);
+  color: var(--crimson);
+}
+.card-say-why {
+  margin-top: 5px; font-size: 12px; font-weight: 600; color: var(--crimson-dk);
+}
+
+/* ---- 条件行：一条一行
+
+   ★★★ **列位置写死的 grid，不是 flex-wrap** —— 这是上一版那一整页版式
+   翻车之后留下的教训（用户原话「一眼看上去还以为排版崩溃了」）：用不上的
+   格子不画，而自由换行的断点跟着内容宽度走 ⇒ 上下两行的同一样东西对不齐。
+   这儿每一列**永远占着自己的位置**，用不上的那一格画成空白（`.cond-gap`）：
+   换个统计指标时「武器」那一格冒出来，别的格子一动不动。 */
+.card-cond {
+  position: relative;
+  display: grid;
+  grid-template-columns: 84px 96px 158px 168px 104px 116px;
+  gap: 10px; align-items: end;
+  padding: 9px 38px 9px 11px; margin-bottom: 8px;
+  background: #fff; border: 2px solid var(--line); border-radius: 9px;
+}
+/* 连接词（并且 / 或者）是**行与行之间**的东西：读起来就是
+   「上一条 …… 并且 …… 这一条」。★ 第一行没有它（校验器也不许写），
+   那一格画成空白 —— 摆一个「连接」两个字在那儿会被当成一个值。 */
+.card-cond > .cond-gap { min-width: 0; }
+.card-cond .field { min-width: 0; }
+.card-cond .field select,
+.card-cond .field input { width: 100%; max-width: none; }
+/* ✕ 删掉这一条：和列表里 `.kill` 一个位置一个样子。 */
+.card-cond > .kill { position: absolute; top: 8px; right: 8px; }
+/* 只剩一条时不给删 —— 删光了那条规则就没有「什么时候给」这件事了
+   （校验器那边报的是「至少要有一条达成条件」）。 */
+.card-cond > .kill[aria-disabled="true"] { opacity: .35; cursor: not-allowed; }
+.card-cond-foot { display: flex; gap: 10px; align-items: center; }
+/* 「已经 N / 8 条」那句：贴在「＋ 添加条件」右边，满了就变红。 */
+.card-cond-count { font-size: 12px; color: var(--cocoa-soft); }
+.card-cond-count.full { color: var(--crimson); font-weight: 700; }
+/* 「对局模式」窗里那三格竖排 —— 一共就三格，横排反而看不出联动。
+   ⚠ 同 `.form-panel` 那个坑：容器是竖排，`.field.wide` 的 220 会当成高度。 */
+.card-mode-panel .field { flex: 0 0 auto; }
+.card-mode-panel .field select { width: 100%; max-width: none; }
+
+/* ============ 称号卡片：达成进度弹窗（用户 2026-09-13 第四轮）============
+   一张卡片一块，块里一条条件一行。★ 只有「玩家累计」那种条件才有进度可言
+   （数字 + 进度条）；「一局内」的攒不住，那一格写的是「每局游戏内计算」。 */
+.modal .panel.card-prog-panel {
+  width: min(960px, 100%); height: min(700px, 100%);
+}
+/* 筛选条钉住不动，只有名单在滚（同「卖出价格设置」那一版的第②条）。 */
+.card-prog-panel .panel-body {
+  display: flex; flex-direction: column; min-height: 0;
+}
+.card-prog-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.card-prog-who { font-size: 12px; color: var(--cocoa-soft); }
+
+.card-prog {
+  display: grid; grid-template-columns: 186px minmax(0, 1fr);
+  gap: 12px; align-items: start;
+  padding: 10px 12px; margin-bottom: 8px;
+  background: #fff; border: 2px solid var(--line); border-radius: 10px;
+}
+/* 拿不到的那些整块淡下去 —— 和掉落页那一行同一个语义（`.off`）。 */
+.card-prog.off { opacity: .55; }
+.card-prog > .who { display: flex; gap: 9px; align-items: center; min-width: 0; }
+.card-prog .nmz {
+  font-size: 12px; font-weight: 600; flex: 1 1 auto; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 「已获得 3 张」：贴在名字下面，小一号 —— 「直到**下一次**获得」这句话
+   本身就预设了前面可能已经拿过，不写的话没有参照。 */
+.card-prog .got {
+  display: block; font-size: 11px; font-weight: 700; color: var(--moss-dk);
+}
+.card-prog .got.none { color: var(--cocoa-soft); }
+
+/* 条件行：说明 / 数字 / 进度条，三列写死 —— 上下几行的数字要对得齐。 */
+.card-prog-cond {
+  display: grid; grid-template-columns: minmax(0, 1fr) 96px 170px;
+  gap: 10px; align-items: center;
+  font-size: 12px; padding: 3px 0;
+}
+.card-prog-cond + .card-prog-cond { border-top: 1px dashed var(--line); }
+.card-prog-cond > .num {
+  text-align: right; font-weight: 700; color: var(--cocoa-ink);
+}
+/* 「每局游戏内计算」占掉数字 + 进度条那两列 —— 一局内的条件攒不住，
+   画一根空进度条会让人以为它卡在 0 不动。 */
+.card-prog-cond > .per-match {
+  grid-column: 2 / -1; color: var(--cocoa-soft);
+}
+.card-prog-bar {
+  height: 10px; border-radius: 6px; overflow: hidden;
+  background: var(--paper-2); border: 1px solid var(--line);
+}
+.card-prog-bar > i { display: block; height: 100%; background: var(--moss); }
+/* 攒满了还没结算（下一局就发）—— 换个颜色，免得有人以为卡住了。 */
+.card-prog-bar.full > i { background: var(--amber); }
+/* 说明为空的那一块（条件没配 / 拿不到）写一句话，别留白。 */
+.card-prog-none { font-size: 12px; color: var(--cocoa-soft); padding: 3px 0; }
 

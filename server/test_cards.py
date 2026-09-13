@@ -2,14 +2,14 @@
 # -*- coding: utf-8 -*-
 """`server/cards.py` —— 称号卡片该发谁几张（用户 2026-09-13，V0.3商店）。
 
-★ 这一组里最要紧的是 `TotalScopeTests`：「玩家累计」用的是**里程碑**语义
-（每满一个阈值给一次），三条性质缺一不可 ——
+★ 这一组里最要紧的是 `TotalScopeTests`：「玩家累计」是**攒够就归零、
+重新一轮**（用户 2026-09-13 第三轮原话：「发过奖励后，两个计数器同时归零，
+重新开始新一轮计数」）。两条性质缺一不可 ——
 
-    幂等          同一份统计再算一遍发 0 张
-    调高不倒扣    已经发出去的留在玩家仓库里
-    调低会补齐    欠的账在下一局一次性还清
+    攒够才发          进度 = 现在的累计值 − 上次归零时的值
+    发完当场清零      所以一次结算最多发一张，没有循环、也不需要「上限」
 
-这三条都是「错了也不会报错、只会在几个月后变成一堆解释不清的卡片」的那一类。
+这两条都是「错了也不会报错、只会在几个月后变成一堆解释不清的卡片」的那一类。
 """
 import os
 import sys
@@ -22,21 +22,32 @@ import shopcfg                                                 # noqa: E402
 import shopdefaults                                            # noqa: E402
 
 
-def rule(card, **kw):
-    """一条规则，只写关心的那几格，其余用 validator 的默认值。"""
-    out = {"card": card, "listed": True, "scope": shopcfg.CARD_SCOPE_MATCH,
-           "metric": "kills", "threshold": 1, "win_only": False,
-           "count": 1, "limit": 0}
+def cond(metric="kills", op=shopcfg.CARD_OP_GE, threshold=1, **kw):
+    """一条达成条件，只写关心的那几格。"""
+    out = {"scope": shopcfg.CARD_SCOPE_MATCH, "metric": metric, "op": op,
+           "threshold": threshold}
     out.update(kw)
     return out
 
 
-def grants(rules, *, mode="pvp", stage=None, difficulty=None, won=True,
-           match=None, total=None, granted=None):
-    give, targets, warnings = cards.due_grants(
-        rules, mode=mode, stage=stage, difficulty=difficulty, won=won,
-        match=match or {}, total=total or {}, granted=granted or {})
-    return give, targets, warnings
+#: 「并且赢了 / 通关了」—— 旧的 `win_only` 开关现在就是这一条条件。
+WON = cond("won", shopcfg.CARD_OP_EQ, 1, join=shopcfg.CARD_JOIN_AND)
+
+
+def rule(card, *conditions, **kw):
+    """一条规则。不写条件时给一条「击杀数 ≥ 1」顶着。"""
+    out = {"card": card, "listed": True,
+           "conditions": list(conditions) or [cond()]}
+    out.update(kw)
+    return out
+
+
+def grants(rules, *, mode="pvp", stage=None, difficulty=None,
+           match=None, total=None, bases=None):
+    give, new_bases, warnings = cards.due_grants(
+        rules, mode=mode, stage=stage, difficulty=difficulty,
+        match=match or {}, total=total or {}, bases=bases or {})
+    return give, new_bases, warnings
 
 
 class MetricTableTests(unittest.TestCase):
@@ -44,17 +55,12 @@ class MetricTableTests(unittest.TestCase):
 
     def test_every_metric_has_a_chinese_name_and_a_sane_shape(self):
         for key, spec in shopcfg.CARD_METRICS.items():
-            label, modes, weapon, ratio, help_text = spec
+            label, scopes, weapon, help_text = spec
             self.assertTrue(label, key)
             self.assertTrue(help_text, key)
             self.assertIsInstance(weapon, bool, key)
-            self.assertIsInstance(ratio, bool, key)
-            for mode in modes:
-                self.assertIn(mode, shopcfg.CARD_MODES, key)
-
-    def test_the_flag_metrics_are_all_real_metrics(self):
-        for key in shopcfg.CARD_FLAG_METRICS:
-            self.assertIn(key, shopcfg.CARD_METRICS, key)
+            for scope in scopes:
+                self.assertIn(scope, shopcfg.CARD_SCOPES, key)
 
     def test_the_dropdown_order_covers_every_metric_exactly_once(self):
         """★ 下拉不是字母序（按 key 排在中文下是乱的）——
@@ -65,11 +71,53 @@ class MetricTableTests(unittest.TestCase):
         for key in shopcfg.CARD_METRIC_ORDER:
             self.assertIn(key, shopcfg.CARD_METRICS, key)
 
-    def test_the_weapon_metrics_say_so(self):
-        """带武器的指标名里要有「某武器」—— `describe_card_rule` 靠替换它念人话。"""
-        for key, spec in shopcfg.CARD_METRICS.items():
-            if spec[2] and key.startswith("weapon_"):
-                self.assertIn("某武器", spec[0], key)
+    def test_only_the_counters_that_really_exist_can_be_split_by_weapon(self):
+        """★★ 「能按武器细分」那一列的**判据是计数器本身**，不是表里怎么写的。
+
+        `RoomQuest.weapon_stat()` 只记 shots / kills / damage 三样
+        （`rpExplode` 里没有武器 id，命中归不到枪上）。第一稿把 `hits` /
+        `splash_hits` / `accuracy` 也标成能分武器，可 `hits@族号` **从来
+        没被写过** —— 那几条规则配得出来、取到的永远是 0、永远不发卡、
+        也不报错。这条用例就是不让它飘回来。
+        """
+        import gameserver
+        counters = set(gameserver.RoomQuest().weapon_stat(0, 110001))
+        splittable = {key for key in shopcfg.CARD_METRICS
+                      if shopcfg.card_metric_needs_weapon(key)}
+        self.assertEqual(counters, splittable)
+
+    def test_the_retired_metrics_are_really_gone_and_say_what_to_use(self):
+        """砍掉的 6 条不许还留在表里，而且报错要说得出「改用什么」。"""
+        for key, advice in shopcfg.RETIRED_CARD_METRICS.items():
+            self.assertNotIn(key, shopcfg.CARD_METRICS, key)
+            self.assertTrue(advice.strip(), key)
+
+    def test_a_retired_metric_is_refused_with_an_explanation(self):
+        with self.assertRaises(shopcfg.ConfigError) as caught:
+            shopcfg.validate_cards(
+                {"rules": [rule(60001, cond("perfect_win"))]})
+        self.assertIn("死亡次数", str(caught.exception))
+
+    def test_the_only_enum_metric_is_this_match_result(self):
+        """★ 「本局结果」是全表唯一的枚举指标：值只有 0 / 1，比较符固定
+        「等于」，条件行画成下拉而不是数字框。"""
+        self.assertEqual(["won"], sorted(shopcfg.CARD_ENUM_METRICS))
+        values = shopcfg.card_metric_values("won")
+        self.assertEqual({0, 1}, {value for value, _name in values})
+        for _value, name in values:
+            self.assertTrue(name.strip())
+        self.assertEqual((), shopcfg.card_metric_values("kills"))
+
+    def test_the_match_result_and_the_win_count_share_one_counter(self):
+        """★★ 「本局结果」和「胜利 / 通关次数」读的是**同一格** `win`
+        —— 存档里不会因为多一个指标就多一个计数器。"""
+        self.assertEqual("win", shopcfg.card_metric_stat("won"))
+        self.assertEqual("win", cards.stat_key("won"))
+        self.assertEqual("kills", shopcfg.card_metric_stat("kills"))
+        self.assertEqual((shopcfg.CARD_SCOPE_MATCH,),
+                         shopcfg.card_metric_scopes("won"))
+        self.assertEqual((shopcfg.CARD_SCOPE_TOTAL,),
+                         shopcfg.card_metric_scopes("win"))
 
     def test_the_weapon_cards_are_the_nine_weapon_families(self):
         import weapondata
@@ -95,13 +143,30 @@ class StatKeyTests(unittest.TestCase):
         self.assertEqual(3, cards.stat_of(stats, "pvp", "kills"))
         self.assertEqual(7, cards.stat_of(stats, None, "kills"))
 
-    def test_accuracy_is_computed_not_stored(self):
-        """★ 比率不许存：两局 50% 和 100% 加起来会变成 150%。"""
+    def test_only_the_ratio_metrics_are_derived(self):
+        """★ 除了比率，取值就是「取一格」——「哪些是派生的」只有一处说法。
+
+        多一个派生指标就多一支特判（`stat_of` + `_match_value` 两处），
+        所以这一条钉着：`CARD_RATIO_METRICS` 之外的每一个都必须是原始计数。
+        """
+        stats = {"pvp": {"shots": 40, "hits": 10}}
+        for metric in shopcfg.CARD_METRICS:
+            if shopcfg.card_metric_is_ratio(metric):
+                continue
+            got = cards.stat_of(stats, "pvp", metric)
+            self.assertEqual(stats["pvp"].get(metric, 0), got, metric)
+
+    def test_a_ratio_is_computed_from_the_two_stored_parts(self):
+        """★★ **比率绝不许存**：两局 50% 和 100% 加起来会变成 150%。
+        累计里只有 `hits` / `shots`，比率是读的时候才除的。"""
         stats = {"pvp": {"shots": 40, "hits": 10}}
         self.assertEqual(25, cards.stat_of(stats, "pvp", "accuracy"))
-
-    def test_accuracy_with_no_shots_is_zero_not_a_crash(self):
-        self.assertEqual(0, cards.stat_of({}, "pvp", "accuracy"))
+        self.assertEqual(0, cards.stat_of({}, "pvp", "accuracy"),
+                         "一枪没开也不许除零")
+        merged = cards.merge_stats(stats, "pvp", {"shots": 40, "hits": 30})
+        self.assertNotIn("accuracy", merged["pvp"])
+        self.assertEqual(50, cards.stat_of(merged, "pvp", "accuracy"),
+                         "40/10 + 40/30 = 80/40 = 50%，不是 25+75")
 
     def test_merge_only_keeps_non_zero(self):
         merged = cards.merge_stats({"pvp": {"kills": 2, "deaths": 0}},
@@ -115,133 +180,370 @@ class StatKeyTests(unittest.TestCase):
 
 
 class MatchScopeTests(unittest.TestCase):
-    """「一局内」：达标就给，一局一次机会。"""
+    """「一局内」：达标就给，一局一次机会，固定一张。"""
 
-    def test_reaching_the_threshold_gives_the_cards(self):
-        give, _t, _w = grants([rule(60001, metric="guards", threshold=30,
-                                    count=2)],
+    def test_reaching_the_threshold_gives_the_card(self):
+        give, _b, _w = grants([rule(60001, cond("guards", threshold=30))],
                               match={"guards": 30})
-        self.assertEqual({60001: 2}, give)
+        self.assertEqual({60001: shopcfg.CARD_GRANT_COUNT}, give)
 
     def test_one_short_gives_nothing(self):
-        give, _t, _w = grants([rule(60001, metric="guards", threshold=30)],
+        give, _b, _w = grants([rule(60001, cond("guards", threshold=30))],
                               match={"guards": 29})
         self.assertEqual({}, give)
 
     def test_a_rule_that_is_switched_off_never_fires(self):
         """★ 这是运营的急刹车：17 张全关掉 = 整个功能停掉，不用重启不用发版。"""
-        give, _t, _w = grants([rule(60001, listed=False, threshold=1)],
+        give, _b, _w = grants([rule(60001, listed=False)],
                               match={"kills": 99})
         self.assertEqual({}, give)
 
     def test_the_wrong_mode_never_fires(self):
-        give, _t, _w = grants([rule(60001, mode="quest")], mode="pvp",
+        give, _b, _w = grants([rule(60001, mode="quest")], mode="pvp",
                               match={"kills": 9})
         self.assertEqual({}, give)
 
     def test_no_mode_means_either_mode(self):
         for mode in ("pvp", "quest"):
-            give, _t, _w = grants([rule(60001)], mode=mode,
+            give, _b, _w = grants([rule(60001)], mode=mode,
                                   match={"kills": 9})
             self.assertEqual({60001: 1}, give, mode)
 
     def test_stage_and_difficulty_narrow_it_down(self):
         only = [rule(60001, mode="quest", stage=3, difficulty=2)]
-        give, _t, _w = grants(only, mode="quest", stage=3, difficulty=2,
+        give, _b, _w = grants(only, mode="quest", stage=3, difficulty=2,
                               match={"kills": 1})
         self.assertEqual({60001: 1}, give)
-        give, _t, _w = grants(only, mode="quest", stage=3, difficulty=1,
+        give, _b, _w = grants(only, mode="quest", stage=3, difficulty=1,
                               match={"kills": 1})
         self.assertEqual({}, give)
 
-    def test_win_only_needs_the_win(self):
-        only = [rule(60001, win_only=True)]
-        self.assertEqual({}, grants(only, won=False, match={"kills": 5})[0])
+    def test_the_match_result_is_just_another_condition(self):
+        """★ 旧的「必须胜利 / 通关」开关现在是一行条件（用户 2026-09-13）。
+        `match_stats` 每局写的那一格 `win` 就是它读的东西。"""
+        only = [rule(60001, cond(), WON)]
+        self.assertEqual({}, grants(only, match={"kills": 5})[0])
         self.assertEqual({60001: 1},
-                         grants(only, won=True, match={"kills": 5})[0])
+                         grants(only, match={"kills": 5, "win": 1})[0])
+        # 反过来也配得出来：「输了才给」。
+        lost = [rule(60001, cond(), cond("won", shopcfg.CARD_OP_EQ, 0,
+                                        join=shopcfg.CARD_JOIN_AND))]
+        self.assertEqual({60001: 1}, grants(lost, match={"kills": 5})[0])
+        self.assertEqual({}, grants(lost, match={"kills": 5, "win": 1})[0])
 
-    def test_min_shots_is_the_sample_floor_for_ratios(self):
-        """开一枪中一枪也是 100% —— 「最少开枪数」就是拦这个的。"""
-        only = [rule(60003, metric="accuracy", threshold=60, min_shots=20)]
-        self.assertEqual({}, grants(only, match={"shots": 1, "hits": 1})[0])
-        self.assertEqual({60003: 1},
-                         grants(only, match={"shots": 20, "hits": 15})[0])
-
-    def test_a_weapon_metric_reads_the_weapon_specific_counter(self):
-        only = [rule(110001, metric="weapon_kills", weapon=110001,
-                     threshold=5)]
-        self.assertEqual({}, grants(only, match={"weapon_kills": 9})[0])
+    def test_the_weapon_dimension_reads_the_weapon_specific_counter(self):
+        """「武器」是条件上的维度：指标还是「击杀数」，只是换个统计键。"""
+        only = [rule(110001, cond("kills", weapon=110001, threshold=5))]
+        self.assertEqual({}, grants(only, match={"kills": 9})[0])
         self.assertEqual({110001: 1},
-                         grants(only, match={"weapon_kills@110001": 5})[0])
+                         grants(only, match={"kills@110001": 5})[0])
 
-    def test_the_lifetime_limit_caps_a_per_match_rule(self):
-        only = [rule(60001, limit=3)]
-        self.assertEqual({60001: 1},
-                         grants(only, match={"kills": 1}, granted={"60001": 2})[0])
-        self.assertEqual({}, grants(only, match={"kills": 1},
-                                    granted={"60001": 3})[0])
+    def test_the_three_comparisons_each_cut_a_different_way(self):
+        """三个方向各走两遍 —— 同一个指标、同一个阈值 3，结果两两不同。"""
+        cases = (("ge", 2, {}), ("ge", 3, {60001: 1}), ("ge", 4, {60001: 1}),
+                 ("le", 2, {60001: 1}), ("le", 3, {60001: 1}), ("le", 4, {}),
+                 ("eq", 2, {}), ("eq", 3, {60001: 1}), ("eq", 4, {}))
+        for op, deaths, wanted in cases:
+            only = [rule(60001, cond("deaths", op, 3))]
+            self.assertEqual(wanted, grants(only, match={"deaths": deaths})[0],
+                             "%s %d" % (op, deaths))
+
+    def test_zero_is_a_real_condition_not_a_missing_one(self):
+        """★ 「一次都没死」= `eq 0`。本局战绩里根本没有 `deaths` 这一格
+        （`match_stats` 只留非零项），取不到就是 0 —— 正好成立。"""
+        only = [rule(60001, cond("deaths", "eq", 0))]
+        self.assertEqual({60001: 1}, grants(only, match={"kills": 3})[0])
+        self.assertEqual({}, grants(only, match={"deaths": 1})[0])
+
+    def test_the_old_flag_metrics_are_reproduced_by_the_new_pieces(self):
+        """★★ 拆开之后要和旧的**一模一样**。
+
+        旧 `perfect_win` = 赢了且零死亡、旧 `carried` = 赢了且零击杀。
+        「赢了」那一半现在是一条 `won eq 1` 的条件 —— 漏了就变成
+        「输了没死也给」，这条用例正是钉着那一半。
+        """
+        perfect = [rule(60001, cond("deaths", "eq", 0), WON)]
+        self.assertEqual({60001: 1}, grants(perfect, match={"win": 1})[0])
+        self.assertEqual({}, grants(perfect, match={})[0])
+        self.assertEqual({}, grants(perfect, match={"win": 1, "deaths": 1})[0])
+        carried = [rule(60005, cond("kills", "eq", 0), WON)]
+        self.assertEqual({60005: 1}, grants(carried, match={"win": 1})[0])
+        self.assertEqual({}, grants(carried, match={"win": 1, "kills": 1})[0])
 
     def test_an_unknown_metric_is_skipped_with_a_warning(self):
-        give, _t, warnings = grants([rule(60001, metric="nonsense")],
+        give, _b, warnings = grants([rule(60001, cond("nonsense"))],
                                     match={"kills": 9})
         self.assertEqual({}, give)
         self.assertTrue(warnings)
 
+    def test_a_rule_with_no_conditions_gives_nothing_and_says_so(self):
+        """★ 一条条件都没有 = 说不出「什么时候给」⇒ 不发卡（画面上那句
+        写的正是「条件无效」）。手改进来的文件也得兜住。"""
+        give, _b, warnings = grants([{"card": 60001, "listed": True,
+                                      "conditions": []}], match={"kills": 9})
+        self.assertEqual({}, give)
+        self.assertTrue(warnings)
+
+
+class BooleanExpressionTests(unittest.TestCase):
+    """★★ 多条件 and / or —— **从上往下依次结合，没有括号**（用户拍板）。"""
+
+    def holds(self, conditions, match):
+        return grants([rule(60001, *conditions)], match=match)[0] == {60001: 1}
+
+    def test_and_needs_both(self):
+        two = [cond("kills", threshold=5),
+               cond("deaths", "eq", 0, join=shopcfg.CARD_JOIN_AND)]
+        self.assertTrue(self.holds(two, {"kills": 5}))
+        self.assertFalse(self.holds(two, {"kills": 4}))
+        self.assertFalse(self.holds(two, {"kills": 5, "deaths": 1}))
+
+    def test_or_takes_either(self):
+        two = [cond("kills", threshold=5),
+               cond("hits", threshold=30, join=shopcfg.CARD_JOIN_OR)]
+        self.assertTrue(self.holds(two, {"kills": 5}))
+        self.assertTrue(self.holds(two, {"hits": 30}))
+        self.assertFalse(self.holds(two, {"kills": 4, "hits": 29}))
+
+    def test_it_folds_left_to_right_not_and_before_or(self):
+        """★★ `A 或者 B 并且 C` 算的是 `(A 或者 B) 并且 C`，**不是**
+        程序语言里那个「与优先于或」—— 运营不该被要求知道优先级，
+        说明文里也是照这个顺序把括号写出来的。"""
+        three = [cond("kills", threshold=5),
+                 cond("hits", threshold=30, join=shopcfg.CARD_JOIN_OR),
+                 cond("guards", threshold=3, join=shopcfg.CARD_JOIN_AND)]
+        # 「与优先于或」的话 A 单独成立就够了；依次结合要求 C 也成立。
+        self.assertFalse(self.holds(three, {"kills": 99}))
+        self.assertTrue(self.holds(three, {"kills": 99, "guards": 3}))
+        self.assertTrue(self.holds(three, {"hits": 30, "guards": 3}))
+
+    def test_the_sentence_puts_the_brackets_where_the_judge_does(self):
+        """说明文和判定是**同一个结合顺序** —— 这两处对不上的话，
+        页面上写的和真发卡的规则就是两回事。"""
+        text = shopcfg.describe_card_rule(rule(
+            60001,
+            cond("kills", threshold=5),
+            cond("hits", threshold=30, join=shopcfg.CARD_JOIN_OR),
+            cond("guards", threshold=3, join=shopcfg.CARD_JOIN_AND)))
+        opened = shopcfg.CARD_PHRASES["open"]
+        closed = shopcfg.CARD_PHRASES["close"]
+        self.assertIn(opened, text)
+        # 括号扣在前两条上：`（A 或者 B）并且 C`
+        self.assertLess(text.index(closed),
+                        text.index(shopcfg.CARD_JOIN_ZH[shopcfg.CARD_JOIN_AND]))
+
+    def test_one_kind_of_joiner_needs_no_brackets(self):
+        """只有一种连接词时不画括号 —— 那时候括号纯是噪音。"""
+        text = shopcfg.describe_card_rule(rule(
+            60001, cond("kills", threshold=5),
+            cond("hits", threshold=30, join=shopcfg.CARD_JOIN_AND),
+            cond("guards", threshold=3, join=shopcfg.CARD_JOIN_AND)))
+        self.assertNotIn(shopcfg.CARD_PHRASES["open"], text)
+
 
 class TotalScopeTests(unittest.TestCase):
-    """「玩家累计」：里程碑，每满一个阈值给一次（用户 2026-09-13 拍板）。"""
+    """「玩家累计」：攒够就发一张、**计数器同时归零、重新一轮**
+    （用户 2026-09-13 第三轮拍板）。"""
 
-    def milestone(self, threshold=100, count=1, limit=0):
-        return [rule(60001, scope=shopcfg.CARD_SCOPE_TOTAL, mode="pvp",
-                     metric="kills", threshold=threshold, count=count,
-                     limit=limit)]
+    def every(self, threshold=100, **kw):
+        return [rule(60001, cond("kills", threshold=threshold,
+                                 scope=shopcfg.CARD_SCOPE_TOTAL), **kw)]
 
-    def test_crossing_a_milestone_pays_the_difference(self):
-        give, targets, _w = grants(self.milestone(), total={"pvp": {"kills": 250}},
-                                   granted={})
-        self.assertEqual({60001: 2}, give)
-        self.assertEqual({60001: 2}, targets)
-
-    def test_it_is_idempotent(self):
-        """★ 同一份统计再算一遍发 0 张 —— 这是整个设计的地基。"""
-        give, targets, _w = grants(self.milestone(),
-                                   total={"pvp": {"kills": 250}},
-                                   granted={"60001": 2})
+    def test_not_enough_yet_gives_nothing(self):
+        give, bases, _w = grants(self.every(), total={"pvp": {"kills": 99}})
         self.assertEqual({}, give)
-        self.assertEqual({60001: 2}, targets)
+        self.assertEqual({}, bases, "没发卡就不该动计数器")
 
-    def test_raising_the_threshold_never_takes_cards_back(self):
-        """运营把 100 调成 1000：不再发新的，**也不回收已经发出去的**。
+    def test_reaching_it_gives_one_card_and_resets_the_counter(self):
+        give, bases, _w = grants(self.every(), total={"pvp": {"kills": 250}})
+        self.assertEqual({60001: 1}, give)
+        self.assertEqual({60001: {"kills": 250}}, bases,
+                         "基准要挪到**当前值**，下一轮从这儿重新攒")
 
-        收回去等于抢玩家手里的东西 —— 而且他可能已经合成掉了。
+    def test_the_next_round_starts_from_zero(self):
+        """★★ 归零之后进度是 0 ⇒ 再攒满 100 才有下一张。"""
+        only = self.every()
+        self.assertEqual({}, grants(only, total={"pvp": {"kills": 349}},
+                                    bases={"60001": {"kills": 250}})[0])
+        self.assertEqual({60001: 1},
+                         grants(only, total={"pvp": {"kills": 350}},
+                                bases={"60001": {"kills": 250}})[0])
+
+    def test_one_settlement_pays_at_most_one_card(self):
+        """★★ 这是「归零」自带的护栏：运营把阈值从 1000 调成 1，
+        也**不会**在一局里刷出一堆 —— 没有循环，也就不需要「上限」那一格。"""
+        give, _b, _w = grants(self.every(threshold=1),
+                              total={"pvp": {"kills": 9999}})
+        self.assertEqual({60001: 1}, give)
+
+    def test_two_counters_must_both_fill_up_and_reset_together(self):
+        """★★ 用户原话那个例子：「累计击杀每满 100 并且累计对局每满 10」
+        —— 对局满了但击杀没满就不给，两个都满才发，发完**一起归零**。"""
+        both = [rule(60001,
+                     cond("kills", threshold=100,
+                          scope=shopcfg.CARD_SCOPE_TOTAL),
+                     cond("games", threshold=10,
+                          scope=shopcfg.CARD_SCOPE_TOTAL,
+                          join=shopcfg.CARD_JOIN_AND))]
+        give, bases, _w = grants(both, total={"pvp": {"kills": 40,
+                                                      "games": 10}})
+        self.assertEqual({}, give, "对局满了、击杀没满 ⇒ 不发")
+        give, bases, _w = grants(both, total={"pvp": {"kills": 100,
+                                                      "games": 10}})
+        self.assertEqual({60001: 1}, give)
+        self.assertEqual({60001: {"kills": 100, "games": 10}}, bases,
+                         "两个计数器一起归零")
+        # 下一轮：从 100 / 10 重新攒。
+        self.assertEqual({}, grants(both, total={"pvp": {"kills": 199,
+                                                         "games": 19}},
+                                    bases={"60001": bases[60001]})[0])
+        self.assertEqual({60001: 1},
+                         grants(both, total={"pvp": {"kills": 200,
+                                                     "games": 20}},
+                                bases={"60001": bases[60001]})[0])
+
+    def test_the_baseline_is_taken_even_when_the_other_half_short_circuits(self):
+        """★ `A 或者 B`：`A` 成立时 `B` 也要收进基准 —— 不收的话那个
+        计数器会一直攒下去，永远清不掉。"""
+        either = [rule(60001,
+                       cond("kills", threshold=1,
+                            scope=shopcfg.CARD_SCOPE_TOTAL),
+                       cond("games", threshold=999,
+                            scope=shopcfg.CARD_SCOPE_TOTAL,
+                            join=shopcfg.CARD_JOIN_OR))]
+        give, bases, _w = grants(either, total={"pvp": {"kills": 5,
+                                                        "games": 3}})
+        self.assertEqual({60001: 1}, give)
+        self.assertEqual({"kills": 5, "games": 3}, bases[60001])
+
+    def test_two_cards_sharing_a_condition_count_separately(self):
+        """★★ **两张卡片各攒各的**（用户 2026-09-13 追加）。
+
+        卡片1 = 条件 a 并且 b、卡片2 = 条件 a 并且 c：卡片1 达成之后把
+        a 清零了，**卡片2 的 a 不能跟着被清掉** —— 不然一张卡的达成会把
+        另一张卡的进度偷走，而且谁也看不出来。
+
+        ⇒ 判据：基准是**按卡片存的**（`{卡片: {统计键: 值}}`），不是
+        按统计键存一份全局的。`account_store.card_bases` 那一格的形状
+        就是为这件事定的。
         """
-        give, targets, _w = grants(self.milestone(threshold=1000),
-                                   total={"pvp": {"kills": 250}},
-                                   granted={"60001": 2})
+        shared = cond("kills", threshold=100, scope=shopcfg.CARD_SCOPE_TOTAL)
+        first = rule(60001, dict(shared),
+                     cond("games", threshold=10,
+                          scope=shopcfg.CARD_SCOPE_TOTAL,
+                          join=shopcfg.CARD_JOIN_AND))
+        second = rule(60002, dict(shared),
+                      cond("guards", threshold=999,
+                           scope=shopcfg.CARD_SCOPE_TOTAL,
+                           join=shopcfg.CARD_JOIN_AND))
+        total = {"pvp": {"kills": 100, "games": 10, "guards": 5}}
+        give, bases, _w = grants([first, second], total=total)
+        # 只有卡片1 达成 ⇒ 只有它的基准被挪走。
+        self.assertEqual({60001: 1}, give)
+        self.assertEqual({60001: {"kills": 100, "games": 10}}, bases)
+        self.assertNotIn(60002, bases, "没发的卡片不许被清零")
+        # 卡片2 接着攒：它的 a 还是从 0 起算的那 100，没被卡片1 偷走。
+        after = {"60001": bases[60001]}
+        total2 = {"pvp": {"kills": 120, "games": 12, "guards": 999}}
+        give2, bases2, _w = grants([first, second], total=total2, bases=after)
+        self.assertEqual({60002: 1}, give2,
+                         "卡片2 的击杀数进度被卡片1 清掉了")
+        self.assertEqual({60002: {"kills": 120, "guards": 999}}, bases2)
+        # 反过来卡片1 这一轮才攒了 20 / 2，离下一张还早。
+        self.assertNotIn(60001, give2)
+
+    def test_a_baseline_ahead_of_the_counter_never_goes_negative(self):
+        """运营改过「对局模式」那一格之后，累计值可能比基准小 ——
+        进度夹到 0，不许变成负数（那会让条件恒不成立或者恒成立）。"""
+        give, _b, _w = grants(self.every(threshold=1),
+                              total={"pvp": {"kills": 5}},
+                              bases={"60001": {"kills": 999}})
         self.assertEqual({}, give)
-        self.assertEqual({60001: 0}, targets)
-
-    def test_lowering_the_threshold_settles_the_backlog_next_game(self):
-        """运营把 100 调成 25：欠的账在**下一局结算**时一次还清，
-        不用扫全表、不用离线任务。"""
-        give, _t, _w = grants(self.milestone(threshold=25),
-                              total={"pvp": {"kills": 250}},
-                              granted={"60001": 2})
-        self.assertEqual({60001: 8}, give)
-
-    def test_the_lifetime_limit_caps_the_milestone(self):
-        give, targets, _w = grants(self.milestone(limit=3),
-                                   total={"pvp": {"kills": 9999}},
-                                   granted={})
-        self.assertEqual({60001: 3}, give)
-        self.assertEqual({60001: 3}, targets)
 
     def test_a_rule_without_a_mode_adds_both_modes_up(self):
-        only = [rule(60001, scope=shopcfg.CARD_SCOPE_TOTAL, metric="kills",
-                     threshold=10)]
-        give, _t, _w = grants(only, total={"pvp": {"kills": 6},
+        only = self.every(threshold=10)
+        only[0].pop("mode", None)
+        give, _b, _w = grants(only, total={"pvp": {"kills": 6},
                                            "quest": {"kills": 5}})
         self.assertEqual({60001: 1}, give)
+
+    def test_a_pure_match_rule_leaves_no_baseline_behind(self):
+        """★ 纯「一局内」的规则不该在存档里留条目 —— 存一堆空壳只会让
+        以后翻存档的人以为那条规则带累计条件。"""
+        give, bases, _w = grants([rule(60001)], match={"kills": 5})
+        self.assertEqual({60001: 1}, give)
+        self.assertEqual({}, bases)
+
+
+class CardProgressTests(unittest.TestCase):
+    """「离下一次拿到还差多少」（用户 2026-09-13 第四轮）。
+
+    ★ 管理页两处弹窗画的就是这一份 —— **同一个出处**，两处长一个样。
+    """
+
+    def progress(self, rules, stats=None, bases=None, granted=None):
+        return {row["card"]: row for row in cards.card_progress(
+            rules, stats=stats or {}, bases=bases or {}, granted=granted or {})}
+
+    def test_a_match_condition_carries_no_numbers(self):
+        """★★ 一局内的条件**攒不住** ⇒ 不发 `have` / `need`：前台照这个
+        画「每局游戏内计算」，而不是一根永远停在 0 的进度条。"""
+        rows = self.progress([rule(60001, cond("kills", threshold=5))])
+        one = rows[60001]["conditions"][0]
+        self.assertEqual(shopcfg.CARD_SCOPE_MATCH, one["scope"])
+        self.assertNotIn("have", one)
+        self.assertNotIn("need", one)
+        self.assertTrue(one["text"])
+
+    def test_a_total_condition_counts_this_round_not_the_lifetime(self):
+        """★★ `have` 是**这一轮**攒的（累计 − 基准）。写成账号总数的话，
+        一个拿过五张的人永远看着「已经超了」，而他其实刚归零。"""
+        only = [rule(60001, cond("kills", threshold=100,
+                                 scope=shopcfg.CARD_SCOPE_TOTAL))]
+        rows = self.progress(only, stats={"pvp": {"kills": 143}})
+        self.assertEqual({"have": 143, "need": 100}, {
+            k: v for k, v in rows[60001]["conditions"][0].items()
+            if k in ("have", "need")})
+        rows = self.progress(only, stats={"pvp": {"kills": 143}},
+                             bases={"60001": {"kills": 100}})
+        self.assertEqual(43, rows[60001]["conditions"][0]["have"])
+
+    def test_a_baseline_ahead_of_the_counter_shows_zero_not_a_minus(self):
+        rows = self.progress(
+            [rule(60001, cond("kills", threshold=10,
+                              scope=shopcfg.CARD_SCOPE_TOTAL))],
+            stats={"pvp": {"kills": 3}}, bases={"60001": {"kills": 99}})
+        self.assertEqual(0, rows[60001]["conditions"][0]["have"])
+
+    def test_the_weapon_dimension_reads_its_own_counter(self):
+        rows = self.progress(
+            [rule(110001, cond("kills", threshold=50, weapon=110001,
+                               scope=shopcfg.CARD_SCOPE_TOTAL))],
+            stats={"pvp": {"kills": 900, "kills@110001": 61}})
+        self.assertEqual(61, rows[110001]["conditions"][0]["have"])
+
+    def test_both_kinds_of_condition_come_back_together(self):
+        """★ 一张卡片混着两档条件时**两种都发** —— 弹窗那两个筛选是
+        「含…条件」，选中哪一档都要把整张卡片的条件画全（用户点名的）。"""
+        rows = self.progress([rule(
+            60004, cond("guards", threshold=30),
+            cond("kills", threshold=100, scope=shopcfg.CARD_SCOPE_TOTAL,
+                 join=shopcfg.CARD_JOIN_AND))], stats={"pvp": {"kills": 40}})
+        scopes = [c["scope"] for c in rows[60004]["conditions"]]
+        self.assertEqual([shopcfg.CARD_SCOPE_MATCH,
+                          shopcfg.CARD_SCOPE_TOTAL], scopes)
+
+    def test_a_switched_off_card_still_shows_up_and_says_so(self):
+        """★ 关着的卡片照样列出来 —— 从名单上消失的话，运营和玩家都会以为
+        这张卡不存在（同掉落页那一行「只淡不隐」）。"""
+        rows = self.progress([rule(60001, listed=False)])
+        self.assertFalse(rows[60001]["listed"])
+        self.assertEqual(shopcfg.CARD_PHRASES["off"], rows[60001]["text"])
+
+    def test_it_says_how_many_were_already_earned(self):
+        rows = self.progress([rule(60001)], granted={"60001": 4})
+        self.assertEqual(4, rows[60001]["granted"])
+        self.assertEqual(0, self.progress([rule(60002)])[60002]["granted"])
 
 
 class MatchStatsTests(unittest.TestCase):
@@ -251,35 +553,46 @@ class MatchStatsTests(unittest.TestCase):
         import gameserver
         return gameserver.RoomQuest()
 
-    def test_a_clean_sweep_sets_both_flags(self):
+    def test_winning_is_still_counted_even_though_you_cannot_pick_it_per_match(self):
+        """★ `win` / `games` 在「一局内」那一档**选不到**（指标表标着只有
+        累计才有意义），但**每局照样要写** —— 累计值就是从每局这一笔加出来的。
+        """
         quest = self.quest()
         stats = cards.match_stats(quest, 0, won=True, quest_mode=False,
                                   score=0)
         self.assertEqual(1, stats["win"])
-        self.assertEqual(1, stats["perfect_win"])
-        self.assertEqual(1, stats["carried"], "一个都没杀却赢了")
         self.assertEqual(1, stats["games"])
+        for key in ("win", "games"):
+            self.assertEqual((shopcfg.CARD_SCOPE_TOTAL,),
+                             shopcfg.card_metric_scopes(key), key)
 
-    def test_a_death_clears_the_perfect_flag(self):
-        quest = self.quest()
-        quest.deaths[0] = 1
-        stats = cards.match_stats(quest, 0, won=True, quest_mode=False,
-                                  score=0)
-        self.assertEqual(0, stats.get("perfect_win", 0))
-
-    def test_a_kill_clears_the_carried_flag(self):
-        quest = self.quest()
-        quest.enemy_kills[0] = 1
-        stats = cards.match_stats(quest, 0, won=True, quest_mode=False,
-                                  score=1)
-        self.assertEqual(0, stats.get("carried", 0))
-
-    def test_losing_clears_all_three(self):
+    def test_losing_clears_the_win_counter_but_still_counts_the_game(self):
         quest = self.quest()
         stats = cards.match_stats(quest, 0, won=False, quest_mode=False,
                                   score=0)
-        for key in ("win", "perfect_win", "carried"):
-            self.assertEqual(0, stats.get(key, 0), key)
+        self.assertEqual(0, stats.get("win", 0))
+        self.assertEqual(1, stats["games"])
+
+    def test_kills_is_players_plus_monsters_and_mob_kills_is_not_written_twice(self):
+        """★★ `kills` 是杀人 + 杀怪的和。⚠ **不许再单独写一份 `mob_kills`**
+        —— 那一格已经加进去了，两边都写以后谁给 `kills` 加一次读时求和
+        就会重复计数。"""
+        quest = self.quest()
+        quest.enemy_kills[0] = 2
+        quest.mob_kills[0] = 5
+        stats = cards.match_stats(quest, 0, won=True, quest_mode=True, score=0)
+        self.assertEqual(7, stats["kills"])
+        self.assertNotIn("mob_kills", stats)
+
+    def test_a_quest_clear_with_no_kills_is_not_a_zero_kill_win(self):
+        """★ 闯关杀怪也算 `kills` ⇒ 「击杀数为 0 + 只有通关」在闯关里
+        不再对任何一次通关都成立（旧的 `carried` 就是栽在这上面，只能
+        限定成对战专用）。"""
+        quest = self.quest()
+        quest.mob_kills[0] = 3
+        only = [rule(60005, cond("kills", "eq", 0), WON)]
+        stats = cards.match_stats(quest, 0, won=True, quest_mode=True, score=0)
+        self.assertEqual({}, grants(only, mode="quest", match=stats)[0])
 
     def test_the_weapon_counters_fold_into_keys(self):
         quest = self.quest()
@@ -288,7 +601,8 @@ class MatchStatsTests(unittest.TestCase):
         quest.weapon_stat(1, 110002)["kills"] = 9      # 别人的，不许串
         stats = cards.match_stats(quest, 0, won=False, quest_mode=False,
                                   score=0)
-        self.assertEqual(4, stats["weapon_kills@110002"])
+        # ★ 武器维度的键**和主指标同名** —— 武器只是一个筛选维度。
+        self.assertEqual(4, stats["kills@110002"])
         self.assertEqual(30, stats["shots@110002"])
 
     def test_zero_values_are_dropped(self):
@@ -299,6 +613,138 @@ class MatchStatsTests(unittest.TestCase):
         self.assertNotIn("kills", stats)
         self.assertNotIn("deaths", stats)
         self.assertEqual(1, stats["games"], "场次恒为 1，这一格必须在")
+
+
+class ComparisonGuardrailTests(unittest.TestCase):
+    """★★ 比较符的四道护栏 —— 这一组是**推翻 D100 的全部底气**。
+
+    D100 当初不做「≤」，怕的是「阈值填 0 时恒成立、每局白送一张卡、
+    而且页面上看着完全正常」。现在换成结构性护栏：配得出来的组合里
+    **不存在**恒成立那一档。少一条这一组就不成立。
+    """
+
+    def refuse(self, *conditions):
+        with self.assertRaises(shopcfg.ConfigError) as caught:
+            shopcfg.validate_cards({"rules": [rule(60001, *conditions)]})
+        return str(caught.exception)
+
+    def accept(self, *conditions):
+        kept = shopcfg.validate_cards({"rules": [rule(60001, *conditions)]})
+        return kept[0]["conditions"]
+
+    def test_reaching_zero_is_refused_because_it_always_holds(self):
+        """「大于等于 0」对任何一局都成立 ⇒ 每局白送一张，而且没人看得出为什么。"""
+        self.refuse(cond("deaths", "ge", 0))
+
+    def test_at_most_zero_and_exactly_zero_are_allowed(self):
+        """反过来，「小于等于 0」「等于 0」要的**正是** 0（「一次都没死」）。"""
+        for op in ("le", "eq"):
+            self.assertEqual(
+                0, self.accept(cond("deaths", op, 0))[0]["threshold"], op)
+
+    def test_the_milestone_scope_only_takes_the_reaching_comparison(self):
+        """累计条件念的是「每满 N」：刚归零那一刻累计值是 0，
+        「小于等于 3」对每一个人都成立 ⇒ 照「对战没有关卡和难度」的先例
+        **报错**，不静默吞掉也不静默改写。"""
+        said = self.refuse(cond("games", "le", 5,
+                                scope=shopcfg.CARD_SCOPE_TOTAL))
+        self.assertIn(shopcfg.CARD_EVERY_ZH, said)
+        kept = self.accept(cond("games", "ge", 5,
+                                scope=shopcfg.CARD_SCOPE_TOTAL))
+        self.assertEqual(shopcfg.CARD_OP_GE, kept[0]["op"])
+
+    def test_a_weapon_dimension_only_takes_the_reaching_comparison(self):
+        """★★ 取不到的统计键返回 0 ⇒「只算左轮打出的击杀数为 0」对
+        **每一个没拿过左轮的人**都成立，而那是绝大多数人。
+        0 在武器维度下是常态不是例外，所以这条必须拦死。"""
+        for op in ("le", "eq"):
+            said = self.refuse(cond("kills", op, 0, weapon=110001))
+            self.assertIn("没用过", said, op)
+        self.assertEqual(110001,
+                         self.accept(cond("kills", "ge", 5,
+                                          weapon=110001))[0]["weapon"])
+
+    def test_the_judge_does_not_re_floor_the_threshold(self):
+        """★★ 判定层**不许**自己再夹一次 `max(1, …)` —— 夹了的话
+        「死亡次数正好等于 0」会被悄悄提成「正好等于 1」（「死一次才给」），
+        而页面上、日志里都看不出来。"""
+        only = [rule(60001, cond("deaths", "eq", 0))]
+        self.assertEqual({60001: 1}, grants(only, match={})[0])
+        self.assertEqual({}, grants(only, match={"deaths": 1})[0])
+
+    def test_an_unknown_comparison_is_refused(self):
+        self.refuse(cond("deaths", "lt", 1))
+
+    def test_an_enum_metric_only_takes_equals_and_its_own_two_values(self):
+        """★ 「本局结果」只有胜 / 负两档，「大于等于 1」这种说法对它没意义。"""
+        self.refuse(cond("won", "ge", 1))
+        self.refuse(cond("won", "eq", 7))
+        self.assertEqual(1, self.accept(cond("won", "eq", 1))[0]["threshold"])
+
+    def test_the_first_condition_must_not_carry_a_joiner(self):
+        """第一条前面没有「上一条」⇒ 写了连接词是画面上一个改了也没用的格子。"""
+        self.refuse(cond("kills", join=shopcfg.CARD_JOIN_AND))
+        # 第二条缺省就是「并且」，补出来。
+        kept = self.accept(cond("kills"), cond("deaths", "eq", 0))
+        self.assertNotIn("join", kept[0])
+        self.assertEqual(shopcfg.CARD_JOIN_AND, kept[1]["join"])
+
+    def test_a_rule_needs_at_least_one_condition(self):
+        with self.assertRaises(shopcfg.ConfigError):
+            shopcfg.validate_cards(
+                {"rules": [{"card": 60001, "listed": True, "conditions": []}]})
+
+    def test_too_many_conditions_are_refused(self):
+        many = [cond("kills", join=shopcfg.CARD_JOIN_AND)
+                for _ in range(shopcfg.MAX_CARD_CONDITIONS + 1)]
+        many[0] = cond("kills")
+        self.refuse(*many)
+
+    def test_a_ratio_metric_must_carry_a_sample_floor(self):
+        """★★ 这是「命中率」这个指标唯一的意义所在：开一枪中一枪也是 100%，
+        不卡样本的「命中率 ≥ 90」就是一张每局白送的卡。
+
+        ★ 第一稿那个专用的 `min_shots` 格子删掉了 —— 它现在就是一条普通
+        条件（用户给的例子就是这么写的），护栏也跟着变成「这串条件里有没有它」。
+        """
+        said = self.refuse(cond("accuracy", "ge", 90))
+        self.assertIn(shopcfg.CARD_METRIC_ZH[shopcfg.CARD_SAMPLE_METRIC], said)
+        kept = self.accept(cond("accuracy", "ge", 90),
+                           cond(shopcfg.CARD_SAMPLE_METRIC, "ge", 20,
+                                join=shopcfg.CARD_JOIN_AND))
+        self.assertEqual(2, len(kept))
+
+    def test_a_ratio_metric_may_not_sit_next_to_an_or(self):
+        """★ 「或者」会让开枪数下限被绕开 —— 那等于没卡。"""
+        said = self.refuse(cond("accuracy", "ge", 90),
+                           cond(shopcfg.CARD_SAMPLE_METRIC, "ge", 20,
+                                join=shopcfg.CARD_JOIN_AND),
+                           cond("kills", "ge", 1,
+                                join=shopcfg.CARD_JOIN_OR))
+        self.assertIn(shopcfg.CARD_JOIN_ZH[shopcfg.CARD_JOIN_OR], said)
+
+    def test_the_sample_floor_looks_at_this_match_not_the_lifetime(self):
+        only = [rule(60003, cond("accuracy", "ge", 60),
+                     cond("shots", "ge", 20, join=shopcfg.CARD_JOIN_AND))]
+        self.assertEqual({}, grants(only, match={"shots": 1, "hits": 1})[0],
+                         "开一枪中一枪也是 100%，但样本不够")
+        self.assertEqual({60003: 1},
+                         grants(only, match={"shots": 20, "hits": 15})[0])
+
+    def test_a_ratio_metric_is_refused_in_the_milestone_scope(self):
+        """「玩家累计命中率每满 60」这句话本身就不通（而且比率不能累加）。"""
+        self.refuse(cond("accuracy", "ge", 60,
+                         scope=shopcfg.CARD_SCOPE_TOTAL))
+
+    def test_a_metric_that_only_makes_sense_in_totals_is_refused_per_match(self):
+        """「打完一局 = 1」在一局内只配得出「每局白送一张」⇒ 不给选。
+        真想要「每局都给」就明写「玩家累计对局数每满 1」，看得出来。"""
+        self.refuse(cond("games", "ge", 1))
+        self.assertEqual(1, self.accept(cond("games", "ge", 1,
+                                             scope=shopcfg.CARD_SCOPE_TOTAL)
+                                        )[0]["threshold"])
+        # 反过来：「本局结果」只有一局内那一档有。
+        self.refuse(cond("won", "eq", 1, scope=shopcfg.CARD_SCOPE_TOTAL))
 
 
 class DefaultRulesTests(unittest.TestCase):
@@ -313,28 +759,90 @@ class DefaultRulesTests(unittest.TestCase):
         self.assertEqual(set(shopcfg.ALL_CARDS), set(cards_seen))
 
     def test_every_default_rule_is_reachable(self):
-        """★ 指标只在一种模式下有意义时，规则的模式必须是那一种 ——
+        """★ 指标只在某一档统计范围下有意义时，条件的范围必须是那一档 ——
         否则那条规则配得出来却**永远命中不了**（D17a 说的正是这种档）。"""
         for entry in self.rules:
-            limited = shopcfg.card_metric_modes(entry["metric"])
-            if limited:
-                self.assertIn(entry.get("mode"), limited, entry["card"])
+            for one in entry["conditions"]:
+                limited = shopcfg.card_metric_scopes(one["metric"])
+                if limited:
+                    self.assertIn(one.get("scope"), limited, entry["card"])
+
+    def test_the_cards_schema_matches_the_validator(self):
+        """★★ `SCHEMA["cards"]` 和 `validate_cards` 产出的键**必须对得上**（D16）。
+
+        管理页照 `SCHEMA` 生成输入框：给 validator 加一个字段却忘了登记 ⇒
+        那个字段在画面上是个隐形人；登记了 validator 不产出的 ⇒ 多一个
+        存不进去的框。
+
+        ★ 出厂那 17 条锁不住这件事（它们从不产出 `stage` / `difficulty`），
+        所以这儿用**把每个可选分支都点亮的合成规则**，保持严格相等
+        —— 别改成「子集」那种宽松匹配，那就锁不住「登记了却不产出」那一半。
+        """
+        rules = shopcfg.validate_cards({"rules": [
+            dict(card=60001, listed=True,
+                 mode="quest", stage=3, difficulty=2,     # 闯关才留得住这两格
+                 conditions=[
+                     dict(scope="match", metric="kills", op="ge",
+                          threshold=1, weapon=110001),    # kills 分得到武器
+                     dict(join="and", scope="match", metric="won", op="eq",
+                          threshold=1),
+                 ]),
+        ]})
+        self.assertEqual(set(rules[0]), set(shopcfg.schema_keys("cards")))
+        # 条件的**子字段表**同一条口径：validator 产出的每个键都要登记。
+        sub = set()
+        for one in rules[0]["conditions"]:
+            sub |= set(one)
+        registered = {field["key"] for field in
+                      [f for f in shopcfg.SCHEMA["cards"]["fields"]
+                       if f["key"] == "conditions"][0]["fields"]}
+        self.assertEqual(sub, registered)
 
     def test_the_lucky_card_is_what_the_user_asked_for(self):
         """用户 2026-09-13 指定：对战每局格挡 ≥ 30 次**且获胜**才给一张。"""
         lucky = [r for r in self.rules if r["card"] == 60004][0]
         self.assertEqual("pvp", lucky["mode"])
-        self.assertEqual(shopcfg.CARD_SCOPE_MATCH, lucky["scope"])
-        self.assertEqual("guards", lucky["metric"])
-        self.assertEqual(30, lucky["threshold"])
-        self.assertTrue(lucky["win_only"])
-        self.assertEqual(1, lucky["count"])
+        first, second = lucky["conditions"]
+        self.assertEqual(shopcfg.CARD_SCOPE_MATCH, first["scope"])
+        self.assertEqual("guards", first["metric"])
+        self.assertEqual(30, first["threshold"])
+        self.assertEqual("won", second["metric"])
+        self.assertEqual(1, second["threshold"])
+        self.assertEqual(shopcfg.CARD_JOIN_AND, second["join"])
 
     def test_each_weapon_card_counts_its_own_weapon(self):
+        """★ 指标就是普通的「击杀数」，「用哪把枪」由条件里那一格回答。"""
         for roh in shopcfg.WEAPON_CARDS:
             entry = [r for r in self.rules if r["card"] == roh][0]
-            self.assertEqual("weapon_kills", entry["metric"])
-            self.assertEqual(roh, entry["weapon"], roh)
+            one = entry["conditions"][0]
+            self.assertEqual("kills", one["metric"])
+            self.assertEqual(roh, one["weapon"], roh)
+            # 按武器统计时比较符只能是「大于等于」—— 别的方向对没碰过那把枪
+            # 的人恒成立（校验器拦着，这儿钉住出厂值）。
+            self.assertEqual(shopcfg.CARD_OP_GE, one["op"], roh)
+
+    def test_the_zero_flavoured_rules_also_require_the_win(self):
+        """★ 旧的 `perfect_win` / `carried` 自带「赢了」；拆开之后那一半
+        是一条 `本局结果 = 胜利` 的条件，出厂值漏了就变成「输了没死也给」。"""
+        for card, metric in ((60001, "deaths"), (60005, "kills")):
+            entry = [r for r in self.rules if r["card"] == card][0]
+            first, second = entry["conditions"]
+            self.assertEqual(metric, first["metric"], card)
+            self.assertEqual(shopcfg.CARD_OP_EQ, first["op"], card)
+            self.assertEqual(0, first["threshold"], card)
+            self.assertEqual("won", second["metric"], card)
+            self.assertEqual(1, second["threshold"], card)
+
+    def test_the_shared_win_condition_is_not_the_same_object(self):
+        """★ 出厂表里那条「并且赢了」是三条规则共用的字面量 ——
+        `build_cards()` 必须拷一份，否则运营改一条会三条一起变。"""
+        rows = shopdefaults.build_cards()
+        winners = [one for row in rows for one in row["conditions"]
+                   if one["metric"] == "won"]
+        self.assertGreater(len(winners), 1)
+        winners[0]["threshold"] = 0
+        self.assertEqual([1] * (len(winners) - 1),
+                         [w["threshold"] for w in winners[1:]])
 
     def test_every_rule_reads_as_a_sentence(self):
         """念出来的那句话是三处共用的（管理页浮窗 / 游戏提示框 / 冲突提示）。
@@ -345,10 +853,32 @@ class DefaultRulesTests(unittest.TestCase):
         for entry in self.rules:
             line = shopcfg.describe_card_rule(entry, shopcfg.item_name(entry["card"]))
             self.assertTrue(line, entry["card"])
+            self.assertNotEqual(shopcfg.CARD_PHRASES["bad"], line,
+                                "出厂规则自己就是「条件无效」")
             self.assertNotIn(shopcfg.DESC_SEPARATOR, line, entry["card"])
             self.assertNotIn("None", line, entry["card"])
-            self.assertNotIn(entry["metric"], line,
-                             "指标的英文 key 漏进人话里了")
+            for one in entry["conditions"]:
+                self.assertNotIn(one["metric"], line,
+                                 "指标的英文 key 漏进人话里了")
+                self.assertNotIn(one["op"], line,
+                                 "比较符的英文 key 漏进人话里了")
+                if one.get("weapon"):
+                    self.assertIn(shopcfg.WEAPON_ROH_ZH[one["weapon"]], line,
+                                  "按武器统计的规则得说出是哪把枪")
+
+    def test_the_sentence_stays_short_enough_for_the_tooltip(self):
+        """★ 提示框第 1 段是 234×82 px ≈ 6 行，「获得条件：」占其中一行 ——
+        客户端**自己折行**，而行数预算只数 `\\n`，管不住一行有多宽。
+        ⇒ 这儿按字数卡一道软上限，免得武器卡那句把「可合成：」挤出预算。
+
+        ★ 提示框念的是**不带尾巴**那一版（`with_tail=False`）：它就停在那张
+        卡上弹出来、前面还写着「获得条件：」，再说一遍「获得一张卡片」
+        纯占宽度 —— 这条用例量的正是它。
+        """
+        for entry in self.rules:
+            line = shopcfg.describe_card_rule(entry, with_tail=False)
+            self.assertLessEqual(len(line), 40,
+                                 "%s 那句太长了：%s" % (entry["card"], line))
 
     def test_a_switched_off_rule_says_so(self):
         line = shopcfg.describe_card_rule({"card": 60001, "listed": False})
@@ -738,16 +1268,18 @@ class CardTooltipTests(unittest.TestCase):
 
     def test_changing_the_rule_changes_the_description(self):
         """★ 改完保存即刻生效（服务端这一侧）—— 说明是**现算**的，不是快照。"""
-        self.assertIn("达到 30", self.desc(60004))
+        self.assertIn(shopcfg.CARD_OP_ZH[shopcfg.CARD_OP_GE] + "30",
+                      self.desc(60004))
         rules = shopcfg.validate_cards(shopdefaults.default_cards())
         for entry in rules:
             if entry["card"] == 60004:
-                entry["threshold"] = 7
+                entry["conditions"][0]["threshold"] = 7
         shopcfg.write_json(
             shopcfg.path_of(shopcfg.CARDS_FILENAME, self.tmp.name),
             {"format": shopcfg.FORMAT, "rules": rules})
         shopcfg.invalidate(self.tmp.name)
-        self.assertIn("达到 7", self.desc(60004))
+        self.assertIn(shopcfg.CARD_OP_ZH[shopcfg.CARD_OP_GE] + "7",
+                      self.desc(60004))
 
     def test_the_fight_master_title_warns_that_it_never_fires(self):
         """⚠ `560002` 的加成要求格斗模式，而中国区客户端根本选不到那个模式

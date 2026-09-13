@@ -561,6 +561,9 @@ class AccountStoreTests(unittest.TestCase):
             "battle_stats": {"pvp": {"games": 4, "kills": 9,
                                      "kills@110001": 5}},
             "card_grants": {"60004": 2},
+            # 累计条件的计数器基准（V0.3商店第三轮）：`{卡片: {统计键: 值}}`。
+            # ★ **按卡片存** —— 两张卡片共用一个指标时各攒各的。
+            "card_bases": {"60004": {"guards": 30}},
         }
         self.assertEqual(sorted(changed), sorted(NEW_ACCOUNT_DEFAULTS),
                          "存档新增字段了？这条用例要跟着补")

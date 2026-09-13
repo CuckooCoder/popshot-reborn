@@ -100,6 +100,11 @@ import versioning
 #: 弹药 id 翻成**武器族号**，给称号卡片的 `weapon_*` 指标归账（V0.3商店）。
 #: `weapondata` 只依赖标准库，不会把 bot 那一摊拖进来（§14 的导入方向仍成立）。
 import weapondata
+#: ★ 角色属性（`ChrProps.ini`）。这里只用两件事：突击技那一招够得着多远
+#: （`Move.reach()`）和角色的三个碰撞圆（`circles()`）—— 「突击技命中」
+#: 那一项的走廊就是拿这两样量出来的（V0.3商店，`RoomQuest.note_dash`）。
+#: bot 的近身判定用的是同一份数据，两边不会各有一套说法。
+import chrprops
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -3845,7 +3850,10 @@ STAT_PEER_OPCODES = frozenset((PEER_OP_FIRE, PEER_OP_EXPLODE,
 #: 只解前面用得着的那几格，后面的原样不管。
 _STAT_FIRE = struct.Struct("<BBi")       # 源 / 碰撞组 / ★弹药 id
 _STAT_EXPLODE = struct.Struct("<iiffiif")  # 弹体 / ★目标 / x / y / kind / ★flags / ★伤害
-_STAT_SPLASH = struct.Struct("<iif")     # 伤害源 / ★目标 / ★伤害
+#: 伤害源 / ★目标 / ★伤害 / u8 恒 0 / 击退 XY / ★★受击点 XY（§5.4c）
+#: ★ 受击点是**突击技命中**那一项唯一的判据来源，别为了省两个 f32 砍掉它。
+_STAT_SPLASH = struct.Struct("<iifBffff")
+_STAT_DASH = struct.Struct("<BbBff")     # 座位 / ★方向 / ★第几式 / ★发起 XY（§5.4b）
 _STAT_GUARD = struct.Struct("<BB")       # 座位 / ★开关
 
 #: ★★ `rpExplode` 的 `flags`（`+20`）里「**攻击加成那一下触发了**」的位。
@@ -4147,7 +4155,13 @@ class RoomQuest:
         #: 就永远是 0 —— 那不是坏了，是他身上没有可触发的加成。
         self.crits = [0] * ROOM_SEAT_COUNT
         self.guards = [0] * ROOM_SEAT_COUNT         # 格挡次数（rpGuard 的翻转）
-        self.dashes = [0] * ROOM_SEAT_COUNT         # 突击技次数（rpDash）
+        self.dashes = [0] * ROOM_SEAT_COUNT         # 突击技**发动**次数（rpDash）
+        #: ★★ 突击技**命中**次数（用户 2026-09-13：「发动次数」空房间连点就达标，
+        #: 当成就没意义）。判据见 `note_dash()` / `note_damage_out()`。
+        self.dash_hits = [0] * ROOM_SEAT_COUNT
+        #: 每个座位**最近一次**突击技的作用走廊：
+        #: `{"x","y","facing","reach","radius","victims"}`；没发过就是 `None`。
+        self.dash_swing = [None] * ROOM_SEAT_COUNT
         self.hearts = [0] * ROOM_SEAT_COUNT         # 捡到「心」的次数
         #: ★ `rpGuard` 报的是**状态**（开 / 关）不是次数（组包点 `0x4936e6`，
         #: body 2 字节 = 座位 + 开关）⇒ 按**状态翻转**数，不按包数数
@@ -4644,7 +4658,70 @@ class RoomQuest:
         if 0 <= seat < ROOM_SEAT_COUNT:
             self.hearts[seat] += 1
 
-    def note_damage_out(self, seat, target, damage, *, splash, crit=False):
+    def note_dash(self, seat, facing, move, x, y):
+        """`rpDash` 到了：把这一次突击技的**作用走廊**记下来（V0.3商店）。
+
+        ★★ **为什么要走廊**：突击技命中那一下走的是 `rpSplashDamaged`，
+        和手雷溅射**混在同一发里**，包里唯一的区别是「伤害源句柄」——
+        而那个句柄要靠复刻客户端的弹体句柄计数器才认得出来
+        （`rpFire` 吃 `fire_step` 个、`rpExplode` 吃 `explode_step` 个、
+        `rpSetOnFire` 吃 `2×SpawnCount+1` 个、引信分裂还得模拟客户端那条
+        32 ms 时钟，§5.9）—— 漂一次后面全错。
+        ⇒ 改用**包里自带的坐标**：`rpDash` 给发起点和朝向（§5.4b），
+        `rpSplashDamaged` 给受击点（§5.4c），`ChrProps.ini` 的 `DashNN`
+        给够得着多远（`chrprops.Move.reach()`，和 bot 近身用的是同一套模型）。
+        受击点落在这条走廊里 ⇒ 算这一次突击技打中的。
+
+        ⚠ **近似在哪**：混战里手雷正好炸在你刚冲过的那一截，会被**多算**
+        一次。`victims` 那一格把它压到「一次突击技对同一个人最多算一次」——
+        原版的突击技伤害圈本来也就是一个人挨一下。
+        """
+        if not 0 <= seat < ROOM_SEAT_COUNT:
+            return
+        self.dash_swing[seat] = None
+        character = self.characters.get(seat)
+        if character is None or not chrprops.known(character):
+            # 查不到角色（没报过 `0x0413`）⇒ 这一次不判命中。
+            # ★ 宁可漏数也不拿默认尺寸顶上：走廊长度是唯一的判据，
+            #   猜一个就等于白送 —— 那比不给还难查。
+            return
+        props = chrprops.get(character)
+        swing = props.dash(move)
+        if swing is None:
+            return                              # 这个角色没有这一式
+        # 竖直范围取**这个角色自己的三个碰撞圆**（`chrprops.circles()`，
+        # 和判弹道命中用的是同一份）—— 受击点是打在身上某处，不是脚下。
+        top = min(cy - r for _cx, cy, r, _part in props.circles(x, y))
+        self.dash_swing[seat] = {
+            "x": float(x), "foot": float(y), "top": float(top),
+            # `rpDash +1` 是 −1 左 / +1 右；0 当成右（语料里没出现过 0）。
+            "facing": -1.0 if facing < 0 else 1.0,
+            "reach": swing.reach(),
+            "radius": max(1.0, swing.radius),
+            "victims": set(),
+        }
+
+    def note_dash_hit(self, seat, victim, hit):
+        """这一发溅射伤害是不是**最近一次突击技**打出来的；是就记一笔。"""
+        swing = self.dash_swing[seat] if 0 <= seat < ROOM_SEAT_COUNT else None
+        if swing is None or hit is None or victim in swing["victims"]:
+            return False
+        # 水平：从发起点朝着冲的那一侧够 `reach`，背后留一个伤害圈的余量
+        # （伤害圈是绕着角色转的，起手那几帧会扫到身后一点）。
+        along = (hit[0] - swing["x"]) * swing["facing"]
+        if not -swing["radius"] <= along <= swing["reach"]:
+            return False
+        # 竖直：从脚到头顶那一段，上下各留一个伤害圈
+        # （y 向下为正 ⇒ `top` 是最小的那个数）。
+        if not (swing["top"] - swing["radius"] <= hit[1]
+                <= swing["foot"] + swing["radius"]):
+            return False
+        swing["victims"].add(victim)
+        self.dash_hits[seat] += 1
+        return True
+
+    def note_damage_out(self, seat, target, damage, *, splash, crit=False,
+                        hit=None):
         """射手打出去的一下：记命中数、伤害、暴击（V0.3商店）。
 
         `crit` = 这一发的**攻击加成那 15% 掷点过了**（`rpExplode` 的
@@ -4668,10 +4745,14 @@ class RoomQuest:
         roh = self.last_roh[seat]
         if roh is not None:
             self.weapon_stat(seat, roh)["damage"] += int(damage)
-        if peer_target_seat(target) is None:
+        victim = peer_target_seat(target)
+        if victim is None:
             return                              # 打中的是怪 / 破坏物
         if splash:
             self.splash_hits[seat] += 1
+            # ★ 突击技命中也走这一发（和手雷溅射同一个 opcode），
+            #   靠受击点落不落在走廊里分（见 `note_dash`）。
+            self.note_dash_hit(seat, victim, hit)
         else:
             self.hits[seat] += 1
 
@@ -8701,12 +8782,12 @@ class Conn:
             before_stats = account_store.battle_stats(conn.account)
             after_stats = cards.merge_stats(before_stats, stat_mode,
                                             gained_stats)
-            give_cards, card_targets, card_warnings = cards.due_grants(
+            give_cards, card_bases, card_warnings = cards.due_grants(
                 card_rules, mode=stat_mode,
                 stage=quest_info[0] if quest_info else None,
                 difficulty=quest_info[1] if quest_info else None,
-                won=seat_won, match=gained_stats, total=after_stats,
-                granted=account_store.card_grants(conn.account))
+                match=gained_stats, total=after_stats,
+                bases=account_store.card_bases(conn.account))
             for warning in card_warnings:
                 conn.log(f"   ⚠ cards.json: {warning}")
             granted = {}
@@ -8721,7 +8802,7 @@ class Conn:
                         experience=gained_exp, money=gained_money,
                         materials=dropped, stats_mode=stat_mode,
                         stats_gained=gained_stats, cards=give_cards,
-                        card_targets=card_targets)
+                        card_bases=card_bases)
                 except KeyError:
                     skipped = []
                     conn.log(f"   存档里没有账号 {conn.account_name!r}；本局所得未入账")
@@ -9588,11 +9669,16 @@ class Conn:
         if opcode == PEER_OP_SPLASH_DAMAGED:
             if len(body) < _STAT_SPLASH.size:
                 return
-            _source, target, damage = _STAT_SPLASH.unpack_from(body, 0)
-            quest.note_damage_out(seat, target, damage, splash=True)
+            (_source, target, damage, _pad, _kx, _ky,
+             hit_x, hit_y) = _STAT_SPLASH.unpack_from(body, 0)
+            quest.note_damage_out(seat, target, damage, splash=True,
+                                  hit=(hit_x, hit_y))
             return
         if opcode == PEER_OP_DASH:
             quest.dashes[seat] += 1
+            if len(body) >= _STAT_DASH.size:
+                _seat, facing, move, x, y = _STAT_DASH.unpack_from(body, 0)
+                quest.note_dash(seat, facing, move, x, y)
             return
         # rpGuard：body 2 字节 = 座位 + 开 / 关。**按状态翻转数**（铁律 10）。
         if len(body) < _STAT_GUARD.size:
@@ -11326,9 +11412,11 @@ def _stats_line(stats):
     bits = []
     for key in sorted(stats):
         name, _weapon, roh = key.partition(cards.WEAPON_SEP)
-        label = shopcfg.CARD_METRIC_ZH.get(name, name)
-        if roh:
-            label = label.replace("某武器", shopcfg.weapon_roh_label(int(roh)))
+        # ★ 武器名走 `card_metric_label()`，**别在这儿自己拼** —— 它和
+        #   `describe_card_rule` 是同一个出处。第一稿是把指标名里写死的
+        #   「某武器」三个字替换掉，指标一改名那套替换就默默失效，
+        #   `kills` 和 `kills@110001` 会打成两行一模一样的「击杀数 N」。
+        label = shopcfg.card_metric_label(name, int(roh) if roh else None)
         bits.append("%s %s" % (label, stats[key]))
     return " ".join(bits)
 

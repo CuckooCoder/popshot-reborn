@@ -127,12 +127,14 @@ class FakeAccounts:
 
     def apply_battle(self, username, *, experience=0, money=0, materials=None,
                      stats_mode=None, stats_gained=None, cards=None,
-                     card_targets=None):
+                     card_bases=None):
         """打完一局的全部所得（V0.3商店）。★ 真的加进去，理由同上。
 
         形状和 `AccountStore.apply_battle` 一样：
-        `(账号, 被跳过的 id, 实际发出的卡片)`。累计档那个「目标 − 已发」的
-        减法也照做一遍 —— `test_battle` 里跨局的用例验的正是它。
+        `(账号, 被跳过的 id, 实际发出的卡片)`。累计条件那个「计数器归零」
+        也照做一遍 —— `test_battle` 里跨局的用例验的正是它。
+        ★ 基准是**按卡片**存的（`{卡片: {统计键: 值}}`），两张卡片共用一个
+        指标时各攒各的。
         """
         import cards as cards_module
         account = self.saved[username]
@@ -141,14 +143,16 @@ class FakeAccounts:
             account["battle_stats"] = cards_module.merge_stats(
                 account.get("battle_stats") or {}, stats_mode, stats_gained)
         grants = dict(account.get("card_grants") or {})
+        bases = dict((str(k), dict(v))
+                     for k, v in (account.get("card_bases") or {}).items())
         give = dict((int(k), int(v)) for k, v in (cards or {}).items()
                     if int(v) > 0)
-        for card, target in (card_targets or {}).items():
-            short = max(0, int(target) - int(grants.get(str(card), 0)))
-            if short:
-                give[int(card)] = short
-            else:
-                give.pop(int(card), None)
+        for card in give:
+            fresh = (card_bases or {}).get(card)
+            if fresh:
+                bases[str(card)] = dict((str(s), int(v))
+                                        for s, v in fresh.items())
+        account["card_bases"] = bases
         if materials or give:
             merged = dict(materials or {})
             for card, count in give.items():
@@ -1954,12 +1958,14 @@ class CardRewardSettlementTests(BattleRoom):
         shopcfg.DATA_DIR = self.tmp.name
         self.addCleanup(shopcfg.invalidate)
         self.addCleanup(setattr, shopcfg, "DATA_DIR", saved_dir)
-        self.write_rules([
-            {"card": self.CARD, "listed": True, "scope": "match",
-             "mode": "pvp", "metric": "guards", "threshold": 3,
-             "win_only": False, "count": 1, "limit": 0},
-        ])
+        self.write_rules([self.rule()])
         super().setUp()
+
+    def rule(self, *, listed=True, scope="match", threshold=3):
+        """一条「对战 · 格挡 N 次」的规则（新形状：条件是一串）。"""
+        return {"card": self.CARD, "listed": listed, "mode": "pvp",
+                "conditions": [{"scope": scope, "metric": "guards",
+                                "op": "ge", "threshold": threshold}]}
 
     def write_rules(self, rules):
         import shopcfg
@@ -2018,11 +2024,7 @@ class CardRewardSettlementTests(BattleRoom):
 
     def test_a_rule_that_is_switched_off_ships_nothing(self):
         """★ 运营的急刹车：关掉「能获得」，**不用重启**下一局就停。"""
-        self.write_rules([
-            {"card": self.CARD, "listed": False, "scope": "match",
-             "mode": "pvp", "metric": "guards", "threshold": 3,
-             "win_only": False, "count": 1, "limit": 0},
-        ])
+        self.write_rules([self.rule(listed=False)])
         self.guard(0, 9)
         self.end()
         self.assertEqual([], self.rewards(self.alice))
@@ -2037,34 +2039,50 @@ class CardRewardSettlementTests(BattleRoom):
         self.assertEqual({str(self.CARD): 1},
                          self.accounts.saved["alice"]["materials"])
 
-    def test_a_total_scope_rule_pays_only_when_it_crosses_the_line(self):
-        """累计档（里程碑）：不到线不发，跨线那一局发一张，再打一局不重发。"""
-        self.write_rules([
-            {"card": self.CARD, "listed": True, "scope": "total",
-             "mode": "pvp", "metric": "guards", "threshold": 5,
-             "win_only": False, "count": 1, "limit": 0},
-        ])
+    def test_a_total_scope_rule_resets_its_counter_after_paying(self):
+        """累计档：攒够发一张、**计数器当场归零**，下一轮从头再攒。
+
+        ★★ 这是端到端那一遍 —— 判定在 `cards.py`、归零落盘在
+        `account_store.apply_battle`，中间隔着结算那一整条链。
+        """
+        self.write_rules([self.rule(scope="total", threshold=5)])
         self.guard(0, 3)
         self.end()
         self.assertEqual([], self.rewards(self.alice), "3 < 5，这一局不该发")
         stats = self.accounts.saved["alice"]["battle_stats"]
         self.assertEqual(3, stats["pvp"]["guards"])
+        self.assertEqual({}, self.accounts.saved["alice"]["card_bases"],
+                         "没发卡就不该动计数器")
 
-        # 第二局：累计到 6，跨过 5 那条线 ⇒ 发一张。
+        # 第二局：这一轮攒到 6，够 5 ⇒ 发一张，基准挪到 6。
         self.restart()
         self.guard(0, 3)
         self.end()
         mine = [row for row in self.rewards(self.alice) if row[0] == 0]
         self.assertEqual([(0, gameserver.REWARD_SLOT_TITLE, self.CARD, 1)],
                          mine)
+        self.assertEqual({str(self.CARD): {"guards": 6}},
+                         self.accounts.saved["alice"]["card_bases"])
 
-        # 第三局：累计到 9，还没到 10 ⇒ 一张都不该再发（幂等）。
+        # 第三局：新一轮才攒了 3（累计 9 − 基准 6）⇒ 不该再发。
         self.restart()
         self.guard(0, 3)
         self.end()
         self.assertEqual([], self.rewards(self.alice))
         self.assertEqual({str(self.CARD): 1},
                          self.accounts.saved["alice"]["card_grants"])
+
+        # 第四局：新一轮攒到 6（累计 12 − 基准 6）⇒ 第二张来了。
+        self.restart()
+        self.guard(0, 3)
+        self.end()
+        mine = [row for row in self.rewards(self.alice) if row[0] == 0]
+        self.assertEqual([(0, gameserver.REWARD_SLOT_TITLE, self.CARD, 1)],
+                         mine)
+        self.assertEqual({str(self.CARD): 2},
+                         self.accounts.saved["alice"]["card_grants"])
+        self.assertEqual({str(self.CARD): {"guards": 12}},
+                         self.accounts.saved["alice"]["card_bases"])
 
     def restart(self):
         """再开一局：清掉上一局的包和 `RoomQuest`，账号原样留着。
@@ -2615,9 +2633,17 @@ class BattleStatsTests(BattleRoom):
                            float(damage))
 
     @staticmethod
-    def splash_body(target, damage):
-        return (struct.pack("<iifBff", 7, target, float(damage), 0, 0.0, 0.0)
-                + b"\x00" * 12)
+    def splash_body(target, damage, hit=(0.0, 0.0)):
+        """`rpSplashDamaged`（33 字节，§5.4c）。`hit` = **受击点**（`+21`）——
+        「突击技命中」那一项唯一的判据来源。"""
+        return (struct.pack("<iifBffff", 7, target, float(damage), 0,
+                            0.0, 0.0, float(hit[0]), float(hit[1]))
+                + b"\x00" * 4)
+
+    @staticmethod
+    def dash_body(seat, facing=1, move=0, x=0.0, y=0.0):
+        """`rpDash`（11 字节，§5.4b）：座位 / 方向 / 第几式 / 发起 XY。"""
+        return struct.pack("<BbBff", seat, facing, move, float(x), float(y))
 
     @staticmethod
     def handle_of(seat):
@@ -2757,6 +2783,85 @@ class BattleStatsTests(BattleRoom):
                   self.splash_body(self.handle_of(1), 4))
         self.assertEqual(1, self.quest.splash_hits[0])
         self.assertEqual(0, self.quest.hits[0], "溅射和直接命中分开记")
+
+    # -- 突击技命中（V0.3商店，用户 2026-09-13）----------------------------
+    #
+    # ★★ 为什么要判坐标：突击技的伤害和手雷溅射走**同一个** opcode
+    #    （`rpSplashDamaged`），包里唯一的区别是「伤害源句柄」—— 而认那个
+    #    句柄要复刻客户端的弹体句柄计数器（还得模拟引信分裂那条 32 ms 时钟，
+    #    §5.9），漂一次后面全错。⇒ 改用包里自带的坐标：`rpDash` 给发起点，
+    #    `rpSplashDamaged` 给受击点，`ChrProps.ini` 给够得着多远。
+    #
+    # 角色 0 的 `Dash00`：够到 73、伤害圈半径 5；站在 (100, 200) 时三个碰撞圆
+    # 从 y=130（头顶）到 y=200（脚）。⇒ 朝右那一次的走廊是
+    # x ∈ [95, 173]、y ∈ [125, 205]。
+
+    def dash_at(self, seat=0, facing=1, x=100.0, y=200.0):
+        self.quest.characters[seat] = 0
+        self.feed(seat, gameserver.PEER_OP_DASH,
+                  self.dash_body(seat, facing, 0, x, y))
+
+    def splash_at(self, seat, victim, hit, damage=9):
+        self.feed(seat, gameserver.PEER_OP_SPLASH_DAMAGED,
+                  self.splash_body(self.handle_of(victim), damage, hit))
+
+    def test_a_splash_inside_the_dash_corridor_is_a_dash_hit(self):
+        self.dash_at()
+        self.splash_at(0, 1, (150.0, 170.0))
+        self.assertEqual(1, self.quest.dash_hits[0])
+        self.assertEqual(1, self.quest.splash_hits[0], "它同时也是一次溅射命中")
+
+    def test_a_splash_behind_or_beyond_the_dash_is_not_a_dash_hit(self):
+        """走廊是**朝着冲的那一侧**的：背后和够不着的地方都不算。"""
+        self.dash_at()
+        self.splash_at(0, 1, (60.0, 170.0))      # 身后（朝右冲）
+        self.splash_at(0, 2, (400.0, 170.0))     # 够不着
+        self.splash_at(0, 3, (150.0, 20.0))      # 头顶上方老远
+        self.assertEqual(0, self.quest.dash_hits[0])
+        self.assertEqual(3, self.quest.splash_hits[0], "溅射那一栏照记")
+
+    def test_the_corridor_follows_the_facing(self):
+        self.dash_at(facing=-1)
+        self.splash_at(0, 1, (60.0, 170.0))      # 朝左冲 ⇒ 左边才算
+        self.assertEqual(1, self.quest.dash_hits[0])
+
+    def test_one_dash_counts_each_victim_once(self):
+        """★ 原版的突击技伤害圈一个人就挨一下 —— 同一次冲刺对同一个人
+        只算一次，这也把「手雷正好炸在走廊里」的误算压到最小。"""
+        self.dash_at()
+        for _ in range(4):
+            self.splash_at(0, 1, (150.0, 170.0))
+        self.assertEqual(1, self.quest.dash_hits[0])
+        self.splash_at(0, 2, (150.0, 170.0))     # 换个人还算
+        self.assertEqual(2, self.quest.dash_hits[0])
+        self.dash_at()                           # 再冲一次 ⇒ 重新开窗
+        self.splash_at(0, 1, (150.0, 170.0))
+        self.assertEqual(3, self.quest.dash_hits[0])
+
+    def test_a_splash_without_any_dash_is_never_a_dash_hit(self):
+        self.splash_at(0, 1, (150.0, 170.0))
+        self.assertEqual(0, self.quest.dash_hits[0])
+
+    def test_an_unknown_character_disarms_the_corridor(self):
+        """★ 查不到角色（没报过 `0x0413`）⇒ **宁可漏数也不拿默认尺寸顶上**：
+        走廊长度是唯一的判据，猜一个就等于白送。"""
+        self.quest.characters.pop(0, None)
+        self.feed(0, gameserver.PEER_OP_DASH, self.dash_body(0, 1, 0, 100, 200))
+        self.assertEqual(1, self.quest.dashes[0], "发动次数照记")
+        self.splash_at(0, 1, (150.0, 170.0))
+        self.assertEqual(0, self.quest.dash_hits[0])
+
+    def test_hitting_a_crate_in_the_corridor_is_not_a_dash_hit(self):
+        """和 `hits` 一个口径：只算打到**角色**的。"""
+        self.dash_at()
+        self.feed(0, gameserver.PEER_OP_SPLASH_DAMAGED,
+                  self.splash_body(4242, 3, (150.0, 170.0)))
+        self.assertEqual(0, self.quest.dash_hits[0])
+
+    def test_a_truncated_dash_packet_does_not_blow_up(self):
+        self.feed(0, gameserver.PEER_OP_DASH, b"\x00")
+        self.assertEqual(1, self.quest.dashes[0])
+        self.assertIsNone(self.quest.dash_swing[0])
 
     def test_dashes_are_counted(self):
         self.feed(0, gameserver.PEER_OP_DASH,
