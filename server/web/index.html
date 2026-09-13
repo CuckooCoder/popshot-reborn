@@ -39,6 +39,40 @@
     border: 1px solid var(--warn-line); border-radius: 11px;
   }
   .sub { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  /* ★ 标题区两栏（用户 2026-09-13）。`flex-end` = 右边那枚钮**底部对齐**
+     「服务器 …」那一行；`gap` 那一档在窄屏换行时才看得出来。
+     `.head-main` 要 `min-width: 0`，否则长服务器地址会把这一栏撑开、
+     把钮挤出容器。 */
+  .head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 10px 16px; flex-wrap: wrap;
+  }
+  .head-main { min-width: 0; }
+  /* 去 GM 管理页那枚小钮。**描边款**而不是实心：这一页的主动作是「注册」，
+     那颗实心钮（`button`，同一个 `--accent`）得留着最重的分量，
+     这一枚只是顺路的入口，压一档才不抢。
+     ★ 底边距和 `.sub` 一样是 20px —— 两栏的底才真的齐平。 */
+  .admin-link {
+    display: inline-block; margin: 0 0 20px; padding: 5px 14px;
+    font-size: 13px; line-height: 1.5; white-space: nowrap;
+    text-decoration: none; color: var(--accent); background: var(--card);
+    border: 1px solid var(--warn-line); border-radius: 999px;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .admin-link:hover, .admin-link:focus-visible {
+    color: var(--accent-ink); background: var(--accent);
+    border-color: var(--accent);
+  }
+  /* 末尾那个「→」（用户 2026-09-13）：单独包一层才推得动。
+     ★ 只推 2px，而且只在 hover 时 —— 这一枚是顺路的入口，动静大了会把
+     眼睛从「注册」那颗主钮上抢走。`inline-block` 是 `transform` 的前提。 */
+  .admin-link .go {
+    display: inline-block; margin-left: 2px;
+    transition: transform .15s;
+  }
+  .admin-link:hover .go, .admin-link:focus-visible .go {
+    transform: translateX(2px);
+  }
   .card {
     background: var(--card); border: 1px solid var(--line); border-radius: 10px;
     padding: 20px; margin-bottom: 18px;
@@ -108,10 +142,24 @@
 </head>
 <body>
 <div class="wrap">
-  <!-- 版本号由服务端照包根 `BUILD.ver` 现填（`versioning.own_version_text()`），
-       不写死在这儿 —— 写死的话每次发版都要记得来改一遍，漏改不报错、只骗人。 -->
-  <h1>炮炮火枪手 · 用户注册<span class="ver">__SERVER_VERSION__</span></h1>
-  <p class="sub">服务器 __SERVER_ADDRESS__</p>
+  <!-- ★ 标题区左右两栏（用户 2026-09-13）：左边标题 + 副标题，右边一枚去
+       GM 管理页的小钮。**底部对齐**（`align-items: flex-end`）—— 让它和
+       「服务器 …」那一行齐平，而不是顶着标题，看着才像标题的附属物。 -->
+  <div class="head">
+    <div class="head-main">
+      <!-- 版本号由服务端照包根 `BUILD.ver` 现填（`versioning.own_version_text()`），
+           不写死在这儿 —— 写死的话每次发版都要记得来改一遍，漏改不报错、只骗人。 -->
+      <h1>炮炮火枪手 · 用户注册<span class="ver">__SERVER_VERSION__</span></h1>
+      <p class="sub">服务器 __SERVER_ADDRESS__</p>
+    </div>
+    <!-- ★ 这一枚是**普通玩家**想到「我也能进管理页」的入口之一（D74）：
+         用游戏里那套账号密码就能登，看得到商店价格 / 合成配方 / 材料掉落，
+         还能在「装备卖出」卖自己的东西。所以放在注册页上是顺路的 ——
+         会来这一页的人，正是还没有账号或刚注册完的人。
+         ★ 不用 `target="_blank"`：同一台服务器的另一个页面，不是外链。 -->
+    <a class="admin-link" href="/admin"
+       title="用游戏里那套账号密码就能登 —— 看商店价格 / 合成配方 / 材料掉落，还能卖自己的装备换金币">⚙ GM 管理页<span class="go">→</span></a>
+  </div>
 
   <div class="warn">
     当前注册的服务器地址为 <b>__SERVER_ADDRESS__</b>，输入的用户名和密码将<b>明文传输并明文保存</b>在目标服务器上，请注意隐私安全，不要输入其他网站用过的密码。

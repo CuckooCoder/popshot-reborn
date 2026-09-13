@@ -970,7 +970,28 @@ class AdminAssetTests(_AdminCase):
                         '" · 在线"'):
             self.assertNotIn(literal, body, literal)
 
-    def test_every_money_box_is_wide_enough_for_eight_digits(self):
+    def test_the_register_page_links_to_the_admin_page(self):
+        """注册页标题右边那枚「⚙ GM 管理页 →」（用户 2026-09-13）。
+
+        ★ 它是**普通玩家**想到「我也能进管理页」的入口之一（D74）——
+        用游戏里那套账号密码就能登。会来注册页的人，正是还没有账号或者
+        刚注册完的人，放这儿是顺路的。
+
+        `/admin` 这个路径要是哪天改了，这条会红 —— 那正是要提醒的事
+        （链接指到 404 上，页面不会报错，只会点了没反应）。
+        """
+        _status, html = self.request("/")
+        link = re.search(r'<a class="admin-link"([^>]*)>(.*?)</a>', html, re.S)
+        self.assertIsNotNone(link, "注册页上没有那枚去管理页的钮")
+        self.assertIn('href="/admin"', link.group(1))
+        # 服务端真的认这个路径（别指到一个 404 上）。
+        self.assertEqual(200, self.request("/admin")[0])
+        # 文字 + 末尾那个箭头。
+        self.assertIn("GM 管理页", link.group(2))
+        self.assertIn('class="go"', link.group(2))
+        # 样式在同一份 HTML 里（注册页是自带样式的单文件，不引 admin.css）。
+        self.assertIn(".admin-link {", html)
+        self.assertIn(".admin-link:hover", html)
         """金币框要装得下 8 位（用户 2026-09-13）。
 
         默认的 `.field input[type=number]` 是 66px，实测（浏览器里量的）
