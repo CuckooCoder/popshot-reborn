@@ -111,6 +111,7 @@ from account_store import (BASE_CHARACTER_IDS, EXPERIENCE_STEP, LEVEL_MAX,
                            level_for_experience,
                            owned_characters, quest_cleared_difficulty,
                            quest_difficulty_records)
+import botsync
 import gameserver
 import lobby
 import shop
@@ -3764,8 +3765,400 @@ class PlayerPlaceTests(unittest.TestCase):
         self.assertEqual(
             {gameserver.PLACE_LOBBY, gameserver.PLACE_SHOP,
              gameserver.PLACE_ROOM_QUEST, gameserver.PLACE_ROOM_BATTLE,
-             gameserver.PLACE_PLAY_QUEST, gameserver.PLACE_PLAY_BATTLE},
+             gameserver.PLACE_PLAY_QUEST, gameserver.PLACE_PLAY_BATTLE,
+             gameserver.PLACE_AFK_QUEST, gameserver.PLACE_AFK_BATTLE},
             set(gameserver.PLACES))
+
+
+class AfkTests(unittest.TestCase):
+    """挂机判定（用户 2026-09-14）：进图了但连续 `AFK_AFTER_S` 秒没按过键盘。
+
+    ★ 这一组守的是**「什么算操作」**这条线。判错的症状全都很轻但很误导人：
+    算多了（把开火、鼠标位置、或者躺着的人算进来）= 真挂机的人一直显示
+    「游戏中」，运营该重启服务端时照样不敢重启；算少了 = 真在玩的人、
+    或者刚被打死在等复活的人被写成挂机。**两种都一句报错都没有**，
+    所以逐条钉在这儿。
+    """
+
+    def make_conn(self):
+        conn = gameserver.Conn.__new__(gameserver.Conn)
+        conn.account_name = "tester"
+        conn.log = lambda _msg: None
+        conn.my_seat = 0
+        return conn
+
+    def heartbeat(self, pos=(100, 200), cursor=(600, 240),
+                  keys=0, fast_run=False, seat=0):
+        """一发真形状的 `0x4001`（`botsync` 拼的就是 bot 发出去的那一份）。"""
+        state = botsync.character_state(pos[0], pos[1], cursor=cursor,
+                                        keys=keys, fast_run=fast_run)
+        return botsync.build_peer_packet(
+            seat, botsync.OP_HEARTBEAT,
+            botsync.heartbeat_body(0, seat, state), game_id=1)
+
+    def playing_room(self, session_type=None):
+        """一个「已经开打」的房间，返回 `(房间, 座位 0 那条连接)`。"""
+        gameserver.LOBBY.reset()
+        self.addCleanup(gameserver.LOBBY.reset)
+        if session_type is None:
+            session_type = gameserver.SESSION_TYPE_QUEST
+        conn = self.make_conn()
+        room = gameserver.LOBBY.create_room(conn, session_type=session_type)
+        gameserver.LOBBY.update_room(room,
+                                     status=lobby.SESSION_STATUS_PLAYING)
+        return room, room.members(exclude=None)[0]
+
+    def event(self, opcode, seat=0):
+        return botsync.build_peer_packet(seat, opcode, b"\x00\x01", game_id=1)
+
+    def feed(self, conn, packet, at):
+        conn.note_player_input(packet, at)
+        return conn.last_input_at
+
+    # ------------------------------------------------ 判据本身（conn_is_afk）
+    def test_no_evidence_yet_is_not_afk(self):
+        """★ 「没看见他操作」和「看见他闲够了 `AFK_AFTER_S` 秒」是两件事。
+
+        `last_input_at is None` = 还在读图 / 这一局的包一发都没到 ——
+        这时说他挂机，等于把每一局开头都判一遍挂机。
+        """
+        conn = self.make_conn()
+        self.assertIsNone(conn.last_input_at)
+        self.assertFalse(gameserver.conn_is_afk(conn))
+
+    def test_the_line_is_exactly_the_threshold(self):
+        conn = self.make_conn()
+        conn.last_input_at = 1000.0
+        edge = 1000.0 + gameserver.AFK_AFTER_S
+        self.assertFalse(gameserver.conn_is_afk(conn, now=edge))
+        self.assertTrue(gameserver.conn_is_afk(conn, now=edge + 0.001))
+
+    # ------------------------------------------------------- 什么算「操作」
+    def test_the_first_heartbeat_of_a_match_starts_the_clock(self):
+        """★ 它是「他真的进图了」这个**事件** —— 挂机的钟从这儿起走。
+
+        没有它的话，`last_input_at` 只能靠一次真操作来落地；一个进图就
+        一动不动的人**永远** `None`，也就永远判不出挂机。
+        """
+        conn = self.make_conn()
+        self.assertEqual(500.0, self.feed(conn, self.heartbeat(), 500.0))
+
+    def test_a_direction_key_held_down_counts(self):
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(), 500.0)
+        self.assertEqual(
+            501.0, self.feed(conn, self.heartbeat(keys=botsync.KEY_RIGHT),
+                             501.0))
+
+    def test_letting_go_of_a_key_counts_too(self):
+        """★ 抬键也是一次操作 —— 只认「按着」的话，点一下就松开的那一下
+        会被当成没发生（掩码在两发心跳之间又回到 0）。"""
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(keys=botsync.KEY_RIGHT), 500.0)
+        self.assertEqual(501.0, self.feed(conn, self.heartbeat(), 501.0))
+        # 松开之后就真的安静了：再来一发同样的，钟不动。
+        self.assertEqual(501.0, self.feed(conn, self.heartbeat(), 502.0))
+
+    def test_the_mouse_never_counts(self):
+        """★★ 整组里最要紧的一条（用户 2026-09-14 第二轮）：**鼠标一概不算**。
+
+        连点器为了找到「下一局」那个按钮，很可能自己把鼠标挪过去 ⇒ 「鼠标
+        动过」这条证据在挂机的人身上照样成立。算进来的症状就是「要抓的那种
+        人永远显示游戏中」。
+
+        逐项钉死：挪鼠标（准星换位置）、按住右键快跑（冲刺位）、以及被打飞时
+        跟着镜头漂的准星，**三样都不许把钟拨动**。
+        """
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(pos=(100, 200), cursor=(600, 240)),
+                  500.0)
+        for label, packet in (
+                ("挪鼠标", self.heartbeat(pos=(100, 200), cursor=(640, 300))),
+                ("按住右键", self.heartbeat(pos=(100, 200), fast_run=True)),
+                ("被打飞", self.heartbeat(pos=(160, 205), cursor=(660, 245)))):
+            self.assertEqual(500.0, self.feed(conn, packet, 501.0), label)
+
+    def test_being_knocked_around_is_not_input(self):
+        """★★ 用户 2026-09-14 第三轮点名：boss 打他 ⇒ 他受击后退、坐标在变，
+        **这不是他在玩**。判据里**一个坐标都不看**，所以位移多大都不算；
+        这条用例就是钉着「以后别有人图省事把位移加回判据里」。
+        """
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(pos=(100, 200)), 500.0)
+        for label, pos in (("被打退", (60, 200)), ("被顶飞", (400, 80)),
+                           ("掉下去", (400, 900))):
+            self.assertEqual(500.0,
+                             self.feed(conn, self.heartbeat(pos=pos), 501.0),
+                             label)
+
+    # ------------------------------------ 单人局那条钟（第五轮，§111 / D119）
+    def test_a_solo_match_has_no_keyboard_evidence_at_all(self):
+        """★★ 这一组存在的理由：**单人任务房里一发同步包都收不到**（§111）。
+
+        `0x040e` 是发给「别的玩家」的，房里只有他一个人就没有发的对象 ——
+        云上实测 4693 个单人局里 4692 局（100.0%）同步包为 0，而 267 个多人局
+        一局都不为 0。⇒ 键盘那条判据在单人局整个瞎掉，**而挂机的人恰恰全打
+        单人局**。所以才有 `last_action_at` 这条退而求其次的钟。
+        """
+        conn = self.make_conn()
+        self.assertIsNone(conn.last_input_at)     # 没有同步包 = 没有键盘证据
+        conn.last_action_at = 100.0
+        self.assertFalse(gameserver.conn_is_afk(
+            conn, now=100.0 + gameserver.AFK_SOLO_AFTER_S))
+        self.assertTrue(gameserver.conn_is_afk(
+            conn, now=100.0 + gameserver.AFK_SOLO_AFTER_S + 0.001))
+        # ★ 单人局那条线比键盘那条**宽**：证据粒度粗得多。
+        self.assertGreater(gameserver.AFK_SOLO_AFTER_S, gameserver.AFK_AFTER_S)
+
+    def test_keyboard_evidence_wins_when_we_have_it(self):
+        """★ 多人局两条钟都有 —— 这时只看键盘那条（直接证据，而且更快）。
+
+        不这么定的话，对战模式（图里根本没有怪，一条「打中」证据都不会有）
+        会被那条 45 秒的钟一路判成挂机。
+        """
+        conn = self.make_conn()
+        conn.last_input_at = 100.0        # 键盘：20 秒前还在按
+        conn.last_action_at = 0.0         # 动作：早就过期了
+        self.assertFalse(gameserver.conn_is_afk(conn, now=110.0))
+        self.assertTrue(gameserver.conn_is_afk(conn, now=125.0))
+
+    def test_hitting_something_pushes_the_solo_clock(self):
+        conn = self.make_conn()
+        conn.last_action_at = 100.0
+        conn.note_player_action(now=200.0)
+        self.assertEqual(200.0, conn.last_action_at)
+        self.assertFalse(gameserver.conn_is_afk(conn, now=230.0))
+
+    def test_entering_the_map_anchors_the_solo_clock(self):
+        """★ 开局 / 换图都要重锚：读图那几秒本来就打不了东西，
+        不重锚的话换完图一露面就欠着大半轮。"""
+        room, conn = self.playing_room()
+        conn.last_action_at = None
+        gameserver.reset_sync_trails(room, "新一局开始", new_match=True)
+        self.assertIsNotNone(conn.last_action_at)
+        conn.last_action_at = 1.0
+        gameserver.reset_sync_trails(room, "换图")
+        self.assertGreater(conn.last_action_at, 1.0)
+
+    # ------------------------------------------ 跨局继承（第五轮，用户点的题）
+    def test_a_carried_afk_flag_makes_the_next_match_start_afk(self):
+        """★ 挂机的人是**连续**挂的：上一局结算时就在挂机 ⇒ 下一局一上来
+        就算挂机，不用再从零攒 45 秒（用户 2026-09-14 第五轮）。"""
+        _room, conn = self.playing_room()
+        conn.afk_carried = True
+        self.assertTrue(gameserver.conn_is_afk(conn))
+        self.assertEqual(gameserver.PLACE_AFK_QUEST,
+                         gameserver.conn_place(conn))
+
+    def test_any_real_key_clears_the_carried_flag_at_once(self):
+        """★ 用户原话：「点击任意键盘按键后立即重置为游戏中」。"""
+        conn = self.make_conn()
+        conn.afk_carried = True
+        self.feed(conn, self.heartbeat(), 500.0)          # 第一发 = 只是锚点
+        self.assertTrue(conn.afk_carried, "锚点不算操作，不许抹掉继承标记")
+        self.feed(conn, self.heartbeat(keys=botsync.KEY_RIGHT), 501.0)
+        self.assertFalse(conn.afk_carried)
+        self.assertFalse(gameserver.conn_is_afk(conn, now=501.0))
+
+    def test_hitting_something_clears_the_carried_flag_too(self):
+        conn = self.make_conn()
+        conn.afk_carried = True
+        conn.note_player_action(now=500.0)
+        self.assertFalse(conn.afk_carried)
+
+    def test_a_key_event_packet_clears_it_as_well(self):
+        conn = self.make_conn()
+        conn.afk_carried = True
+        self.feed(conn, self.event(gameserver.PEER_OP_JUMP), 500.0)
+        self.assertFalse(conn.afk_carried)
+
+    def test_being_down_still_wins_over_the_carried_flag(self):
+        """★ 躺着的人一律不判 —— 继承标记也不该把他写成挂机。"""
+        conn = self.make_conn()
+        conn.afk_carried = True
+        conn.dead_since = 100.0
+        self.assertFalse(gameserver.conn_is_afk(conn, now=200.0))
+
+    def test_the_settlement_verdict_ignores_the_lying_down_exemption(self):
+        """★★ 挂机的人正是「第三条命被打死」才结算的 —— 结算那一刻他一定
+        躺着。用 `conn_is_afk()` 记继承标记的话，躺着那条豁免会把结论抹成
+        「没挂机」，这条继承**永远生效不了**。
+
+        所以记的是 `conn_afk_clock_expired()`：光看钟，而且把「现在」倒回
+        他倒下那一刻（钟就是在那儿停的）。
+        """
+        room, conn = self.playing_room()
+        conn.last_action_at = 100.0
+        conn.dead_since = 100.0 + gameserver.AFK_SOLO_AFTER_S + 5
+        self.assertFalse(gameserver.conn_is_afk(conn))      # 躺着，不判
+        gameserver.note_seat_settled(room)
+        self.assertTrue(conn.afk_carried)                   # 但钟确实到期了
+
+    def test_a_player_who_died_while_still_active_carries_nothing(self):
+        """刚打完东西就被打死 —— 钟没到期，不许带着「挂机」进下一局。"""
+        room, conn = self.playing_room()
+        conn.last_action_at = 100.0
+        conn.dead_since = 105.0
+        gameserver.note_seat_settled(room)
+        self.assertFalse(conn.afk_carried)
+
+    def test_fast_run_needs_a_direction_key_anyway(self):
+        """★ 撤掉冲刺位**一点损失都没有**：原版进冲刺要求走路方向非 0
+        （`0x5074fc` 读 `[char+0x4b4]`），而走路方向完全由方向键掩码算出来
+        （`0x5073c2`）⇒ 真的在冲刺时掩码必然非 0，第一条判据已经收下了。
+        """
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(), 500.0)
+        self.assertEqual(
+            501.0, self.feed(conn, self.heartbeat(keys=botsync.KEY_RIGHT,
+                                                  fast_run=True), 501.0))
+
+    def test_an_idle_heartbeat_does_not_move_the_clock(self):
+        conn = self.make_conn()
+        self.feed(conn, self.heartbeat(), 500.0)
+        for at in (501.0, 502.0, 520.0):
+            self.assertEqual(500.0, self.feed(conn, self.heartbeat(), at))
+
+    def test_firing_does_not_count_but_the_other_actions_do(self):
+        """★ 用户 2026-09-14 点名：开火**不算**。挂机的人开着鼠标连点器，
+        那些点落在游戏画面上就是一发发 `rpFire` —— 算进来就等于替要抓的那种
+        人打掩护。挨打的那几发（`rpExplode` / `rpSplashDamaged`）同理不算。
+        """
+        for opcode in (gameserver.PEER_OP_FIRE, gameserver.PEER_OP_EXPLODE,
+                       gameserver.PEER_OP_SPLASH_DAMAGED):
+            conn = self.make_conn()
+            self.feed(conn, self.heartbeat(), 500.0)
+            self.assertEqual(500.0, self.feed(conn, self.event(opcode), 501.0),
+                             hex(opcode))
+        for opcode in sorted(gameserver.INPUT_PEER_OPCODES):
+            conn = self.make_conn()
+            self.feed(conn, self.heartbeat(), 500.0)
+            self.assertEqual(501.0, self.feed(conn, self.event(opcode), 501.0),
+                             hex(opcode))
+        self.assertNotIn(gameserver.PEER_OP_FIRE, gameserver.INPUT_PEER_OPCODES)
+
+    def test_a_new_match_wipes_the_clock(self):
+        """★ 不清的话，上一局末尾那段没操作的时间会接着算下去 —— 人刚点完
+        「开始」进新一局，一露面就被写成挂机。"""
+        room, conn = self.playing_room()
+        conn.last_input_at = 500.0
+        conn.last_keys = 0
+        conn.dead_since = 400.0
+        gameserver.reset_sync_trails(room, "新一局开始", new_match=True)
+        self.assertIsNone(conn.last_input_at)
+        self.assertIsNone(conn.last_keys)
+        self.assertIsNone(conn.dead_since)
+
+    def test_a_map_change_keeps_the_spectator_lying_down(self):
+        """★ 闯关命用完的人会一路观战着跟队友换到下一张图 —— 换图也清掉
+        「躺着」那一格的话，他会在新图上被判成挂机（用户 2026-09-14 点名
+        不许出现的误判）。钟照清，闩不清。
+        """
+        room, conn = self.playing_room()
+        conn.last_input_at = 500.0
+        conn.dead_since = 400.0
+        gameserver.reset_sync_trails(room, "换图")
+        self.assertIsNone(conn.last_input_at)
+        self.assertEqual(400.0, conn.dead_since)
+
+    # --------------------------------------------------- 落到哪个位置码上
+    def playing_place(self, session_type, last_input_at):
+        _room, conn = self.playing_room(session_type)
+        conn.last_input_at = last_input_at
+        return gameserver.conn_place(conn)
+
+    def test_being_afk_splits_the_playing_place_by_mode(self):
+        stale = time.monotonic() - gameserver.AFK_AFTER_S - 1
+        fresh = time.monotonic()
+        cases = {
+            (gameserver.SESSION_TYPE_QUEST, stale): gameserver.PLACE_AFK_QUEST,
+            (gameserver.SESSION_TYPE_QUEST, fresh): gameserver.PLACE_PLAY_QUEST,
+            (lobby.SESSION_TYPE_NORMAL, stale): gameserver.PLACE_AFK_BATTLE,
+            (lobby.SESSION_TYPE_NORMAL, fresh): gameserver.PLACE_PLAY_BATTLE,
+        }
+        for (session_type, last), expected in cases.items():
+            self.assertEqual(expected, self.playing_place(session_type, last),
+                             (session_type, last))
+
+    # -------------------------------------------- 躺着的人不判（第二轮加的）
+    def test_a_dead_player_waiting_to_respawn_is_still_playing(self):
+        """★ 用户 2026-09-14 第二轮：死了等复活 / 命用完进观战的人**按不了键**
+        —— 拿「这么久没按键」去判他，等于把刚被打死的真玩家写成挂机。
+        """
+        _room, conn = self.playing_room()
+        conn.last_input_at = time.monotonic() - gameserver.AFK_AFTER_S - 60
+        self.assertEqual(gameserver.PLACE_AFK_QUEST,
+                         gameserver.conn_place(conn))
+        conn.dead_since = time.monotonic()
+        self.assertFalse(gameserver.conn_is_afk(conn))
+        self.assertEqual(gameserver.PLACE_PLAY_QUEST,
+                         gameserver.conn_place(conn))
+
+    def test_the_death_broadcast_lays_him_down_and_the_respawn_stands_him_up(self):
+        """上闩 / 撤闩都挂在**广播**那一刻，是状态翻转不是计时器（铁律 10）。"""
+        room, conn = self.playing_room()
+        gameserver.note_seat_died(room, 0, now=100.0)
+        self.assertEqual(100.0, conn.dead_since)
+        gameserver.note_seat_respawned(room, 0, now=160.0)
+        self.assertIsNone(conn.dead_since)
+
+    def test_the_clock_pauses_while_he_is_down_instead_of_restarting(self):
+        """★★ 用户 2026-09-14 第四轮：**死亡暂停、复活接着数**，不是重新数。
+
+        重新起钟的话，挂机的人每被 boss 打死一次就清一次表 —— 一轮
+        `AFK_AFTER_S` 秒根本数不满，这个功能就废了。
+        """
+        room, conn = self.playing_room()
+        conn.last_input_at = 100.0
+        gameserver.note_seat_died(room, 0, now=112.0)        # 已经欠了 12 秒
+        gameserver.note_seat_respawned(room, 0, now=172.0)   # 躺了 60 秒
+        # 表往前拨了整整 60 秒 ⇒「扣掉躺着的时间」仍然是 12 秒。
+        self.assertEqual(160.0, conn.last_input_at)
+        self.assertFalse(gameserver.conn_is_afk(conn, now=172.0))
+        # 再过 (AFK_AFTER_S − 12) 秒就该判出来，不用从头数一整轮。
+        self.assertTrue(gameserver.conn_is_afk(
+            conn, now=172.0 + gameserver.AFK_AFTER_S - 12.0 + 0.001))
+
+    def test_a_second_death_does_not_move_the_pause_anchor(self):
+        """★ 暂停的起点只能是第一次倒下那一刻 —— 再盖一次等于把中间那段
+        又算回去（按状态翻转上闩）。"""
+        room, conn = self.playing_room()
+        conn.last_input_at = 100.0
+        gameserver.note_seat_died(room, 0, now=112.0)
+        gameserver.note_seat_died(room, 0, now=150.0)
+        self.assertEqual(112.0, conn.dead_since)
+
+    def test_a_respawn_with_nothing_to_resume_is_harmless(self):
+        """没死过 / 这一局还没有证据 —— 两种都不许把钟拨出个数来。"""
+        room, conn = self.playing_room()
+        gameserver.note_seat_respawned(room, 0, now=500.0)
+        self.assertIsNone(conn.last_input_at)
+        conn.last_input_at = 100.0
+        gameserver.note_seat_respawned(room, 0, now=500.0)
+        self.assertEqual(100.0, conn.last_input_at)
+
+    def test_an_empty_or_unknown_seat_is_harmless(self):
+        """死亡广播里的座位可能是怪（0xff）、也可能人已经走了。"""
+        room, _conn = self.playing_room()
+        for seat in (-1, 5, 0xFF):
+            gameserver.note_seat_died(room, seat)
+            gameserver.note_seat_respawned(room, seat)
+        self.assertIsNone(gameserver.seat_conn(None, 0))
+
+    def test_nobody_outside_a_running_match_is_ever_called_afk(self):
+        """★ 大厅 / 商店 / 待机房间里本来就没什么可操作的（用户 2026-09-14）
+        —— 在那儿判挂机只会把「正在组队等人」说成挂机。"""
+        stale = time.monotonic() - gameserver.AFK_AFTER_S - 1
+        conn = self.make_conn()
+        conn.last_input_at = stale
+        self.assertEqual(gameserver.PLACE_LOBBY, gameserver.conn_place(conn))
+        conn.place = gameserver.PLACE_SHOP
+        self.assertEqual(gameserver.PLACE_SHOP, gameserver.conn_place(conn))
+        gameserver.LOBBY.create_room(
+            conn, session_type=gameserver.SESSION_TYPE_QUEST)
+        self.addCleanup(gameserver.LOBBY.reset)
+        self.assertEqual(gameserver.PLACE_ROOM_QUEST,
+                         gameserver.conn_place(conn))
 
 
 class ShopBuyAndEquipTests(unittest.TestCase):

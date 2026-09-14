@@ -233,9 +233,18 @@
                页数都按筛完的算，所以选「在线」时每一页照样是满 10 行、翻页
                也不会翻到空页。改了下拉当场重查（回第一页），不用再点「查找」
                —— 和配置页那几个筛选下拉一个手感。
-               ★ 「在待机」「在游戏中」是用户 2026-09-13 加的：
-               在待机 = 在线但没进图（大厅 / 商店界面 / 待机中的房间，
-               任务和对战都算）；在游戏中 = 真进图了（任务 + 对战）。
+               ★ 「待机中」「游戏中」是用户 2026-09-13 加的：
+               待机中 = 在线但没进图（大厅 / 商店界面 / 待机中的房间，
+               任务和对战都算）；游戏中 = 真进图了（任务 + 对战）。
+               ★ 「挂机中」是用户 2026-09-14 加的，它是从「游戏中」里
+               **劈出来**的一半：进图了、但一直没有「他在玩」的证据 ——
+               多人局看键盘（20 秒），单人局看「有没有打中 / 捡到 /
+               得分」（45 秒，单人房里服务端收不到同步包）。
+               鼠标和 F5 都不算，被打飞的位移也不算；死了等复活 /
+               观战的那一段**不判也不计时**，复活后接着数。
+               上一局结算时就在挂机的，下一局一上来就标挂机。
+               ⇒ 挂机中 + 游戏中 = 改之前那个「游戏中」；待机中不含挂机的人，
+               「在线」含、「不在线」不含。
                值照服务端 `admin.ONLINE_FILTERS` 那一份发。 -->
           <select id="playerOnline">
             <option value="all">全部</option>
@@ -243,6 +252,7 @@
             <option value="on">在线</option>
             <option value="idle">待机中</option>
             <option value="playing">游戏中</option>
+            <option value="afk">挂机中</option>
           </select>
           <button class="btn" id="playerSearchBtn">查找</button>
           <!-- 玩家自己在游戏里也会改这些数（打完一局就涨经验和金币），
@@ -777,12 +787,17 @@
       </ul>
       <div class="toolbar">
         <input id="promoteSearch" type="text" placeholder="搜 用户名 / 昵称">
+        <!-- ★ 档位要和玩家仓库那个下拉**一模一样**：两个下拉发的是同一个
+             接口的同一个参数，`test_web_admin` 那条拦网按
+             `admin.ONLINE_FILTERS` 逐个对过来（少一档 = 那一档的人在这一页
+             谁都筛不出来，一句报错都没有）。 -->
         <select id="promoteOnline">
           <option value="all">全部</option>
           <option value="off">不在线</option>
           <option value="on">在线</option>
           <option value="idle">待机中</option>
           <option value="playing">游戏中</option>
+          <option value="afk">挂机中</option>
         </select>
         <button class="btn" id="promoteSearchBtn">查找</button>
         <button class="btn" id="promoteRefreshBtn" title="重新读一遍玩家列表">↻ 刷新</button>

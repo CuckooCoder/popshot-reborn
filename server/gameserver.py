@@ -3846,6 +3846,30 @@ STAT_PEER_OPCODES = frozenset((PEER_OP_FIRE, PEER_OP_EXPLODE,
                                PEER_OP_SPLASH_DAMAGED, PEER_OP_DASH,
                                PEER_OP_GUARD))
 
+#: `UdpPacket` 的内层 `0x0001 rpChangeWeapon` / `0x001b rpCreateTotem`
+#: （名字出自客户端 `GameSession::ProcessReliableQueue` 那张 switch 表，
+#: V0.3bot §216）。只在挂机判定里当「玩家主动做了件事」的证据用。
+PEER_OP_CHANGE_WEAPON = 0x0001
+PEER_OP_CREATE_TOTEM = 0x001B
+
+#: ★★ 挂机判定认的**事件包** = **方向键之外的那些键盘按钮**。
+#: 方向键四位在心跳的掩码里（V0.3bot §39），这几样不在，只能靠事件包说。
+#:
+#: 刻意**不含**的三类，每一类都有理由：
+#:
+#: * `rpFire` 开火 —— **鼠标左键**。用户 2026-09-14 点名排除：挂机的人开着
+#:   鼠标连点器，那些点落在游戏画面上就是一发发 `rpFire`；把它算成「有操作」，
+#:   要抓的正是这种人就永远抓不到。
+#: * `rpExplode` / `rpSplashDamaged` / `rpSetOnFire` —— 是**别人**打过来的
+#:   结果，挨打不是操作。
+#: * `rpRespawn` / `rpReqState` / `rpRepState` / `rpReqDie` —— 分不清是玩家
+#:   按的还是客户端自己走的流程（`0x0413` 那一条就是客户端数完 5 秒自己发的）。
+#:   算进来的症状是「死了又活、活了又死的挂机号一直显示游戏中」，
+#:   一句报错都没有。
+INPUT_PEER_OPCODES = frozenset((PEER_OP_CHANGE_WEAPON, PEER_OP_JUMP,
+                                PEER_OP_DASH, PEER_OP_CROUCH, PEER_OP_GUARD,
+                                PEER_OP_CREATE_TOTEM))
+
 #: 战绩要用到的 body 布局（`re/packet_api.md` §5.2 / §5.4b / §5.4c）。
 #: 只解前面用得着的那几格，后面的原样不管。
 _STAT_FIRE = struct.Struct("<BBi")       # 源 / 碰撞组 / ★弹药 id
@@ -5351,7 +5375,7 @@ def room_generation(room, kind=None):
     return room.advance_generation(kind, relayserver.next_generation)
 
 
-def reset_sync_trails(room, why):
+def reset_sync_trails(room, why, new_match=False):
     """把房里每个人的位置轨迹作废（V0.3 M3）。
 
     **换图和开新一局各调一次** —— 坐标只在一张图之内有意义，上一张图的点
@@ -5359,6 +5383,9 @@ def reset_sync_trails(room, why):
     不清的话它换图后会先在墙里 / 图外闪一下。
 
     ★ 顺手把 bot 自己那份帧状态也清掉：它上一张图的落脚点同样作废了。
+
+    `new_match=True` = 这是**开新一局**（不是关卡内换图）。只有它会把挂机判定
+    里「他躺着」那一格也清掉，理由见下面那一段。
     """
     for seat in room.seats:
         conn = None if seat is None else seat.conn
@@ -5374,6 +5401,21 @@ def reset_sync_trails(room, why):
         conn.sync_crouch = False
         # ★ 诊断（`note_human_fire`）：换图 / 新一局重新打第一发。M3b 收口后删。
         conn.human_fire_logged = set()
+        # ★ 挂机判定的钟归零（用户 2026-09-14）：新一局 / 换图之后都要重新攒
+        #   证据。**不清的话**，上一局末尾那段没按键的时间会接着算下去
+        #   —— 人刚点完「开始」进新一局，一露面就被写成挂机。
+        conn.last_input_at = None
+        conn.last_keys = None
+        # ★ 单人局那条钟锚在**这一刻**（进图 / 换图读完）：那时他人已经在图里，
+        #   从这儿开始数「多久没打中过东西」。★ 换图也要锚 —— 读图那几秒
+        #   本来就打不了东西，不重锚的话换完图一露面就欠着大半轮。
+        conn.last_action_at = time.monotonic()
+        # ★★ 「躺着」那一格**只在新一局清**，换图不清：闯关命用完的人会
+        #   一路观战着跟队友换到下一张图，那时他仍然按不了键。换图也清的话，
+        #   他会在新图上被判成挂机 —— 正是用户 2026-09-14 点名不许出现的误判。
+        #   反过来新一局必须清，否则上一局死在最后的人整个下一局都不判挂机。
+        if new_match:
+            conn.dead_since = None
         # ★ 开火记录跟着清（§92）：上一张图的弹道配不上这一张图的爆点，
         #   留着只会让击退方向偶尔配错一发。
         shots = getattr(conn, "peer_shots", None)
@@ -5935,10 +5977,165 @@ PLACE_ROOM_QUEST = "room_quest"
 PLACE_ROOM_BATTLE = "room_battle"
 PLACE_PLAY_QUEST = "play_quest"
 PLACE_PLAY_BATTLE = "play_battle"
+#: ★ 进图了、但人已经不在键盘前（用户 2026-09-14）。**是「游戏中」的细分**，
+#: 不是第三个地方 —— 判据只多一条「最近有没有操作」，见 `conn_is_afk()`。
+PLACE_AFK_QUEST = "afk_quest"
+PLACE_AFK_BATTLE = "afk_battle"
 
 #: 全部位置码。管理页的筛选和中文名表都照着它排，别在别处再抄一份。
 PLACES = (PLACE_LOBBY, PLACE_SHOP, PLACE_ROOM_QUEST, PLACE_ROOM_BATTLE,
-          PLACE_PLAY_QUEST, PLACE_PLAY_BATTLE)
+          PLACE_PLAY_QUEST, PLACE_PLAY_BATTLE,
+          PLACE_AFK_QUEST, PLACE_AFK_BATTLE)
+
+#: ★★ 多久没碰过键盘就算**挂机**（秒）。用户 2026-09-14 一天里调了三次，
+#: 定在 **20 秒**：15 → 30（「降低误判」）→ **20**。回调的理由是**一局有多长**
+#: —— 30 秒太长的话，「刚判成挂机、这一局就结束了」，回房间又清零，
+#: 挂机状态在管理页上一闪而过，等于白判。
+#:
+#: ★ 这是铁律 10 说的那个**唯一例外**：「挂机」的定义本身就是「一段时间里
+#: 一个输入事件都没有」—— 这里没有事件可等，**「没有事件」才是要等的东西**，
+#: 阈值就是需求本身，不是拿某台机器的观测值凑出来的。
+#: 反过来「他回来了」是**事件驱动**的：下一发带操作的包一到当场恢复，
+#: 不等任何定时器。
+AFK_AFTER_S = 20.0
+
+#: ★★ **单人局**那条线（秒）。用户 2026-09-14 第五轮，实测定的 45。
+#:
+#: 为什么要单开一条：**单人任务房里服务端一发同步包都收不到**（§111）——
+#: `0x040e` 是发给「别的玩家」的，房里只有他一个人就没有发的对象。
+#: 于是键盘那条判据在单人局完全瞎掉，而挂机的人**恰恰全打单人局**。
+#: 退而求其次的证据是「他真的打中/捡到/得分了」（`note_player_action()`），
+#: 粒度比按键粗得多，窗口就得放宽。
+#:
+#: ★ 45 这个数是**在真日志上量出来的**，不是拍的（§111 的两张表）：
+#: 真在玩的 6 个号 283 个单人局里，「连续 45 秒一条证据都没有」占局内时间
+#: **0%**；挂机的 6 个号 4384 局里占 **28%~55%**。
+#: 往下调到 20 秒的话挂机那边能抓到 50%~78%，但真玩的人开始出现 2%~3% 的误判。
+AFK_SOLO_AFTER_S = 45.0
+
+
+def conn_afk_clock_expired(conn, now=None):
+    """光看**钟**到没到期，不管他是不是躺着。
+
+    ★ 两条钟，**看得见键盘就只看键盘**：
+
+    1. `last_input_at`（同步包里的按键，`AFK_AFTER_S`）—— 多人局有它，
+       它是直接证据，最准；
+    2. `last_action_at`（打中/捡到/得分，`AFK_SOLO_AFTER_S`）—— 单人局
+       **只有**它。开局 / 换图那一刻由 `reset_sync_trails()` 锚一次，
+       之后每来一条证据往前拨一次。
+
+    两条都没有 = 这一局还没有任何证据（还在读图），当**没到期**。
+
+    ★ 躺着的时候钟是停的（`dead_since`），所以这里把「现在」倒回他倒下那一刻
+    —— 结算那一发正是在他死透之后来的，不倒回去就会把等复活的几秒算进账。
+    """
+    now = time.monotonic() if now is None else now
+    dead_since = getattr(conn, "dead_since", None)
+    if dead_since is not None:
+        now = dead_since
+    last = getattr(conn, "last_input_at", None)
+    if last is not None:
+        return (now - last) > AFK_AFTER_S
+    last = getattr(conn, "last_action_at", None)
+    if last is not None:
+        return (now - last) > AFK_SOLO_AFTER_S
+    return False
+
+
+def conn_is_afk(conn, now=None):
+    """这条连接**是不是在挂机**：进图之后连续这么久没有任何「他在玩」的证据。
+
+    ★★ **躺着的时候这个钟是停的**（用户 2026-09-14 第四轮）：死了等复活、
+    以及命用完之后整局观战的人，**本来就按不了键**。躺着的那一段
+    ① 不判（拿「这么久没动静」判他，等于把刚被打死的真玩家写成挂机）、
+    ② **也不计时** —— 复活时把表往前拨过那一段（`note_seat_respawned()`），
+    死前欠的那几秒接着数。
+    ★ 为什么不是「复活后重新起钟」：挂机的人本来就容易在一轮没数完之前
+    就被 boss 打死，每死一次清一次的话**永远数不满**，这个功能就废了。
+
+    `dead_since` 既是闩也是暂停的起点：`None` = 活着。由死亡广播上闩、
+    重生广播撤闩，是**状态翻转**不是计时器。
+
+    ★ `last_input_at is None` = **还没有证据**（还在读图、或者这一局的包
+    一发都没到），一律当**没挂机** —— 判据要的是「看见他闲了这么久」，
+    不是「没看见他」。开局那一刻由 `reset_sync_trails()` 清回 `None`，
+    所以上一局的账绝不会泼到这一局头上。
+
+    ★ bot 永远判不出挂机：它的同步包是服务端自己合成的，不走
+    `note_player_input()` 那条路，`last_input_at` 一直是 `None`。
+    """
+    if getattr(conn, "dead_since", None) is not None:
+        return False
+    if getattr(conn, "afk_carried", False):
+        return True
+    return conn_afk_clock_expired(conn, now)
+
+
+def note_seat_settled(room):
+    """这一局结算了 —— 把「他这会儿在不在挂机」记下来带进下一局。
+
+    ★ 用户 2026-09-14 第五轮点的题：挂机的人是**连续**挂的，而每一局开头
+    都要重新攒证据（单人局还要攒满 45 秒）⇒ 管理页上会一局一局地闪。
+    把上一局的结论带过来，**只有开始挂机的第一局**是未知状态。
+
+    ★★ 判据用 `conn_afk_clock_expired()` 而**不是** `conn_is_afk()`：
+    挂机的人正是「第三条命被打死」才结算的，结算那一刻他一定躺着 ——
+    用 `conn_is_afk()` 的话躺着那条豁免会把结论抹成「没挂机」，
+    这条继承永远生效不了。
+    """
+    for holder in getattr(room, "seats", None) or ():
+        conn = None if holder is None else getattr(holder, "conn", None)
+        if conn is not None:
+            conn.afk_carried = conn_afk_clock_expired(conn)
+
+
+def seat_conn(room, seat):
+    """房间里 `seat` 号座位上的那条连接；空座位 / 越界返回 `None`。"""
+    seats = getattr(room, "seats", None) or ()
+    seat = int(seat)
+    if not 0 <= seat < len(seats):
+        return None
+    holder = seats[seat]
+    return None if holder is None else getattr(holder, "conn", None)
+
+
+def note_seat_died(room, seat, now=None):
+    """`seat` 的死亡刚广播出去 —— 上闩，挂机的钟从这一刻**暂停**。
+
+    ★ 挂在**死亡广播**那一处而不是 `0x0408` 上报那一处：上报可能被判成
+    幽灵死亡 / 重复而不广播（`on_report_hp_zero`），只有广播出去的那一发
+    才是「他真的倒下了」。
+
+    ★ **已经躺着就不动那个起点**：暂停的起点只能是第一次倒下那一刻，
+    再盖一次等于把中间那段又算回去（按状态翻转上闩，铁律 10）。
+    """
+    conn = seat_conn(room, seat)
+    if conn is not None and getattr(conn, "dead_since", None) is None:
+        conn.dead_since = time.monotonic() if now is None else now
+
+
+def note_seat_respawned(room, seat, now=None):
+    """`seat` 的重生刚广播出去 —— 撤闩，并把钟**往前拨过躺着那一段**。
+
+    ★ 两条路都要走这儿：本人 `0x0413` 回显的那一发，和看门狗替他补的那一发
+    （bug调查/8 那种客户端卡住的局面）。只挂一处的话，被看门狗拉起来的人
+    会一直顶着「躺着」的闩，这一局再也判不出挂机。
+
+    ★★ **接着数，不是重新数**（用户 2026-09-14 第四轮）：把 `last_input_at`
+    往后挪「躺了多久」，于是「他上一次按键到现在，**扣掉躺着的时间**」保持不变。
+    重新起钟的话，挂机的人每被 boss 打死一次就清一次表 —— 一轮 20 秒根本
+    数不满，这个功能就废了。
+    """
+    conn = seat_conn(room, seat)
+    if conn is None:
+        return
+    dead_since = getattr(conn, "dead_since", None)
+    conn.dead_since = None
+    if dead_since is None or conn.last_input_at is None:
+        return
+    now = time.monotonic() if now is None else now
+    conn.last_input_at += max(0.0, now - dead_since)
 
 
 def conn_place(conn):
@@ -5952,11 +6149,17 @@ def conn_place(conn):
     任务 / 对战按 `SESSION_TYPE_QUEST` 分 —— 这正是**客户端结算时自己用的
     判据**（`[LobbyStage+0x1c] == 2`），天梯 / 练习跟着走对战那一支，
     和 §161 一个口径。
+
+    ★ **挂机只在「进图了」这一档里分**（用户 2026-09-14）：大厅 / 商店 /
+    待机房间里坐着本来就没什么可操作的，在那儿判挂机只会把「正在组队等人」
+    说成挂机。
     """
     room = LOBBY.room_of(conn)
     if room is not None:
         quest = (room.session_type == SESSION_TYPE_QUEST)
         if room.is_playing():
+            if conn_is_afk(conn):
+                return PLACE_AFK_QUEST if quest else PLACE_AFK_BATTLE
             return PLACE_PLAY_QUEST if quest else PLACE_PLAY_BATTLE
         return PLACE_ROOM_QUEST if quest else PLACE_ROOM_BATTLE
     return getattr(conn, "place", PLACE_LOBBY)
@@ -6126,6 +6329,22 @@ class Conn:
     #   （Python 的 int 没有上限），换图 / 新一局都**不清** —— bot 那边存的
     #   是「我上一帧消费到哪个号」，两边一起往前走就行。
     sync_trail_seq = 0
+    # ★ 挂机判定的三格（用户 2026-09-14），同理要有类级默认。
+    #   `last_input_at` = 最后一次**看见他按键盘**的 `time.monotonic()`；
+    #     `None` = 这一局还没有证据（开局时由 `reset_sync_trails()` 清）。
+    #   `last_keys`     = 上一发心跳里的方向键掩码，用来认出「刚按下 / 刚松开」。
+    #   `dead_since`    = 他是**什么时候**躺下的（等复活 / 命用完在观战）；
+    #     `None` = 活着。死人按不了键，躺着那一段**既不判也不计时** ——
+    #     复活时拿它把钟往前拨过那一段，见 `conn_is_afk()`。
+    #   `last_action_at`= 最后一次**看见他打中 / 捡到 / 得分**的时刻。
+    #     单人局里这是唯一看得见的证据（§111），开局 / 换图时锚一次。
+    #   `afk_carried`   = 上一局结算时他就在挂机 ⇒ 这一局一上来就算挂机，
+    #     直到看见真证据（用户 2026-09-14 第五轮）。
+    last_input_at = None
+    last_keys = None
+    last_action_at = None
+    dead_since = None
+    afk_carried = False
     #: ★ 诊断（`note_human_fire`）的类级默认 —— 控制通道造的假连接也得有。
     human_fire_logged = frozenset()
     #: ★ 这条连接**本图打出去、还没配上爆炸**的几发 `rpFire`（V0.3 §92）。
@@ -7860,6 +8079,10 @@ class Conn:
                  f"凶手={info['arg']} 死亡次数={info['deaths']} "
                  f"位置=({info['x']:.0f}, {info['y']:.0f})")
         if not 0 <= seat < ROOM_SEAT_COUNT:
+            # ★ 挂机判定：**打死一只怪**是「他在玩」的硬证据（§111）——
+            #   单人局里服务端收不到同步包，这是最主要的那一条。
+            #   怪是各台机器自己模拟的，报上来的就是他自己打死的那只。
+            self.note_player_action()
             # ★★ 死掉的是**怪**：从 AI 位置表里摘掉（V0.3 §125 的那张表就是
             #   bot 的目标表）。`rpAiMsg` 的 `state=death` 是主路，但语料里
             #   272 个句柄有 2 个到最后都没报过 —— 那两只留在表里就成了
@@ -7883,6 +8106,8 @@ class Conn:
                  f" —— 客户端收到才会调 Character::Die()，心形也靠它减")
         self.battle_broadcast(build_game(OP_BROADCAST_DEATH, reply),
                               reason="：死亡广播")
+        # ★ 他躺下了 ⇒ 挂机判定这一段不管他（用户 2026-09-14）：死人按不了键。
+        note_seat_died(self.lobby_room(), seat)
         # ★ 上闩等他自己的 0x0413；到点没等到就由 `check_respawn_watchdog()`
         #   补一发 0x0419（bug调查/8「死了不复活」）。
         #   bot 走的是同一个闩、更短的期限 —— 它那发 `0x0413` 永远不会来，
@@ -7943,6 +8168,8 @@ class Conn:
                 info["seat"], info["x"], info["y"],
                 info["character_id"])),
             reason="：重生")
+        # ★ 站起来了 ⇒ 撤掉「躺着」的闩、挂机的钟重新起走（用户 2026-09-14）。
+        note_seat_respawned(self.lobby_room(), info["seat"])
 
     def respawn_watchdog_seconds(self):
         """看门狗等多久（秒）。`--respawn-watchdog 0` = 整个兜底关掉。"""
@@ -8066,6 +8293,9 @@ class Conn:
                 build_game(OP_RESPAWN_CHARACTER,
                            build_respawn_character(seat, x, y, character_id)),
                 reason="：看门狗补重生")
+            # ★ 和本人 `0x0413` 那条路一样撤闩（用户 2026-09-14）——
+            #   只挂一处的话，被看门狗拉起来的人这一局再也判不出挂机。
+            note_seat_respawned(room, seat)
             sent += 1
         return sent
 
@@ -8271,6 +8501,8 @@ class Conn:
     def on_get_item(self, payload):
         """0x0407 `gcpGetItem`「我踩到这件了」-> 回 0x0405，客户端才真的捡起来。
 
+        ★ 顺带喂挂机判定一条证据（§111）：踩得到东西，说明他在走。
+
         ★ 这是 §108（血量归零不死）、§111（换图卡住）、§113（打死怪不掉东西）
         之后的**第四条同形状的链**：判定在服务端，客户端报完就等着。
         掉落物在会话 17 已经能掉出来了，但走上去捡不起来 —— 缺的就是这一环。
@@ -8306,6 +8538,7 @@ class Conn:
         那个人**，而且只发给 `GRANTABLE_ITEM_IDS` 里的物件 —— 金币 / 红心
         走的是当场生效那条，多发一发等于凭空多一件道具。
         """
+        self.note_player_action()
         try:
             seat_id, handle = parse_get_item(payload)
         except (ValueError, struct.error) as error:
@@ -8375,7 +8608,7 @@ class Conn:
         entry = room.seats[seat]
         return None if entry is None else entry.conn
 
-    def on_use_item(self, payload):
+    def on_use_item(self, payload):        # ★ 挂机判定：按 Ctrl = 键盘操作
         """0x040c（客户端方向）「我按 Ctrl 要用第 N 格的道具」（§194）。
 
         客户端按下那一刻做的全部事情就是发这一发（槽位恒 0）再放一声音效
@@ -8394,6 +8627,7 @@ class Conn:
         槽是空的（没捡过就按、或者连着按两下）就**一个包都不回**，
         和拾取仲裁被拒时同一个处置。
         """
+        self.note_player_action()
         try:
             slot_index = parse_use_item(payload)
         except (ValueError, struct.error) as error:
@@ -8617,6 +8851,17 @@ class Conn:
         found.setdefault(self.my_seat, self)
         return found
 
+    def note_settled_afk(self):
+        """结算这一发的收尾：把房里每个人「现在在不在挂机」记进下一局。
+
+        挂在 `send_end_game()` 里而不是下一局开局那一处 —— 两局之间还有
+        ~26 秒在房间里（实测，§111），到开局那会儿谁的钟都到期了，
+        记下来的就全是「在挂机」。
+        """
+        room = self.lobby_room()
+        if room is not None:
+            note_seat_settled(room)
+
     def send_end_game(self, success=None):
         """结算这一局：把所得记进存档，再把新的经验/金币下发（0x0411）。
 
@@ -8670,6 +8915,9 @@ class Conn:
             self.log("   本局已经结算过了；忽略（房里每个人都会发一发 0x040f）")
             return
         quest.settled = True
+        # ★ 挂机判定：趁两条钟还是**这一局**的值，把「他这会儿在不在挂机」
+        #   记下来带进下一局（用户 2026-09-14 第五轮）。
+        self.note_settled_afk()
         if success is not None:
             quest.success = bool(success)
         cleared = quest.success
@@ -9218,7 +9466,7 @@ class Conn:
                                           if seat is not None])
             # ★ 位置轨迹跟着新局作废 —— 上一局的坐标（可能还是另一张图上的）
             #   放到这一局是个随机点，bot 会照着它站过去（V0.3 M3）。
-            reset_sync_trails(room, "新一局开始")
+            reset_sync_trails(room, "新一局开始", new_match=True)
             # ★★★ 这一局的 32 ms 循环从这儿起步（D106）：`reset_sync_trails`
             #   刚把 bot 的战斗帧和弹体句柄计数器清空，收方那边
             #   `ForceReloadTerrain` 也是这一刻复位的 —— 两边的 tick 0
@@ -9707,6 +9955,78 @@ class Conn:
         _seat, flag = _STAT_GUARD.unpack_from(body, 0)
         quest.note_guard(seat, bool(flag))
 
+    def note_player_input(self, payload, arrived):
+        """这一发里有没有「玩家真的按了键盘」，有就把钟拨到 `arrived`。
+
+        挂机判定的**唯一**证据来源（用户 2026-09-14）。两类证据：
+
+        1. **心跳里的方向键掩码**（V0.3bot §39）—— ←↑→↓ 四个键此刻按着没有。
+           **按着**算操作，**刚松开**也算（掩码从非 0 变回 0 就是一次抬键），
+           所以按一下就松也抓得住。
+        2. **事件包** —— `INPUT_PEER_OPCODES` 里那几发。它们同样是键盘按钮，
+           只是不走掩码那条路（掩码只有方向键四位）：跳 / 冲刺 / 蹲 / 换枪 /
+           防御 / 图腾。
+
+        ★★ **鼠标一概不算**（用户 2026-09-14 第二轮推翻了第一轮）：
+        连点器为了找到「下一局」那个按钮，很可能**自己把鼠标挪过去**，
+        于是「鼠标动过」这条证据在挂机的人身上照样成立，判据就废了。
+        而这是个横版射击 —— 要躲子弹就得不停走、跳，**一个真在玩的人
+        连着 `AFK_AFTER_S` 秒不碰方向键几乎不可能**（用户的判断）。
+        ⇒ 撤掉的两路：准星（鼠标位置，V0.3bot §36）和冲刺位
+        （bit3 = 按住鼠标右键，§40）。后者撤掉**一点损失都没有**：
+        原版进冲刺要求走路方向非 0（`0x5074fc` 那一段读 `[char+0x4b4]`），
+        而走路方向完全由这份掩码算出来（`0x5073c2`）⇒ 冲刺位置起时
+        掩码必然非 0，第 1 条已经把它算进去了。
+
+        ★ 「本局第一发心跳」当成一次操作：它是「他真的进图了」这个**事件**，
+        挂机的钟从这儿起走。没有它的话，读图慢的人会被上一局的旧账判成挂机。
+
+        ★★ 两样东西**天生不在判据里**，用户 2026-09-14 第三轮点名确认：
+        ① **坐标一个字都不看** ⇒ boss 把人打得连连后退、掉下去、被顶飞，
+           全都不算「他在动」；
+        ② **`F5` 之类的界面按键也不算** —— 这个函数只吃玩家之间的同步包
+           （`forward_peer_data` 那一个出口），F5「开始下一局」走的是大厅
+           那条游戏包（`0x0402` 一族），根本到不了这儿。
+           ⇒ 连点器靠点 F5 刷下一局，判据照样看得穿。
+
+        ★ **热路径**：非心跳的包一次集合查表就掉头走；心跳只多解一个 u16
+        （每人 8 Hz）。这里不读盘、不拿锁、不记日志。
+        """
+        opcode = udpsync.peer_opcode(payload)
+        if opcode != udpsync.OPCODE_HEARTBEAT:
+            if opcode in INPUT_PEER_OPCODES:
+                self.last_input_at = arrived
+                self.afk_carried = False
+            return
+        keys = udpsync.heartbeat_keys(payload)
+        if keys is None:
+            return
+        last, self.last_keys = self.last_keys, keys
+        if last is None:
+            # 本局第一发心跳 = 他真的进图了。**只当锚点，不算操作** ——
+            # 算成操作的话，上一局带过来的「挂机」标记会被它当场抹掉
+            # （用户 2026-09-14 第五轮）。
+            self.last_input_at = arrived
+            return
+        if keys or keys != last:            # 正按着 / 刚按下 / 刚松开
+            self.last_input_at = arrived
+            self.afk_carried = False
+
+    def note_player_action(self, now=None):
+        """★ 「他真的打中 / 捡到 / 得分了」—— **单人局唯一看得见的证据**。
+
+        单人任务房里服务端收不到任何同步包（§111），按键那条判据整个瞎掉。
+        剩下还能看见的就是这几发**上行**包，而它们都是「开枪打中了东西 /
+        走过去捡起来 / 按 Ctrl 用道具」的后果 —— 鼠标连点器随机点是打不出来的。
+
+        ★ 实测分得很开（§111）：真在玩的人一局 146~166 条，挂机的人 1.2~15.6 条；
+        「整局一条都没有」在真玩的人身上是 **0/283**，挂机的人 74%~98%。
+
+        ★ 它同时把「上一局带过来的挂机标记」撤掉：能打中东西的人显然在玩。
+        """
+        self.last_action_at = time.monotonic() if now is None else now
+        self.afk_carried = False
+
     def note_sync_position(self, payload):
         """把这一发同步数据里的**位置**记进轨迹（V0.3 M3）。
 
@@ -9833,6 +10153,9 @@ class Conn:
         #   ★ 转发（`PEER_RELAY.deliver`）**留在锁外**：它要往别人的 socket 上写，
         #     一个卡死的客户端能堵 8 秒（`GAME_SEND_DEADLINE_S`），
         #     拿着房间锁堵在那儿就是整个房间的 bot 一起冻住。
+        # ★ 挂机判定（用户 2026-09-14）：放在分叉**之前**，两条支路都算得到
+        #   —— 它只写这条连接自己的两格，不碰房间状态，所以不需要 `sim_lock`。
+        self.note_player_input(payload, arrived)
         room = self.lobby_room()
         if room is None:
             self.note_sync_position(payload)
@@ -10525,6 +10848,8 @@ class Conn:
             #   `[GameContextQuest + 座位*4 + 0x3b8]`，按座位索引，所以别人
             #   机器上就是「那个座位的分数变了」。不广播的话战绩面板上
             #   队友那一行永远是 0，对战模式更是压根看不到对手的分。
+            # ★ 挂机判定：加分只可能来自「打中了东西」（§111）。
+            self.note_player_action()
             try:
                 self.quest_score = Reader(payload).i32()
             except ValueError:

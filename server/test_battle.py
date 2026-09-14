@@ -536,6 +536,74 @@ class RespawnWatchdogTests(BattleRoom):
         self.assertEqual(0, self.later())
         self.assertEqual([], opcodes(self.bob))
 
+    # ---------------------------------------- 挂机判定的「躺着」闩（2026-09-14）
+    #  ★ 放在这一组是因为它挂的就是这条链上的三个点（死亡广播 / 本人 0x0413 /
+    #    看门狗补包），单元层面的判据在 `test_gameserver.AfkTests`。
+    def test_dying_takes_him_out_of_the_afk_judgement(self):
+        """★ 死了等复活的人**按不了键** —— 再拿「这么久没按键」判他，就是把
+        刚被打死的真玩家写成挂机（用户 2026-09-14）。"""
+        self.bob.last_input_at = gameserver.time.monotonic() - 600
+        self.assertTrue(gameserver.conn_is_afk(self.bob))
+        self.die(self.bob, 1)
+        self.assertIsNotNone(self.bob.dead_since)
+        self.assertFalse(gameserver.conn_is_afk(self.bob))
+
+    def test_his_own_respawn_resumes_the_clock_where_it_stopped(self):
+        """★ 站起来那一刻钟**接着数**（用户 2026-09-14 第四轮）：他死之前
+        已经欠了 10 秒，躺着那一段不算，复活后还剩 `AFK_AFTER_S − 10` 秒。"""
+        self.bob.last_input_at = gameserver.time.monotonic() - 10.0
+        self.die(self.bob, 1)
+        gameserver.Conn.on_game_packet(self.bob, OP_REQ_RESPAWN,
+                                       respawn_payload(seat=1))
+        self.assertIsNone(self.bob.dead_since)
+        self.assertFalse(gameserver.conn_is_afk(self.bob))
+        self.assertAlmostEqual(
+            10.0, gameserver.time.monotonic() - self.bob.last_input_at,
+            delta=1.0)
+
+    def test_settling_a_match_records_who_was_afk(self):
+        """★ 跨局继承那一半的真链路：`send_end_game()` 里记，不是下一局开局
+        时记 —— 两局之间还有 ~26 秒在房间里（实测，§111），到开局那会儿
+        谁的钟都到期了，记下来的就全是「在挂机」。"""
+        now = gameserver.time.monotonic()
+        self.alice.last_action_at = now - gameserver.AFK_SOLO_AFTER_S - 5
+        self.bob.last_action_at = now
+        gameserver.Conn.send_end_game(self.alice)
+        self.assertTrue(self.alice.afk_carried)
+        self.assertFalse(self.bob.afk_carried)
+
+    def test_pressing_f5_never_reaches_the_afk_judgement(self):
+        """★★ 连点器很可能靠点 `F5` 刷下一局（用户 2026-09-14 第三轮），
+        所以 F5 绝不能被当成「他在玩」。
+
+        它天生就不会：F5「开始 / 准备」走的是**大厅那条游戏包**
+        （`0x0402` 一族），而挂机判定只挂在玩家之间的同步包上
+        （`forward_peer_data` 那一个出口）—— 两条路压根不相交。
+        这里把整条链在**真连接**上走一遍，看判定函数一次都没被叫到。
+
+        ⚠ 不连带断言 `last_input_at` 的值：F5 真的开起新一局时，
+        `reset_sync_trails()` 会把钟清成「还没有证据」，那是**对的**
+        （新一局要重新攒证据），和「F5 算不算操作」是两件事。
+        """
+        seen = []
+        real = gameserver.Conn.note_player_input
+        gameserver.Conn.note_player_input = (
+            lambda self, *a, **k: seen.append(self))
+        self.addCleanup(setattr, gameserver.Conn, "note_player_input", real)
+        for opcode in (OP_COUNT_GAME_READY, gameserver.OP_TRIGGER_COUNT_GAME,
+                       OP_LOADING_DONE):
+            for member in self.members:
+                gameserver.Conn.on_game_packet(member, opcode, b"")
+        self.assertEqual([], seen)
+
+    def test_the_watchdog_respawn_puts_him_back_in_too(self):
+        """★ 只挂本人 `0x0413` 那一处的话，被看门狗拉起来的人（bug调查/8 那种
+        客户端卡住的局面）会一直顶着「躺着」的闩，这一局再也判不出挂机。"""
+        self.die(self.bob, 1)
+        self.assertIsNotNone(self.bob.dead_since)
+        self.assertEqual(1, self.later())
+        self.assertIsNone(self.bob.dead_since)
+
     def test_the_watchdog_waits_for_the_client_first(self):
         # 客户端写死 5 秒，看门狗必须明显晚于它，不然会抢在正常重生前面。
         self.die(self.bob, 1)
@@ -654,6 +722,23 @@ class SurvivalRespawnWatchdogTests(RespawnWatchdogTests):
         self.assertEqual(2, self.quest.remaining_lives(1))
         self.clear()
         self.assertEqual(1, self.later())
+
+    def test_a_spectator_who_is_out_of_lives_never_counts_as_afk(self):
+        """★ 用户 2026-09-14 点名的「进入观战模式」那一档：命用完之后这一局
+        再也站不起来，从头到尾按不了键 —— 整局都不许判他挂机。
+
+        判据是「闩只由**重生广播**撤」：命用完时看门狗什么都不发（上一条用例
+        钉的就是这个），所以闩自然一直留着，不用另写一条规则。
+        """
+        for deaths in range(gameserver.PVP_SURVIVAL_LIVES):
+            self.die(self.bob, 1, deaths=deaths)
+        self.quest.settled = False
+        self.quest.pvp_reason = None
+        self.assertIsNotNone(self.bob.dead_since)
+        self.bob.last_input_at = gameserver.time.monotonic() - 600
+        self.assertEqual(0, self.later())          # 看门狗不捞他
+        self.assertIsNotNone(self.bob.dead_since)
+        self.assertFalse(gameserver.conn_is_afk(self.bob))
 
 
 # ----------------------------------------------------------------------------

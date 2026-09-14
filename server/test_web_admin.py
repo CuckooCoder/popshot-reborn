@@ -2356,41 +2356,71 @@ class AdminPlayerTests(_AdminCase):
         self.assertTrue(result["ok"], result)
         return [p["username"] for p in result["players"]], result
 
-    def test_the_online_filter_has_five_settings(self):
-        """「全部」「在线」「不在线」（D75）+「在待机」「在游戏中」（用户 2026-09-13）。
+    def test_the_online_filter_has_six_settings(self):
+        """「全部」「在线」「不在线」（D75）+「待机中」「游戏中」（用户
+        2026-09-13）+「挂机中」（用户 2026-09-14）。
 
-        ★ 五档从 `ONLINE_FILTERS` 现取，不写死清单 —— 前台那个下拉照同一
+        ★ 六档从 `ONLINE_FILTERS` 现取，不写死清单 —— 前台那两个下拉照同一
         份值发过来。
         """
-        # alice 在商店界面（算待机），bob 在打任务。
+        # alice 在商店界面（算待机），bob 在打任务，carol 在对战里挂机。
+        self.accounts.register("carol", "pw3", display_name="小红")
         self.fake_online(alice=gameserver.PLACE_SHOP,
-                         bob=gameserver.PLACE_PLAY_QUEST)
-        self.assertEqual(("all", "on", "off", "idle", "playing"),
+                         bob=gameserver.PLACE_PLAY_QUEST,
+                         carol=gameserver.PLACE_AFK_BATTLE)
+        self.assertEqual(("all", "on", "off", "idle", "playing", "afk"),
                          web_admin.ONLINE_FILTERS)
-        expected = {"all": ["alice", "bob"], "on": ["alice", "bob"],
-                    "off": [], "idle": ["alice"], "playing": ["bob"]}
+        everyone = ["alice", "bob", "carol"]
+        expected = {"all": everyone, "on": everyone, "off": [],
+                    "idle": ["alice"], "playing": ["bob"], "afk": ["carol"]}
         for wanted in web_admin.ONLINE_FILTERS:
             found, _result = self.usernames("q=&online=" + wanted)
             self.assertEqual(expected[wanted], found, wanted)
 
-    def test_idle_and_playing_split_the_online_players_with_no_gap(self):
-        """★ 「在待机」+「在游戏中」必须**正好等于**「在线」，一个不多一个不少。
+    def test_idle_playing_and_afk_split_the_online_players_with_no_gap(self):
+        """★ 「待机中」+「游戏中」+「挂机中」必须**正好等于**「在线」，
+        一个不多一个不少、彼此不重叠。
 
-        两档是从 `gameserver.PLACES` 算出来的（`_idle_places()` = 全部减去
-        「游戏中」那两档），所以以后再加一个位置码时，它要么自动归进待机、
-        要么得有人明确归进 `_playing_places()` —— 不会出现「新位置谁都筛不出来」
+        三档是从 `gameserver.PLACES` 算出来的（`_idle_places()` = 全部减去
+        「游戏中」和「挂机中」），所以以后再加一个位置码时，它要么自动归进
+        待机、要么得有人明确归进另外两档 —— 不会出现「新位置谁都筛不出来」
         这种一句报错都没有的漏洞。
         """
-        idle, playing = web_admin._idle_places(), web_admin._playing_places()
-        self.assertEqual(set(gameserver.PLACES), set(idle) | set(playing))
-        self.assertEqual(set(), set(idle) & set(playing))
+        idle = set(web_admin._idle_places())
+        playing = set(web_admin._playing_places())
+        afk = set(web_admin._afk_places())
+        self.assertEqual(set(gameserver.PLACES), idle | playing | afk)
+        self.assertEqual(len(gameserver.PLACES),
+                         len(idle) + len(playing) + len(afk))
         # 逐个位置码走一遍接口，看它落进哪一档。
         for place in gameserver.PLACES:
             self.fake_online(alice=place)
             on_idle, _r = self.usernames("q=alice&online=idle")
             on_play, _r = self.usernames("q=alice&online=playing")
+            on_afk, _r = self.usernames("q=alice&online=afk")
             self.assertEqual(place in playing, on_play == ["alice"], place)
             self.assertEqual(place in idle, on_idle == ["alice"], place)
+            self.assertEqual(place in afk, on_afk == ["alice"], place)
+
+    def test_the_afk_players_come_out_of_the_playing_bucket(self):
+        """★ 用户 2026-09-14 点名的那条账：**挂机中 + 游戏中 = 改之前那个
+        「游戏中」**，而「待机中」一个挂机的人都不含。
+
+        钉这一条是因为漏改 `_idle_places()` 的症状特别温柔：挂机的人会**同时**
+        出现在「待机中」和「挂机中」两档里，两个数一加就超过在线人数，
+        而接口一句报错都没有。
+        """
+        self.accounts.register("carol", "pw3", display_name="小红")
+        self.fake_online(alice=gameserver.PLACE_AFK_QUEST,
+                         bob=gameserver.PLACE_PLAY_QUEST,
+                         carol=gameserver.PLACE_LOBBY)
+        self.assertEqual(["alice"], self.usernames("q=&online=afk")[0])
+        self.assertEqual(["bob"], self.usernames("q=&online=playing")[0])
+        self.assertEqual(["carol"], self.usernames("q=&online=idle")[0])
+        # 「在线」含挂机的人，「不在线」不含。
+        self.assertEqual(["alice", "bob", "carol"],
+                         self.usernames("q=&online=on")[0])
+        self.assertEqual([], self.usernames("q=&online=off")[0])
 
     def test_every_row_carries_where_that_player_is(self):
         """每行那个 `place`（用户 2026-09-13）：在线的写位置码，不在线的是 None。"""

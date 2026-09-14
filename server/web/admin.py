@@ -583,7 +583,8 @@ def _online_places():
     """现在有哪些账号连着游戏服，各自停在哪个界面：``{账号名: 位置码}``。
 
     位置码就是 `gameserver.PLACE_*`（大厅 / 商店界面 / 待机房间·任务 /
-    待机房间·对战 / 游戏中·任务 / 游戏中·对战），中文名在前台那份 `PLACE_ZH`。
+    待机房间·对战 / 游戏中·任务 / 游戏中·对战 / 挂机中·任务 / 挂机中·对战），
+    中文名在前台那份 `PLACE_ZH`。
     拿不到 `gameserver`（比如单跑注册页）就当没人在线。
 
     ★ **惰性 import** `gameserver`：`web/` 这一层本来不依赖游戏服，
@@ -638,34 +639,51 @@ def _in_match(username):
     return False
 
 
-#: 玩家仓库那条「在线」筛选的五档（三档是用户 2026-09-10 的 D75，
-#: `idle` / `playing` 两档是用户 2026-09-13 加的）。前台那个下拉照这些值发，
-#: `test_web_admin` 拿它当清单逐档打一遍。
-ONLINE_FILTERS = ("all", "on", "off", "idle", "playing")
+#: 玩家仓库那条「在线」筛选的六档（三档是用户 2026-09-10 的 D75，
+#: `idle` / `playing` 两档是用户 2026-09-13 加的，`afk` 是 2026-09-14 加的）。
+#: 前台那个下拉照这些值发，`test_web_admin` 拿它当清单逐档打一遍。
+ONLINE_FILTERS = ("all", "on", "off", "idle", "playing", "afk")
 
 
 def _idle_places():
-    """「在待机」= 人在线但**没在打**：大厅 / 商店界面 / 待机中的房间。
+    """「在待机」= 人在线但**没进图**：大厅 / 商店界面 / 待机中的房间。
 
-    ★ 定义由 `gameserver.PLACES` 减去「游戏中」那两档**算出来**，不手抄一份
-    —— 以后再加一个位置码时，它要么自动归进待机、要么得有人明确把它归进
-    `_playing_places()`，不会出现「新位置谁都筛不出来」。
+    ★ 定义由 `gameserver.PLACES` 减去「游戏中」和「挂机中」**算出来**，
+    不手抄一份 —— 以后再加一个位置码时，它要么自动归进待机、要么得有人明确
+    把它归进另外两档，不会出现「新位置谁都筛不出来」。
     """
     try:
         import gameserver
     except ImportError:
         return ()
-    playing = _playing_places()
-    return tuple(place for place in gameserver.PLACES if place not in playing)
+    busy = set(_playing_places()) | set(_afk_places())
+    return tuple(place for place in gameserver.PLACES if place not in busy)
 
 
 def _playing_places():
-    """「在游戏中」= 真进图了，含任务和对战两档。"""
+    """「在游戏中」= 真进图了**而且还在操作**，含任务和对战两档。
+
+    ★ 挂机的那两档**不在**这里（用户 2026-09-14）：改之前「游戏中」是
+    「进图了」，改之后它被劈成「游戏中」+「挂机中」两半 —— 两半加起来
+    才等于原来那一档。
+    """
     try:
         import gameserver
     except ImportError:
         return ()
     return (gameserver.PLACE_PLAY_QUEST, gameserver.PLACE_PLAY_BATTLE)
+
+
+def _afk_places():
+    """「挂机中」= 进图了、但连续超过 `gameserver.AFK_AFTER_S` 秒没有操作。
+
+    含任务和对战两档 —— 筛选那一档把两个一起筛出来，列表里各写各的。
+    """
+    try:
+        import gameserver
+    except ImportError:
+        return ()
+    return (gameserver.PLACE_AFK_QUEST, gameserver.PLACE_AFK_BATTLE)
 
 
 def _online_filter(wanted, places):
@@ -688,6 +706,9 @@ def _online_filter(wanted, places):
     if wanted == "playing":
         playing = set(_playing_places())
         return lambda username, _account: places.get(username) in playing
+    if wanted == "afk":
+        afk = set(_afk_places())
+        return lambda username, _account: places.get(username) in afk
     return None
 
 
