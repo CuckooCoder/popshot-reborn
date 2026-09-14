@@ -716,6 +716,11 @@ GCP_NAMES = {
     # 拾取请求。RawPacket（8 字节 = 座位号 + 物件实例句柄），唯一发送点
     # 0x558e9a，只被 GameContext::SendGetItem(0x493a99) 调用（FINDINGS §115）。
     0x0407: "gcpGetItem",
+    # ★ **同号反向**：这是客户端方向的 0x040b，和服务端方向那发「塞道具」
+    # 不是一个包。RawPacket（四个 int32 = 目标座位 / 发起者座位 / 物件 id /
+    # 量），唯一发送点 0x558ec2，只被 0x493af5 调用 —— `[红心达人]` 捡心
+    # 和装备的 `HeartBoost` 走的都是它（§119）。
+    0x040b: "rawGiveHeart",
     # 「按 Ctrl 用道具」。RawPacket（一个 int32 = 道具槽序号，客户端恒发 0），
     # 唯一发送点 0x559205，只被 Character 的输入处理 0x516367 调用（§194）。
     0x040c: "rawUseItem",
@@ -2526,6 +2531,10 @@ ITEM_NAMES = {
     10312: "CloakingItem 隐身",
     10313: "TeamHpChargeItem 全队 HP 回复剂",
     10314: "TeamReflectItem 全队反射",
+    # ★ 这两件地上刷不出来，只出现在**客户端方向**的 0x040b 里（§119）：
+    #   前者是 `[红心达人]` 给全队回的那一份，后者是装备的 `HeartBoost`。
+    10315: "하트 心（红心达人给全队回的）",
+    10316: "HeartBoostHpUp 捡心额外回血（HeartBoost 加成）",
     10400: "SlowMineItem 胶水",
     10401: "SmokeItem 烟雾弹",
     10500: "BulletPoisonItem 毒",
@@ -3139,6 +3148,92 @@ def build_grant_item(item_id):
     卡住 `ITEM_SLOT_COUNT`，否则两边的槽会错位。
     """
     return struct.pack(ITEM_SLOT_FORMAT, int(item_id))
+
+
+# ---------------------------------------------------------------------------
+# ★★★ **同号反向**：客户端方向的 `0x040b` 是**另一个包**（§119）
+#
+# 上面那一发是服务端方向的 4 字节。客户端方向的 `0x040b` 有 **16 字节**，
+# 序列化 `0x558ec2`（`push 0x40b` + 四发 `0x5d591f`），全客户端**只有一个
+# 发送点** `0x493af5`，两条路会走到它：
+#
+#   `560006 [红心达人]`   捡心函数 `0x522987` -> `0x522a96`  物件 10315
+#   `heartboost`（idx 10，青鸟 `220001`，**已上架**）`0x522ae3`  物件 10316
+#
+# ★★ **`0x493af5` 只组包、发包，一个字节的本地状态都不改**
+# （`0x493b1f` 构造 -> `0x493b2e` 序列化 -> `0x493b3e` 发送 -> 析构）。
+# 服务端不转发 = **谁都不回血，连捡心的人自己也没有**。
+#
+# 线格式和**服务端方向的 `0x040a gspItemEffect` 逐字段相同**（这不是巧合：
+# 收侧处理器 `0x551d95` 就是照这四格去调 `UseItemEffect` 的）：
+#
+#     +0x00  int32  目标座位   -> `0x404ff6` 取角色 = `UseItemEffect` 的 this
+#     +0x04  int32  发起者座位 -> 第 3 个参数（10315 那支要求它 **!= -1**）
+#     +0x08  int32  物件 id    -> 第 1 个参数（`10315` 하트 / `10316` HeartBoostHpUp）
+#     +0x0c  int32  量         -> 第 2 个参数（10315 那支要求它 **!= 0**）
+#
+# ⇒ **服务端要做的就是把这 16 字节原样按 `0x040a` 广播出去（含发包人自己）**。
+# 收侧 `0x551d95` **没有**「座位 == 我的座位就丢掉」那道闸（`0x040d` 的
+# `0x551dfb` 才有），所以回给他自己那一发是有效的、也是必须的。
+#
+# ⚠ 顺带纠正 `ITEM_EFFECT_ARG2` / `ARG3` 上面那句「两个参数在 `0x508441` 里
+# 都只被当作局部变量重写」：**那只对 PvP 道具那几支成立**。10315 / 10316
+# 两支是**真的读**它俩的（`0x508a55` 判 arg3、`0x508a74` 判 arg2、
+# `0x508b80` / `0x508da9` 把 arg2 当回血量 push 进 `vft[+0x12c]`）。
+HEART_EFFECT_FORMAT = "<iiii"
+HEART_EFFECT_SIZE = struct.calcsize(HEART_EFFECT_FORMAT)
+
+#: 客户端方向 `0x040b` 允许出现的物件 id —— `0x493af5` 的两个调用点就这两件。
+#: 别的 id 放进来等于让改过的客户端点播任意一条 `UseItemEffect` 分支。
+HEART_EFFECT_ITEM_IDS = frozenset({
+    10315,      # 하트 —— `[红心达人] 560006` 给全队回的那一份
+    10316,      # HeartBoostHpUp —— `EquipBonus` 的 `HeartBoost`（青鸟 220001）
+})
+
+#: `10315` 那一份的量**写死在 exe 里**：`0x522a45` 给 5，
+#: `0x522a4e` 在（游戏类型 == 3 或 `[session+0x1c] == 5`）时给 10（§53⑤）。
+TITLE_HEART_AMOUNT_MAX = 10
+
+
+def heart_effect_amount_max():
+    """客户端**拿得出**的最大回血量 —— 超过它就是改过的客户端。
+
+    ★ 和 `CHAR_ATTR_MAX` 一个路子：**上界照客户端自己的数据算出来**，
+    不是拍一个常量（铁律 10 的精神）。两个来源取大：
+
+    * `10315` = 称号那份，exe 写死，最大 `TITLE_HEART_AMOUNT_MAX`；
+    * `10316` = 装备的 `HeartBoost` 加成，`0x522af1` 某条件下 `add eax,eax`
+      翻倍 ⇒ **2 × 全表最大的 `heartboost`**（现在只有青鸟 `220001` 的 5）。
+
+    `shop_items.json` 换一版，这个上界自己跟着走。
+    """
+    global _HEART_EFFECT_AMOUNT_MAX
+    if _HEART_EFFECT_AMOUNT_MAX is None:
+        biggest = 0
+        for kind_name in shopdata.kinds():
+            for item_id in shopdata.ids_of_kind(kind_name):
+                value = shopdata.bonus(item_id).get("heartboost", 0)
+                if isinstance(value, int) and value > biggest:
+                    biggest = value
+        _HEART_EFFECT_AMOUNT_MAX = max(TITLE_HEART_AMOUNT_MAX, biggest * 2)
+    return _HEART_EFFECT_AMOUNT_MAX
+
+
+#: `heart_effect_amount_max()` 的缓存（物品表是只读镜像，一次算完就不变）。
+_HEART_EFFECT_AMOUNT_MAX = None
+
+
+def parse_heart_effect(payload):
+    """opcode 0x040b（**客户端 -> 服务端**，16 字节）—— 「给这个座位回 N 点血」。
+
+    返回 `(目标座位, 发起者座位, 物件 id, 量)`；长度不够抛 ValueError。
+    字段含义见上面那段注释。
+    """
+    if len(payload) < HEART_EFFECT_SIZE:
+        raise ValueError(
+            f"客户端方向的 0x040b 只有 {len(payload)} 字节，"
+            f"要 {HEART_EFFECT_SIZE}")
+    return struct.unpack_from(HEART_EFFECT_FORMAT, payload, 0)
 
 
 def parse_use_item(payload):
@@ -6556,6 +6651,9 @@ class Conn:
         # 本局转发过几发 0x040d「效果结束」（§200）。死后每 5 秒就有一发
         # `(座位, 属性 0)`，非 verbose 时只报第一条，免得刷屏。
         self.attrs_removed = 0
+        # 本局转发过几发客户端方向的 0x040b「回血」（§119）。捡一次心就是
+        # 同队人数那么多发，同样非 verbose 时只报第一条。
+        self.hearts_relayed = 0
         # 已经报过一次的高频 opcode（见 NOISY_OPCODES）。
         self.noisy_seen = set()
         # ★ 逐连接的三个文件**全部只在 --verbose 下建**（D112）。
@@ -8828,6 +8926,58 @@ class Conn:
                      f"0x040d 转给房里另外 {sent} 人"
                      + ("" if VERBOSE else "（本局第一条，后续静音）"))
 
+    def on_heart_effect(self, payload):
+        """客户端方向的 `0x040b`「给这个座位回 N 点血」—— **原样转成 `0x040a` 广播**（§119）。
+
+        `[红心达人] 560006` 捡到心、或者戴着有 `HeartBoost` 的宠物（青鸟
+        `220001`）时，客户端对**每一个同队活着的座位各发一发**。
+        `0x493af5` 只发包不改本地状态 ⇒ 这一发不转发，回血就**彻底消失**，
+        连捡心的人自己都没有。
+
+        两条口径（都照 `0x040d` 的老规矩来）：
+
+        - **发起者那一格以连接为准**，不信包里那个 —— 否则改过的客户端
+          可以冒充别人当发起者；
+        - ★ **必须含发包人自己**（和 `0x040d` 相反）：他那台机器什么都没做，
+          而收侧 `0x551d95` 也没有「这是我自己的座位就丢掉」那道闸。
+
+        三道闸（越界的一律整包丢掉，**不回半发**）：物件 id 只认
+        `HEART_EFFECT_ITEM_IDS`、目标座位在房里、量在
+        `heart_effect_amount_max()` 以内且为正。
+        """
+        try:
+            target_seat, _from_seat, item_id, amount = \
+                parse_heart_effect(payload)
+        except (ValueError, struct.error) as error:
+            self.log(f"   客户端方向 0x040b 解析失败: {error}；不转发")
+            return
+        if item_id not in HEART_EFFECT_ITEM_IDS:
+            self.log(f"   0x040b 物件 {item_id} 不在 {sorted(HEART_EFFECT_ITEM_IDS)} "
+                     f"里；不转发")
+            return
+        if not 0 <= target_seat < ROOM_SEAT_COUNT:
+            self.log(f"   0x040b 目标座位 {target_seat} 超出 "
+                     f"0~{ROOM_SEAT_COUNT - 1}；不转发")
+            return
+        cap = heart_effect_amount_max()
+        if not 0 < amount <= cap:
+            self.log(f"   0x040b 回血量 {amount} 不在 1~{cap} 里；不转发")
+            return
+        seat_id = self.my_seat
+        if _from_seat != seat_id:
+            self.log(f"   ⚠ 0x040b 报的发起者是座位 {_from_seat}，"
+                     f"但这条连接坐的是 {seat_id}；按 {seat_id} 转发")
+        name = ITEM_NAMES.get(item_id, "未知物件")
+        sent = self.battle_broadcast(
+            build_game(OP_ITEM_EFFECT,
+                       build_item_effect(target_seat, item_id,
+                                         arg2=amount, arg3=seat_id)))
+        self.hearts_relayed += 1
+        if self.hearts_relayed == 1 or VERBOSE:
+            self.log(f"★ 座位 {seat_id} 让座位 {target_seat} 回 {amount} 点血"
+                     f"（物件={item_id} {name}）—— 0x040a 广播给 {sent} 人"
+                     + ("" if VERBOSE else "（本局第一条，后续静音）"))
+
     def on_mark_quest_success(self, payload):
         """0x0417 `gcpMarkQuestSuccess`「这一关我打通了」—— 只记，不回。
 
@@ -10590,6 +10740,7 @@ class Conn:
         self.items_created = 0
         self.items_picked = 0
         self.attrs_removed = 0
+        self.hearts_relayed = 0
 
     # -- 帧处理 ------------------------------------------------------------
     def on_game_packet(self, opcode, payload):
@@ -10836,6 +10987,12 @@ class Conn:
             # 0x040a 广播（让全房间都算上那个效果）。
             # 不回的话玩家会觉得「捡了道具但按了没反应」。
             self.on_use_item(payload)
+        elif opcode == OP_GRANT_ITEM:
+            # ★ **同号反向**：客户端方向的 0x040b 是 16 字节的「给这个座位
+            # 回 N 点血」（§119），和服务端方向那发 4 字节的「塞道具」
+            # 毫无关系。原样转成 0x040a 广播（**含他自己**）——
+            # 不转发的话 `[红心达人]` 和青鸟宠物的回血谁都拿不到。
+            self.on_heart_effect(payload)
         elif opcode == OP_REMOVE_CHAR_ATTR:
             # 客户端方向的 0x040d = 「我身上那个效果结束了」（§200）。
             # 原样广播给房里其他人（发包的人自己不用收）——

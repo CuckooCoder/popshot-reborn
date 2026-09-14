@@ -49,6 +49,7 @@ from lobby import (Lobby, MOVE_INTO_ALREADY_PLAYING,               # noqa: E402
                    TEAM_A, TEAM_B, TEAM_LAYOUT_TEAMS)
 import mapdata                                                      # noqa: E402
 import relayserver                                                  # noqa: E402
+import shopdata                                                     # noqa: E402
 import test_mapdata                                                 # noqa: E402
 
 
@@ -1668,6 +1669,116 @@ class AttrRemovalTests(BattleRoom):
     def test_every_attr_id_in_the_table_is_named(self):
         for attr_id in range(gameserver.CHAR_ATTR_MAX + 1):
             self.assertIn(attr_id, gameserver.CHAR_ATTR_NAMES)
+
+
+# ----------------------------------------------------------------------------
+# 回血：**客户端方向**的 `0x040b`（§119）
+#
+# `[红心达人] 560006` 捡到心、或者戴着带 `HeartBoost` 的宠物（青鸟 `220001`）
+# 时，客户端对**每一个同队活着的座位各发一发**
+# `0x040b(目标座位, 我的座位, 物件 id, 量)`。
+#
+# ★★ `0x493af5` **只组包发包、一个字节的本地状态都不改** ⇒ 服务端不把它
+# 转成 `0x040a` 广播的话，回血**彻底消失，连捡心的人自己都没有**。
+# 这两条加成在 V0.3.3 之前一直是哑的。
+# ----------------------------------------------------------------------------
+def heart_payload(target_seat, from_seat, item_id=10315, amount=5):
+    """客户端方向的 `0x040b`（四个 int32），序列化 `0x558ec2`。"""
+    return (w_i32(target_seat) + w_i32(from_seat)
+            + w_i32(item_id) + w_i32(amount))
+
+
+class HeartEffectTests(BattleRoom):
+
+    OP_IN = gameserver.OP_GRANT_ITEM           # 0x040b（★ 客户端方向）
+    OP_OUT = gameserver.OP_ITEM_EFFECT         # 0x040a（服务端方向）
+    HEART = 10315
+    HEART_BOOST = 10316
+
+    def give(self, conn, target_seat=0, from_seat=None,
+             item_id=HEART, amount=5):
+        from_seat = conn.my_seat if from_seat is None else from_seat
+        gameserver.Conn.on_game_packet(
+            conn, self.OP_IN,
+            heart_payload(target_seat, from_seat, item_id, amount))
+
+    def test_the_heal_reaches_everyone(self):
+        # ★★ 这就是那条 bug：不转发 = 谁都不回血。
+        self.give(self.alice, target_seat=1)
+        self.assertIn(self.OP_OUT, opcodes(self.bob))
+
+    def test_the_sender_gets_it_back_too(self):
+        # ★ 和 `0x040d` **相反**：他那台机器什么都没做，而收侧 `0x551d95`
+        #   也没有「这是我自己的座位就丢掉」那道闸 —— 必须回给他。
+        self.give(self.alice, target_seat=0)
+        self.assertIn(self.OP_OUT, opcodes(self.alice))
+
+    def test_the_body_is_a_well_formed_item_effect(self):
+        # 线格式和 `0x040a` 逐字段相同：(目标座位, 发起者座位, 物件, 量)。
+        self.give(self.alice, target_seat=1, amount=5)
+        expected = gameserver.build_item_effect(1, self.HEART,
+                                                arg2=5, arg3=0)
+        self.assertEqual([expected], bodies(self.bob, self.OP_OUT))
+        # 转一圈回来还能解回原样 —— 两个包就是同一个形状。
+        self.assertEqual((1, 0, self.HEART, 5),
+                         gameserver.parse_heart_effect(expected))
+
+    def test_the_sender_seat_comes_from_the_connection(self):
+        # 否则改过的客户端可以冒充别人当发起者。
+        self.bob.my_seat = 1
+        self.give(self.bob, target_seat=0, from_seat=4)
+        self.assertEqual(
+            [gameserver.build_item_effect(0, self.HEART, arg2=5, arg3=1)],
+            bodies(self.alice, self.OP_OUT))
+
+    def test_the_heart_boost_item_goes_through_too(self):
+        # 青鸟宠物那一份（`EquipBonus` 的 `HeartBoost`）走同一条路。
+        self.give(self.alice, target_seat=0, item_id=self.HEART_BOOST)
+        self.assertEqual(
+            [gameserver.build_item_effect(0, self.HEART_BOOST,
+                                          arg2=5, arg3=0)],
+            bodies(self.alice, self.OP_OUT))
+
+    def test_a_short_payload_is_dropped(self):
+        gameserver.Conn.on_game_packet(self.alice, self.OP_IN,
+                                       w_i32(0) + w_i32(0) + w_i32(10315))
+        self.assertEqual([], opcodes(self.bob))
+
+    def test_an_item_that_is_not_a_heart_is_dropped(self):
+        # 别的 id 放进来 = 让改过的客户端点播任意一条 `UseItemEffect` 分支
+        # （护盾 / 加速 / 隐身…全在那张跳表上）。
+        for item_id in (10300, 10308, 10100, 0):
+            self.give(self.alice, target_seat=0, item_id=item_id)
+        self.assertEqual([], opcodes(self.bob))
+
+    def test_an_out_of_range_target_seat_is_dropped(self):
+        for seat in (-1, gameserver.ROOM_SEAT_COUNT):
+            self.give(self.alice, target_seat=seat)
+        self.assertEqual([], opcodes(self.bob))
+
+    def test_an_amount_outside_what_the_client_can_produce_is_dropped(self):
+        cap = gameserver.heart_effect_amount_max()
+        for amount in (0, -5, cap + 1, 9999):
+            self.give(self.alice, target_seat=0, amount=amount)
+        self.assertEqual([], opcodes(self.bob))
+        # 上界本身要放行。
+        self.give(self.alice, target_seat=0, amount=cap)
+        self.assertIn(self.OP_OUT, opcodes(self.bob))
+
+    def test_the_cap_is_derived_from_the_item_table(self):
+        # ★ 不是拍脑袋的常量：称号那份 exe 写死 10，装备那份是
+        #   2 × 全表最大的 `heartboost`（青鸟 5 ⇒ 10）。
+        biggest = 0
+        for kind_name in shopdata.kinds():
+            for item_id in shopdata.ids_of_kind(kind_name):
+                biggest = max(biggest,
+                              shopdata.bonus(item_id).get("heartboost", 0))
+        self.assertEqual(max(gameserver.TITLE_HEART_AMOUNT_MAX, biggest * 2),
+                         gameserver.heart_effect_amount_max())
+
+    def test_both_ids_are_named_for_the_log(self):
+        for item_id in gameserver.HEART_EFFECT_ITEM_IDS:
+            self.assertIn(item_id, gameserver.ITEM_NAMES)
 
 
 # ----------------------------------------------------------------------------
