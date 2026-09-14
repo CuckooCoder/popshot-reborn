@@ -530,6 +530,40 @@ SPECIAL_BONUS_ZH = {
 #: 连 flags `0x02` 的产生点全镜像都找不到 ⇒ **原版永远不会触发**，不写进说明。
 DEAD_BONUS_KEYS = ("critical",)
 
+#: `Data/GameProps.ini` 里翅膀那五个常量。**这里是抄的，源在那个 ini**
+#: —— `test_shopcfg.WingPropsTests` 回去读原文件核对，改了不一致就报红。
+#: （没走 `bot_chrprops.json` 那条提取链：那份产物只收「和体力有关」的五个常量，
+#:   为了两行说明文去改提取器 + 抬 FORMAT + 重提五份产物，不划算。）
+WING_PROPS = {
+    "WingStartSpCost":  10.0,   # 张开时一次性扣的体力
+    "WingUseSpCost":     1.0,   # 维持时每 tick 扣的体力
+    "WingGravityRatio":  0.35,  # 维持时重力乘这个系数
+    "WingFallSpeed":     5.5,   # 张开期间的最大下落速度
+    "WingStartSpeed":    0.0,
+}
+
+#: **装了这个部位就改变玩法**的效果 —— 和 `EquipBonus` 无关，客户端按
+#: `PartFlag` 直接判。★ 全客户端**只有翅膀这一条**：带部位标志的
+#: `Equipment::HasPart`（`0x558501`）全程序**只有一个调用点** `0x50a13e`，
+#: push 的就是 `0x200` = 512 = 翅膀槽（`0x50a115` 那个小函数）。
+#:
+#: 链路（逐指令核过，2026-09-15）：
+#:   `0x515f78  cmp [角色+0x750], 2`      ← 跳跃段数，必须已经到 2
+#:   `0x515f87  call 0x50a115`            ← 身上有没有翅膀（PartFlag 512）
+#:   `0x515f94  push 0x6856bc`            ← 取 `WingStartSpCost` 扣体力
+#:   `0x5028fb… 0x502914 mov [角色+0x2de], bl`  ← 置「翅膀展开中」标志
+#:   `0x4feb12  cmp [角色+0x2de], bl` → `0x4feb47 fmul`  ← 重力 × `WingGravityRatio`
+#:   `0x5076af  push 0x684f60`            ← 下落速度封顶到 `WingFallSpeed`
+#: 跳跃段数怎么涨：`0x5161d4 inc` 逐级 0→1→2，`0x5161bc` 直接置 2。
+#: ★ **「连按三下跳跃键」是用户 2026-09-15 实机试出来的**：前两下把段数推到 2，
+#:   第三下落在 `0x515f78` 那条分支上才真的张开。静态只能读到「段数==2 时张开」，
+#:   哪一下对应哪一次输入是实机定的。
+PART_EFFECT_ZH = {
+    512: ("连按三下跳跃键张开翅膀滑翔\n"
+          "下落重力降到 %d%%，期间持续消耗体力"
+          % int(round(WING_PROPS["WingGravityRatio"] * 100))),
+}
+
 #: 按 itemId **硬编码在 exe 里**的特殊效果 —— `EquipBonus.ini` / `weapon.ini`
 #: 里一个字都查不到，只能逆向。
 #:
@@ -1188,6 +1222,16 @@ def _bonus_lines(bonus):
 def _effect_lines(item):
     """第 2 段：特殊效果 / 条件加成 / 「无属性加成」兜底。"""
     lines = []
+    # 按部位生效的（翅膀滑翔）。★ 放在最前面：它是这件东西**唯一**的效果，
+    #   而且没有它的话这几件会掉进 `KIND_USAGE_ZH["armor"]` 的「无属性加成」
+    #   兜底 —— 那句话对翅膀是**错的**，玩家照着看就以为纯外观。
+    # ★ **按位与，不是相等**：`0x55850e and eax,[esp+4]` —— 客户端测的是位。
+    #   一件东西可以同时占好几个槽（「羽翼套装」`PartFlag=539` = 512+16+8+2+1，
+    #   上衣/下装/鞋/手套/翅膀一件全占），写成 `== 512` 的话**恰恰是套装漏掉**，
+    #   而用户报的就是穿套装时感觉不一样。
+    for flag, text in sorted(PART_EFFECT_ZH.items()):
+        if item.part_flag & flag:
+            lines.append(text)
     hardcoded = SPECIAL_EFFECT_BY_ID.get(item.id)
     if hardcoded:
         lines.append(hardcoded % ())

@@ -1324,5 +1324,77 @@ class SchemaTests(unittest.TestCase):
             self.assertTrue(shopcfg.SCHEMA[which]["help"], which)
 
 
+class WingPropsTests(unittest.TestCase):
+    """翅膀那几个常量是**抄**在 `shopcfg.WING_PROPS` 里的，源在原版 INI。
+
+    抄来的数值只有一种活法：**回去和源头对一遍**。不然哪天有人调了
+    `GameProps.ini`，说明文还在念旧数字 —— 而且不报错、没人看得见。
+    （`shopcfg` 不去 import 那个 ini：说明文是热路径，为两行字读盘不值当。）
+    """
+
+    def _game_props(self):
+        import config as server_config
+        root = os.path.dirname(HERE)
+        path = os.path.join(root, "game_patched",
+                            server_config.PACK_DEVELOP_DIR, "Data", "GameProps.ini")
+        if not os.path.exists(path):
+            raise unittest.SkipTest("不在源码仓库里（缺 %s），跳过" % path)
+        # ★ CP949：这个文件是原版韩文注释的裸 key=value，一个节都没有。
+        with open(path, "rb") as f:
+            text = f.read().decode("cp949")
+        out = {}
+        for line in text.replace("\r\n", "\n").split("\n"):
+            line = line.split("#")[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                try:
+                    out[k.strip()] = float(v.strip())
+                except ValueError:
+                    pass
+        return out
+
+    def test_抄下来的翅膀常量和原版ini一致(self):
+        props = self._game_props()
+        for key, copied in sorted(shopcfg.WING_PROPS.items()):
+            self.assertIn(key, props, "GameProps.ini 里没有 %s 了" % key)
+            self.assertEqual(props[key], copied,
+                             "%s 变了：ini 是 %s，shopcfg 抄的是 %s —— "
+                             "两边一起改，说明文里的数字也要跟" % (key, props[key], copied))
+
+    def test_翅膀道具的说明文写着滑翔而不是无属性加成(self):
+        """★ 没有这条的话，9 件翅膀会掉进「外观装备。无属性加成。」的兜底 ——
+        那句话是**错的**，用户 2026-09-15 就是穿着它发现「和平时不一样」才来问的。
+        """
+        # ★ 按位，不是相等：「羽翼套装」是 539（512+16+8+2+1），一件占五个槽。
+        #   写成 `== 512` 的话恰恰漏掉套装 —— 而用户就是穿套装发现的。
+        wings = [i for i in _all_item_ids()
+                 if shopdata.get(i) and shopdata.get(i).part_flag & 512]
+        self.assertTrue(wings, "一件翅膀都没有？物品表不对")
+        self.assertTrue(any(shopdata.get(i).part_flag != 512 for i in wings),
+                        "没有一件是多槽位的？那按位这条就没被真正验到")
+        for item_id in wings:
+            desc = shopcfg.item_desc_zh(shopdata.get(item_id))
+            self.assertIn("滑翔", desc, "%d 的说明文没写滑翔：%r" % (item_id, desc))
+            self.assertNotIn("无属性加成", desc, item_id)
+            # 第 2 段就 3 行位置，别写溢出
+            tail = desc.split(shopcfg.DESC_SEPARATOR)[-1]
+            self.assertLessEqual(len(tail.split("\n")), shopcfg.ITEM_DESC_MAX_LINES_2,
+                                 "%d 的第 2 段超行：%r" % (item_id, tail))
+            self.assertNotIn("|", tail.replace(shopcfg.DESC_SEPARATOR, ""))
+
+    def test_只有翅膀这一个部位带玩法效果(self):
+        """`Equipment::HasPart(flag)`（`0x558501`）全程序只有一个调用点，
+        push 的是 `0x200`。多出第二条就说明有人加了没记录的玩法 —— 让它报红。
+        """
+        self.assertEqual([512], sorted(shopcfg.PART_EFFECT_ZH))
+
+
+def _all_item_ids():
+    out = []
+    for kind_name in shopdata.kinds():
+        out.extend(shopdata.ids_of_kind(kind_name))
+    return out
+
+
 if __name__ == "__main__":
     unittest.main()
