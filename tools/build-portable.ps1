@@ -53,6 +53,10 @@ Assert-InsideDist -Path $OutputDirectory -DistRoot $DistRoot
 #   `build-menu.ps1` 更早的地方已经编过一次；这里是给「直接跑本脚本」的人
 #   兜底，同一个进程里不会编第二遍。
 Invoke-HookBuild -Root $Root
+# ★ 资源卷同理（D123）：Pack_develop -> Pack_publish 增量打好、服务端数据跟上，
+#   打不成就停在这。`build-menu.ps1` 已经跑过的话这里一步都不做。
+Invoke-PackBuild -Root $Root
+$packDirs = Get-PackDirs -Root $Root
 
 Assert-EmptyTarget -Path $OutputDirectory -Force:$Force
 
@@ -213,14 +217,20 @@ try {
     }
 
     # --- 4. 游戏本体 ---------------------------------------------------------
-    Write-Host '  [4/6] game_patched（排除 Debug / Dump，约 250 MiB 的崩溃转储）'
+    Write-Host ("  [4/6] game_patched（排除 Debug / Dump 那约 250 MiB 的崩溃转储，" +
+                "以及明文资源树 {0} 和旧的 {1}）" -f $packDirs.PACK_DEVELOP_DIR, $packDirs.PACK_LEGACY_DIR)
     $sourceGame = Join-Path $Root 'game_patched'
     $targetGame = Join-Path $OutputDirectory 'game_patched'
     New-Item -ItemType Directory -Path $targetGame -Force | Out-Null
+    # ★ 明文资源树只进 git 不进包（540 MB，而且客户端读的是 Pack_publish 里的卷）；
+    #   旧的 Pack\ 目录理论上不该再存在（.gitignore 也挡着），这里再排除一遍是双保险。
+    $skipTop = @('Debug', 'Dump', 'BigShot.rpt', $packDirs.PACK_DEVELOP_DIR, $packDirs.PACK_LEGACY_DIR)
     foreach ($item in Get-ChildItem -LiteralPath $sourceGame -Force) {
-        if ($item.Name -in @('Debug', 'Dump', 'BigShot.rpt')) { continue }
+        if ($item.Name -in $skipTop) { continue }
         Copy-Item -LiteralPath $item.FullName -Destination $targetGame -Recurse -Force
     }
+    $volumeCount = Assert-PackagePackLayout -Root $Root -PackageRoot $OutputDirectory
+    Write-Host ("        资源卷 {0} 个，和 pack-index.json 逐个对上（名、大小、sha256）" -f $volumeCount) -ForegroundColor DarkGray
     New-Item -ItemType Directory -Path (Join-Path $OutputDirectory 'logs') -Force | Out-Null
     # ★ 客户端包里也带着完整的 server\，可以当服务器让别人连（README「当前状态」）。
     #   别人的客户端闪退后会把崩溃现场传到这里来 —— 和服务端包**同一套代码**

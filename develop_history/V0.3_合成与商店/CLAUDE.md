@@ -117,7 +117,9 @@ V0.2 的 `FINDINGS.md` 有 41 万字符、V0.3bot 的有 45 万，**别整份翻
 | 路径 | 用途 |
 |---|---|
 | `game_org/` `原版安装包/` | **只读，永不修改**（不在本工作副本里，见下） |
-| `Pack_decrypt/` | 解开的 `Pack\*.pkn` 资源树，**只读**。★ 本版的数据源：`Data/ShopItem-Chn.ini` / `EquipBonus-Chn.ini` / `weapon.ini` / `Promotion-chn.ini` / `Ui/*.ui` |
+| `Pack_decrypt/` | 原版 `Pack\*.pkn` 解出来的资源树，**只读参照**（在 `original_resource` 分支，main 里被 .gitignore 掉）。★ 2026-09-14 起数据源换成它的副本 **`game_patched/Pack_develop/`**（进 git，可以改）：`Data/ShopItem-Chn.ini` / `EquipBonus-Chn.ini` / `weapon.ini` / `Promotion-chn.ini` / `Ui/*.ui` |
+| `game_patched/Pack_develop/` | ★ **明文资源树**，改资源改这里（16266 个文件 / 540 MB，进 git，不进发布包）。改完跑 `tools\build-pack.bat`（§114 / D123） |
+| `game_patched/Pack_publish/` | `tools/pkn.py` 打出来的 **原版格式加密卷**（一个子目录一卷，约 151 卷）+ `pack-index.json`；客户端经 bshook 重定向读这里（进 git、进发布包）。原来的 `game_patched/Pack/` 已废弃 |
 | `re/` | 逆向产物：`BigShot_22524.exe` / `.img`、`vftables.json`（机械生成，**别手改**）、★ **`packet_api.md`** |
 | `tools/` | 便携逆向工具 + 自写探针 + 启停脚本。★ 逆向工具箱是 **`re_bs.py`**；★ 本版新增 `shopdata.py` / `shopicons.py`、`quest-clear.bat`。★ **更新原版数据只有一个入口：`update-gamedata.bat`**（五份产物一次全提，D53；以前那五个 `update-*.bat` 已合并删除）|
 | `server/` | Python 服务端（**单机假服务器和云端是同一套代码**）。★ 本版新增 `shopdata.py` / `shopcfg.py` / **`shopdefaults.py`（四份配置的模板 = 设计表，D50）** / `shop.py` / `web/admin.html`，产物 `shop_items.json` |

@@ -110,20 +110,23 @@ def render_updater():
     ])
 
 
-def write_if_changed(path, want, banner):
-    """内容有变才落盘（CRLF：Windows C 工程，仓库里的 .c/.h 都是这样）。"""
+def write_if_changed(path, want, banner, tag="ports"):
+    """内容有变才落盘（CRLF：Windows C 工程，仓库里的 .c/.h 都是这样）。
+
+    `tag` 只是日志前缀 —— `gen_pack_h.py` 也用这个函数，打出来的行别都叫 [ports]。
+    """
     try:
         with open(path, "r", encoding="utf-8", newline="") as f:
             have = f.read().replace("\r\n", "\n")
     except OSError:
         have = None
     if have == want:
-        print(f"[ports] {path} 无变化")
+        print(f"[{tag}] {path} 无变化")
         return True
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="\r\n") as f:
         f.write(want)
-    print(f"[ports] {banner} {path}")
+    print(f"[{tag}] {banner} {path}")
     return True
 
 

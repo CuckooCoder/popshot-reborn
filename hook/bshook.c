@@ -9,6 +9,9 @@
  *
  * 阶段 2：GameGuard 校验点使用 DR0 + VEH，在执行瞬间改寄存器，不改游戏代码
  * 阶段 3：在这里加 ws2_32 hook（connect/send/recv 重定向到 127.0.0.1 + 落盘）
+ * 资源包：kernel32!CreateFileW / FindFirstFileW / FindFirstFileExW 内联 hook，
+ *         把客户端对 Pack\*.pkn 的打开改到 Pack_publish\（自研打包器的产物，
+ *         格式与原版一致），见「资源目录重定向」一段
  *
  * 注入方式见 bsloader.c：CREATE_SUSPENDED + QueueUserAPC(LoadLibraryA)，
  * 因此本 DLL 在 EXE 入口点（= ASProtect 壳入口）执行**之前**就已加载完毕。
@@ -29,6 +32,10 @@
    它由 tools/gen_ports_h.py 从 server/config.py 生成，build.bat 每次编译
    前都会重新跑一遍。要改端口只改 server/config.py 一处。 */
 #include "ports.h"
+/* ★ 客户端资源目录名（Pack / Pack_publish）同样来自生成物 pack.h
+   （tools/gen_pack_h.py ← server/config.py）。资源目录重定向那一段只认这里的宏，
+   不写字面量 —— server/test_packdirs.py 盯着。 */
+#include "pack.h"
 /* ★ 登录界面公告框的文案（**已混淆**）。同样是生成物：原稿是
    hook/notice.zh.txt，生成器 tools/gen_notice_h.py，build.bat 每次编译前
    重新跑一遍。不要在本文件里写任何一句公告明文 —— 判据是
@@ -1153,6 +1160,180 @@ static void install_process_hooks(void)
     s_WinExec = (WinExec_t)install_inline_hook(
         (void *)GetProcAddress(k32, "WinExec"),
         (void *)det_WinExec, "WinExec");
+}
+
+/* -------------------------------------------------------------------------- */
+/* 资源目录重定向：把客户端对 Pack\*.pkn 的打开改到 Pack_publish\                */
+/*                                                                            */
+/*   客户端只读 Pack\*.pkn（加密卷）：挂载函数 0x55e9f0 用 _wfindfirst(L"Pack/*.pkn")  */
+/*   枚举目录，再对每个名字拼 L"Pack/<名>" 去 CreateFileW（0x560310）。V0.1 §29： */
+/*   每一卷的密钥和卷头偏移都由 "Pack/<名>.pkn" 这条串派生。                    */
+/*                                                                            */
+/*   自研打包器（tools/pkn.py）把明文树 Pack_develop 打成原版格式的卷，放在        */
+/*   Pack_publish\。让客户端读它们，走的**不是**改游戏代码里那几个立即数         */
+/*   （0x55ea1f / 0x55ea6f / 0x55eac2 —— 那要等解壳，而挂载在应用初始化极早期，  */
+/*   轮询就是「比谁快」），而是在 kernel32 的导出函数上做内联 hook：            */
+/*   CreateFileW / FindFirstFileW / FindFirstFileExW 收到以 "Pack/" 或 "Pack\"  */
+/*   开头、以 ".pkn" 结尾的相对路径时，改成 "Pack_publish/…" 再调原函数。       */
+/*   客户端内部拼的串仍是 "Pack/…"，密钥派生的输入一个字节没变 ⇒ Pack_publish  */
+/*   里的卷和放回原版 Pack\ 目录字节兼容，打包器不用知道这里的重定向。          */
+/*                                                                            */
+/*   ★ 装在 DllMain 里、任何线程创建之前：kernel32 常驻，导出函数的地址和解壳    */
+/*     进度无关（同 CreateWindowExW 那条钩子的道理，见 install_notice_hook），   */
+/*     而主线程此刻还挂在 LoadLibrary 的 APC 上 —— 因果上早于一切游戏代码，      */
+/*     不靠时间。                                                              */
+/*   ★ Pack_publish 不存在就**不装**：新 DLL 落到还是旧布局的目录上（升级中途    */
+/*     失败）时，游戏照旧读 Pack\，能到登录界面、能收到「版本过旧」去更新。      */
+/*   ★ 先装 CreateFileW，它装不上就**不装** FindFirst 那两个 —— 枚举得到卷名却   */
+/*     开不了文件，比什么都不装更糟。                                          */
+/*   ★ 改写过的路径第 5 个字符是 '_'（Pack_publish），不满足「Pack 后面紧跟     */
+/*     分隔符」，所以 FindFirstFileW 内部再调 FindFirstFileExW 也不会二次改写。 */
+/*   ★ BSHOOK_KEEP_PACK_DIR=1 不装（A/B 对照，同 BSHOOK_KEEP_NOTICE）。         */
+/*                                                                            */
+/*   目录名来自 pack.h（tools/gen_pack_h.py 从 server/config.py 生成），别在    */
+/*   这里写字面量 —— server/test_packdirs.py 盯着。                             */
+/* -------------------------------------------------------------------------- */
+
+/* launch.ps1 靠这个串判断「这份 DLL 会不会重定向」，从而决定能不能删掉玩家机器上
+   残留的旧 Pack\ 目录（半截更新时旧 DLL 还在，删了游戏就起不来）。它被下面的日志
+   引用，链接器不会丢。★ 改这个串 = 改协议，launch.ps1 要一起改。 */
+static const char g_pack_redirect_mark[] = "POPSHOT_PACK_REDIRECT_V1";
+
+typedef HANDLE (WINAPI *CreateFileW_t)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES,
+                                       DWORD, DWORD, HANDLE);
+typedef HANDLE (WINAPI *FindFirstFileW_t)(LPCWSTR, LPWIN32_FIND_DATAW);
+typedef HANDLE (WINAPI *FindFirstFileExW_t)(LPCWSTR, FINDEX_INFO_LEVELS, LPVOID,
+                                            FINDEX_SEARCH_OPS, LPVOID, DWORD);
+
+static CreateFileW_t      s_CreateFileW = NULL;
+static FindFirstFileW_t   s_FindFirstFileW = NULL;
+static FindFirstFileExW_t s_FindFirstFileExW = NULL;
+static volatile LONG g_pack_redirect_on = 0;   /* 1 = 钩子在，Pack\*.pkn 会被改写 */
+static volatile LONG g_pack_redirects = 0;     /* 改写了多少次（含枚举那一次） */
+
+static int pack_dir_kept(void)
+{
+    char buf[8];
+    DWORD n = GetEnvironmentVariableA("BSHOOK_KEEP_PACK_DIR", buf, sizeof(buf));
+    return n > 0 && n < sizeof(buf) && buf[0] != '0';
+}
+
+/* "Pack/x.pkn" / "Pack\x.pkn" / "Pack/*.pkn"（可带 ".\" 前缀）-> "Pack_publish/…"。
+   返回 1 = 改写了（新路径在 out），0 = 不关我们的事，原样放行。 */
+static int pack_redirect_path(const wchar_t *in, wchar_t *out, size_t cap)
+{
+    static const wchar_t legacy[]  = POPSHOT_PACK_LEGACY_DIR_W;
+    static const wchar_t publish[] = POPSHOT_PACK_PUBLISH_DIR_W;
+    const size_t ln = sizeof(legacy) / sizeof(legacy[0]) - 1;
+    const size_t lp = sizeof(publish) / sizeof(publish[0]) - 1;
+    const wchar_t *p = in;
+    size_t n;
+
+    if (!in) return 0;
+    if (p[0] == L'.' && (p[1] == L'\\' || p[1] == L'/')) p += 2;
+    if (_wcsnicmp(p, legacy, ln) != 0) return 0;
+    if (p[ln] != L'\\' && p[ln] != L'/') return 0;   /* "Pack_publish\…" 在这里被放行 */
+    n = wcslen(p);
+    if (n < 4 || _wcsicmp(p + n - 4, L".pkn") != 0) return 0;
+    if (lp + (n - ln) + 1 > cap) return 0;
+    memcpy(out, publish, lp * sizeof(wchar_t));
+    memcpy(out + lp, p + ln, (n - ln + 1) * sizeof(wchar_t));   /* 连同结尾的 0 */
+    return 1;
+}
+
+static void pack_note_redirect(const char *api, const wchar_t *from, const wchar_t *to)
+{
+    char a[MAX_PATH * 2], b[MAX_PATH * 2];
+    LONG n = InterlockedIncrement(&g_pack_redirects);
+    if (n == 1)
+        bslog("PACK    第一次改写 %s: %s -> %s", api,
+              w2u8(from, a, sizeof(a)), w2u8(to, b, sizeof(b)));
+    else
+        bsvlog("PACK    %s: %s -> %s", api,
+               w2u8(from, a, sizeof(a)), w2u8(to, b, sizeof(b)));
+}
+
+static HANDLE WINAPI det_CreateFileW(LPCWSTR name, DWORD access, DWORD share,
+                                     LPSECURITY_ATTRIBUTES sa, DWORD disp,
+                                     DWORD flags, HANDLE tmpl)
+{
+    wchar_t buf[MAX_PATH * 2];
+    if (pack_redirect_path(name, buf, MAX_PATH * 2)) {
+        pack_note_redirect("CreateFileW", name, buf);
+        name = buf;
+    }
+    return s_CreateFileW(name, access, share, sa, disp, flags, tmpl);
+}
+
+static HANDLE WINAPI det_FindFirstFileW(LPCWSTR pattern, LPWIN32_FIND_DATAW fd)
+{
+    wchar_t buf[MAX_PATH * 2];
+    if (pack_redirect_path(pattern, buf, MAX_PATH * 2)) {
+        pack_note_redirect("FindFirstFileW", pattern, buf);
+        pattern = buf;
+    }
+    return s_FindFirstFileW(pattern, fd);
+}
+
+static HANDLE WINAPI det_FindFirstFileExW(LPCWSTR pattern, FINDEX_INFO_LEVELS level,
+                                          LPVOID fd, FINDEX_SEARCH_OPS op,
+                                          LPVOID filter, DWORD flags)
+{
+    wchar_t buf[MAX_PATH * 2];
+    if (pack_redirect_path(pattern, buf, MAX_PATH * 2)) {
+        pack_note_redirect("FindFirstFileExW", pattern, buf);
+        pattern = buf;
+    }
+    return s_FindFirstFileExW(pattern, level, fd, op, filter, flags);
+}
+
+static void install_pack_redirect(void)
+{
+    HMODULE k32;
+    DWORD attr;
+    wchar_t cwd[MAX_PATH * 2];
+    char u8[MAX_PATH * 4];
+
+    if (pack_dir_kept()) {
+        bslog("PACK    BSHOOK_KEEP_PACK_DIR 已设，不重定向，客户端读原版 "
+              POPSHOT_PACK_LEGACY_DIR "\\");
+        return;
+    }
+    attr = GetFileAttributesW(POPSHOT_PACK_PUBLISH_DIR_W);
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+        cwd[0] = 0;
+        GetCurrentDirectoryW(MAX_PATH * 2, cwd);
+        bslog("PACK    !! 当前目录 %s 下没有 " POPSHOT_PACK_PUBLISH_DIR "\\ —— 不重定向，"
+              "客户端将读原版 " POPSHOT_PACK_LEGACY_DIR "\\（升级没做完？）",
+              w2u8(cwd, u8, sizeof(u8)));
+        return;
+    }
+    k32 = GetModuleHandleA("kernel32.dll");
+    if (!k32) { bslog("PACK    !! 取不到 kernel32，不重定向"); return; }
+
+    s_CreateFileW = (CreateFileW_t)install_inline_hook(
+        (void *)GetProcAddress(k32, "CreateFileW"),
+        (void *)det_CreateFileW, "kernel32:CreateFileW");
+    if (!s_CreateFileW) {
+        bslog("PACK    !! CreateFileW 钩不上，FindFirst 那两个也不装（枚举得到卷名却"
+              "开不了文件更糟）—— 客户端将读原版 " POPSHOT_PACK_LEGACY_DIR "\\");
+        return;
+    }
+    s_FindFirstFileW = (FindFirstFileW_t)install_inline_hook(
+        (void *)GetProcAddress(k32, "FindFirstFileW"),
+        (void *)det_FindFirstFileW, "kernel32:FindFirstFileW");
+    s_FindFirstFileExW = (FindFirstFileExW_t)install_inline_hook(
+        (void *)GetProcAddress(k32, "FindFirstFileExW"),
+        (void *)det_FindFirstFileExW, "kernel32:FindFirstFileExW");
+    if (!s_FindFirstFileW && !s_FindFirstFileExW) {
+        /* CreateFileW 那条留着无害：它只改写 Pack\*.pkn，而枚举照旧走原版目录，
+           原版目录不存在时客户端一卷也枚举不到 —— 和没装一样，日志里说清楚就行。 */
+        bslog("PACK    !! FindFirstFileW / FindFirstFileExW 都钩不上 —— 挂载时枚举的仍是原版目录");
+        return;
+    }
+    InterlockedExchange(&g_pack_redirect_on, 1);
+    bslog("PACK    资源目录重定向已装：" POPSHOT_PACK_LEGACY_DIR "\\*.pkn -> "
+          POPSHOT_PACK_PUBLISH_DIR "\\ （%s）", g_pack_redirect_mark);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -8298,6 +8479,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
         banner();
         read_online_config();   /* V0.2：server.config 经环境变量传进来 */
         read_gg_retry_flag();
+        /* ★ 资源目录重定向：必须在这里、任何线程创建之前装 —— 主线程此刻还挂在
+           LoadLibrary 的 APC 上，游戏一行代码都没跑，挂载 Pack\*.pkn 的那一段
+           （应用初始化极早期）一定在钩子之后。见「资源目录重定向」一段。 */
+        install_pack_redirect();
 
         ready_event = open_loader_event(POPSHOT_BSHOOK_READY_ENV);
         if (!ready_event) {
@@ -8362,6 +8547,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
             bslog("PATCH   蒙皮骨骼判空：这次运行跳过了 %ld 条没绑上骨骼的蒙皮记录"
                   "（有装备模型和角色骨架不配，查 items.json 的角色限定 / D31a）",
                   (long)g_skin_null_bone_skips);
+        if (g_pack_redirect_on)
+            bslog("PACK    本次运行把 " POPSHOT_PACK_LEGACY_DIR "\\*.pkn 的路径改写了 %ld 次",
+                  (long)g_pack_redirects);
         bslog("================ process detach ================");
         /* ★ 写线程这时候多半已经被系统干掉了（进程退出时先杀线程再 DETACH），
            所以在**当前**线程上就地把环排空 —— 否则最后那几条永远出不去。 */

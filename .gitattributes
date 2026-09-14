@@ -1,0 +1,6 @@
+# 客户端资源树：两棵都按二进制对待，任何克隆上的 core.autocrlf 都不许改写它们的字节
+# —— Pack_develop 里的 .ini/.txt/.xml/.csv 是打包器的输入，一个字节变了卷就变了，
+# Pack_publish 里的卷则要和 pack-index.json 记的 sha256 逐字节对上。
+game_patched/Pack_develop/** -text
+game_patched/Pack_publish/** -text
+*.pkn -text

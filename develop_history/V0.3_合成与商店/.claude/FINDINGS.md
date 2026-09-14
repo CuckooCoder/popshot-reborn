@@ -4641,3 +4641,69 @@ jobs=8 和 jobs=16 实测同样是 40 秒（拆巨型用例之前）—— 瓶�
   但**它确实不需要改**：文件名带日期、每次客户端运行一份，退出后就没人再写
   ⇒ mtime 冻住 ⇒ 照常被清掉。只有「一局打过零点」那半份分不清是哪天，
   用户 2026-09-14 拍板先不动（要改得重编 DLL + 动 `manifest-hook.json`）。
+
+---
+
+## §114 ★★★★★ `Pack\*.pkn` 容器格式全貌（✅ 实测：82 卷 16266 条解出来与 `Pack_decrypt` 逐字节相同，2026-09-14）
+
+**结论**：格式已完整逆出并有可用的读写实现 `tools/pkn.py`；V0.1 §29 那句「密钥 = 文件名」
+只是第一层。三层密钥、条目表、flags、对齐规则如下，写入器照这个表打出来的卷客户端直接认
+（§115）。地址是 `re/BigShot_22524.img` 里的出处。
+
+```text
+卷文件 "Pack/<卷名>.pkn"   s = 这条路径串（客户端自己拼的，正斜杠）
+[0, H)             填充               H = 0x1e + (Σ s 的 UTF-16 码元) % 0x138          (0x560370)
+[H, +0x14+2·nlen)  卷头  SNOW(key1)   u32 0 │ u32 stamp │ u32 gap │ u32 count │ u32 nlen │ UTF-16 组名
+gap 字节           填充（原版 0x30..0xe5）
+条目表 SNOW(key2)  count × { u32 nlen │ UTF-16 相对名 │ u32 flags │ u32 blk │ u32 size │ u32 stored │ 16B salt }
+对齐到 1KB         填充               D = align1K(表尾)                              (0x560743)
+数据区             条目在 D + blk·1024 起 stored 字节，按表序连续、各自 1KB 对齐；文件长 = align1K(末条尾)
+```
+
+| 项 | 规则 | 出处 |
+|---|---|---|
+| SNOW 2.0 | `server/snow.py`（V0.1 §28）：keysize 128、IV 0、按 32 位字加/减 | `loadkey 0x5dc7bc` |
+| ★ 密文流连续 | 每个区域各起一条流，**按整字连续处理、越过逻辑末尾**：`Effects` 的 34 字节卷头要解 36 字节；47 卷条目表长 mod 4 == 2，末条 salt 只有连续解才对 ⇒ 写入器对 `ceil4(len)` 连续加密 | 82 卷统计 |
+| key1（卷头） | `key[j] = (lo(s[j%len]) + j) & 0xff` | `0x5608b0` |
+| key2（条目表） | `key[j] = (lo(s[len-1-(j%len)]) · ((j%3)+2) + j) & 0xff`（s 倒序；V0.1 §29 那把 `dc 42 c2 5f…` 就是它） | `0x560920` |
+| key3（条目） | `key[j] = (((j%5) + salt[j&15] + 2) · lo(name[j%len]) + j) & 0xff`，**name = 组名/相对名**（插入 `0x560a20` 拼的全名，分隔符 `0x664b8c` = "/"） | `0x5600c0` |
+| flags | `0x1` zlib（`inflateInit_ 0x5e0c40`，"1.2.3"）；`0x2` SNOW(key3) 整条；`0x4` SNOW(key3) **只前 0x400 字节**。先 SNOW 再 inflate，最后截到 `size`。原版只有 0/1/2/3/4 | `0x55fe10` 叠流 `0x55fcf0`(4) / `0x55fbd0`(2) / `0x55fb40`(1) |
+| stored | 带 SNOW（含 2 或 4）⇒ `ceil4(载荷长)`（`Chinese.ini` zlib 流 33946 → 33948，5613 条零例外）；纯 zlib ⇒ 流长；0 ⇒ `size` | 82 卷统计 |
+| 原版 flags 策略 | 按扩展名（先剥 `.bak` / `.rNNNNN`）：`.dds .mtn .smf .txt`→1；`.efx .evn .map .ini .xml`→3；`.png .ogg .jpg .tga`→4；`.msh .ui .amf`→2；`.uni .bmp .csv .zip .wav 无扩展名`→0。零例外 | 82 卷统计 |
+| 查找 | 键 = 组名/相对名，`0x402c57` 逐字符过 `0x5f43d4` ⇒ **不分大小写**；原版条目按目录遍历序，客户端插哈希表不依赖顺序 | `0x55f540` |
+| 卷头 `stamp` | 各卷不同、低 4 位恒 0；写进 `vol+0x18` 后 pak 代码区（0x55e400–0x561200）**没有任何读取**（`0x560275` 清零、`0x560478` 写入；其余 `[reg+0x18]` 是 zlib 流对象字段） | 扫过 |
+| 填充 | `[0,H)`、gap、表尾到 D、条目间、卷尾在原版全是随机字节，读取器一概不碰（写入器写 0，D123） | 82 卷统计 |
+| 六组卷头偏移 | Data0000 0x9d / Effects0000 0xab / Images0000 0x41 / Maps0000 0xb4 / Models0000 0x4f / Sounds0000 0x67（钉在 `test_pkn.py`） | 公式复算 |
+
+- 体量：328.9 MB 存储字节里 **SNOW 只处理 45.5 MB**（flag 4 只加密 1KB）；纯 Python SNOW 2.55 MB/s
+  ⇒ 全量重打约 35 秒（zlib 9）、回读校验 25 秒、增量按秒计。
+- 明文树 `game_patched/Pack_develop` = 原版 82 卷解出的 16266 个文件（含 `*.bak` / `*.r19393` / 一个
+  `.zip` 等原版垃圾，照原样保留）；无非 ASCII 目录名、无 `~`、无同目录大小写撞名。
+- `game_patched\Sounds\*.ogg`（49 个 BGM）是明文散文件，不在 pkn 里。
+- 金样：`server/testdata/pkn/Effects0011.pkn`（原版最小卷，307 KB / 37 文件）+ 从 `Pack_decrypt` 算的期望表。
+
+---
+
+## §115 ★★★★ 客户端挂载资源包的路径 + 在 kernel32 导出上重定向（✅ 实测，2026-09-14）
+
+**结论**：客户端**枚举目录**挂载、卷名数量不限；在 `kernel32!CreateFileW / FindFirstFileW / FindFirstFileExW`
+上做内联 hook 把 `Pack/…pkn` 改成 `Pack_publish/…pkn`，客户端内部串不变 ⇒ 密钥输入不变 ⇒
+`Pack_publish` 里的卷和放回原版 `Pack\` 字节兼容。
+
+```text
+0x40c923  创建 pak 管理器 [0x72e294]（应用初始化早期）→ 0x55e776 ctor → 0x55e7ab call 0x55e9f0 挂载
+0x55ea28  call [0x6e61f4] = msvcr80!_wfindfirst64i32(L"Pack/*.pkn")  → kernel32!FindFirstFileW
+0x55eb08  拼 L"Pack/" + 名字 → 0x5601f0 建卷对象 → 0x560310 CreateFileW / CreateFileMappingW / MapViewOfFile
+```
+
+- 镜像导入名表有 `FindFirstFileW`、`CreateFileW`，**没有** `FindFirstFileExW`（钩它只是幂等兜底）。
+- Win10 19045 的 32 位 `kernel32.dll` 里这三个导出都是 6 字节 `FF 25 [abs]` 桩（跳 KernelBase）：
+  `install_inline_hook` 的 `insn_len` 认得，偷 6 字节进蹦床、绝对地址无需重定位 —— 和现有
+  `CreateProcessW` 钩子同一条路。
+- 实测顺序（`bshook_20260914_175210`）：钩子装于 `17:52:10.422`（DllMain，主线程还挂在 APC 上），
+  `UNPACK` 首次观测 `17:52:11.140`，`FindFirstFileW` 改写 `17:52:16.770`，随后 **151 次**
+  `CreateFileW` 改写（= 151 卷），登录公告补丁照常打上，60 秒无崩溃。
+- `L"GPack/"`（V0.1 §17）是假阳性：`0x6936ac` 那个指针 `0x0047d487` 的高字节 `'G'` 紧挨着 `"Pack/"`，无人引用。
+- 游戏开着时卷被 `MapViewOfFile` 映射，`os.replace` 必败 ⇒ `pkn.py pack` 先以写方式试开每个要动的卷。
+- 后备方案没用上：改 `0x55ea1f` / `0x55ea6f` / `0x55eac2` 三个立即数（要等解壳，且客户端派生密钥的串会变成
+  `Pack_publish/…`，打包器前缀得跟着改）。

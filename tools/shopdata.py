@@ -17,8 +17,8 @@
 
 ## 为什么服务端不直接读这些 ini
 
-服务端包里**没有** `Pack_decrypt/` —— 那是 368 MB 客户端安装包解出来的资源，
-云端根本没有。和武器表 / 地形数据同一个道理（V0.3bot D19 / D29）。
+服务端包里**没有**明文资源树 `game_patched/Pack_develop`（540 MB 客户端资源，
+云端根本没有）。和武器表 / 地形数据同一个道理（V0.3bot D19 / D29）。
 
 ## ★ 为什么用中文版那三份
 
@@ -565,20 +565,28 @@ def load_promotions(path):
 # 找源文件
 # --------------------------------------------------------------------------
 
+def develop_root():
+    """明文资源树 `game_patched\\Pack_develop`。目录名只在 `server/config.py` 里定一次。
+    `server/` 用 append 不用 insert(0)（本文件开头那条告诫：tools/ 和 server/ 有同名模块）。"""
+    server_dir = os.path.join(ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.append(server_dir)
+    import config
+    return os.path.join(ROOT, "game_patched", config.PACK_DEVELOP_DIR)
+
+
 def find_data_file(name, explicit=None):
-    """找 `Pack_decrypt/Data/<name>`（和 `weapondata.find_weapon_ini` 同一套口径）。"""
+    """找 `Data/<name>`（明文资源树 `game_patched\\Pack_develop`，和 `weapondata.find_weapon_ini` 同一套口径）。"""
     candidates = []
     if explicit:
         candidates.append(explicit)
-    candidates.append(os.path.join(ROOT, "Pack_decrypt", "Data", name))
-    candidates.append(os.path.abspath(os.path.join(
-        ROOT, "..", "..", "main", "Pack_decrypt", "Data", name)))
+    candidates.append(os.path.join(develop_root(), "Data", name))
     for cand in candidates:
         if os.path.isfile(cand):
             return cand
     raise SystemExit(
         "找不到 %s。试过：\n  %s\n用命令行参数指路，例如"
-        " --shop-ini D:\\git\\popshot-reborn\\main\\Pack_decrypt\\Data\\%s"
+        " --shop-ini game_patched\\Pack_develop\\Data\\%s"
         % (name, "\n  ".join(candidates), name))
 
 

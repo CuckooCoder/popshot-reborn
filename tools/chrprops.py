@@ -24,8 +24,8 @@
 
 ## 服务端为什么不直接读 `ChrProps.ini`
 
-服务端包里**没有** `Pack_decrypt/` —— 那是 368 MB 客户端安装包解出来的资源，
-云端根本没有这个文件。和地形（D19）/ 武器表（D29）同一个道理。
+服务端包里**没有**明文资源树 `game_patched/Pack_develop`（540 MB 客户端资源，
+云端根本没有）。和地形（D19）/ 武器表（D29）同一个道理。
 
 ## 产物
 
@@ -232,8 +232,18 @@ def build_game(sections):
     return out
 
 
+def develop_root():
+    """明文资源树 `game_patched\\Pack_develop`。目录名只在 `server/config.py` 里定一次。
+    `server/` 用 append 不用 insert(0)：tools/ 和 server/ 各有一个 chrprops 模块。"""
+    server_dir = os.path.join(ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.append(server_dir)
+    import config
+    return os.path.join(ROOT, "game_patched", config.PACK_DEVELOP_DIR)
+
+
 def find_ini(explicit=None, name="ChrProps.ini"):
-    """找 `Pack_decrypt/Data/<name>`（和 `weapondata.py` 同一套口径）。
+    """找 `Data/<name>`（明文资源树 `game_patched\\Pack_develop`，和 `weapondata.py` 同一套口径）。
 
     `explicit` 只对 `ChrProps.ini` 有意义；别的文件按同一个目录去找。
     找不到时 `required=False` 的调用方自己判 `None`。
@@ -242,9 +252,7 @@ def find_ini(explicit=None, name="ChrProps.ini"):
     if explicit:
         candidates.append(explicit)
         candidates.append(os.path.join(os.path.dirname(explicit), name))
-    candidates.append(os.path.join(ROOT, "Pack_decrypt", "Data", name))
-    candidates.append(os.path.abspath(os.path.join(
-        ROOT, "..", "..", "main", "Pack_decrypt", "Data", name)))
+    candidates.append(os.path.join(develop_root(), "Data", name))
     for cand in candidates:
         if os.path.isfile(cand) and os.path.basename(cand).lower() == name.lower():
             return cand
@@ -257,7 +265,7 @@ def require_ini(explicit=None):
         return path
     raise SystemExit(
         "找不到 ChrProps.ini。用 --ini 指定，例如"
-        " --ini D:\\git\\popshot-reborn\\main\\Pack_decrypt\\Data\\ChrProps.ini")
+        " --ini game_patched\\Pack_develop\\Data\\ChrProps.ini")
 
 
 def main(argv=None):

@@ -59,6 +59,21 @@ if errorlevel 1 (
     echo [build] WARNING: could not regenerate notice_blob.h; using the committed one
 )
 
+rem --------------------------------------------------------------------------
+rem  Regenerate hook\pack.h from server\config.py before compiling.
+rem
+rem  The client resource directory names (Pack / Pack_develop / Pack_publish)
+rem  have one source, server\config.py, exactly like the port numbers.  The
+rem  Pack -> Pack_publish redirect in bshook.c reads them from pack.h; the
+rem  PowerShell scripts ask `python server\config.py --pack-dirs`.
+rem  pack.h is committed, so building without Python still works.
+rem --------------------------------------------------------------------------
+set "GENPACK=%SRC%..\tools\gen_pack_h.py"
+"%PYEXE%" "%GENPACK%"
+if errorlevel 1 (
+    echo [build] WARNING: could not regenerate pack.h; using the committed one
+)
+
 if not exist "%OUT%" mkdir "%OUT%"
 
 call "%VCVARS%" >nul

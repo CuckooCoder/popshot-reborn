@@ -33,7 +33,8 @@
  *   bsloader.exe                    用默认目标 <项目根>\game_patched\BigShot.exe
  *   bsloader.exe <exe> [args...]    指定目标
  *
- * 注意：工作目录必须设成游戏目录，否则客户端找不到 Pack\*.pkn。
+ * 注意：工作目录必须设成游戏目录，否则客户端找不到资源包 —— 它用相对路径
+ *       枚举 Pack\*.pkn，bshook 再把这条路径改到 Pack_publish\（自研打包器的产物）。
  * ========================================================================== */
 
 #define _CRT_SECURE_NO_WARNINGS

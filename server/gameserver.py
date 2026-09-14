@@ -2188,7 +2188,7 @@ GAME_RESULT_LADDER_POINT = 11   # 「竞技场分数 +N」（闯关模式没有�
 #: 只是被喂了同一个数。
 #:
 #: ★ **数值从哪来**：原版的**每局**奖励是服务端算的，客户端包里没有。
-#: 能借的只有 `Pack_decrypt/Data/Promotion-chn.ini`（一次性**晋级任务**奖励，
+#: 能借的只有 `game_patched/Pack_develop/Data/Promotion-chn.ini`（一次性**晋级任务**奖励，
 #: 132 条 `RewardN=类型,数值`：类型 0=金币 100~1000、2=经验 20~120）——
 #: 我们只借它的**量纲**，不照搬语义。
 #:

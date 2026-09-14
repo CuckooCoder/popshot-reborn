@@ -117,6 +117,8 @@ start.bat
                       │  连本机服务端还是连中继
                       ├─ 把「注册成为世纪天成用户」换成我们自己的注册页
                       ├─ 把战斗中的位置数据额外镜像一份到本机中继的 UDP 口
+                      ├─ 把客户端对 Pack\*.pkn 的打开改到 Pack_publish\
+                      │  （tools\build-pack.bat 打出来的资源卷，格式和原版一致）
                       └─ 可选记录解密后的协议数据
 ```
 
@@ -407,6 +409,29 @@ IPv4 / IPv6 / 域名三种写法的示例。改完重新运行 `start.bat` 生�
 | `/hold [N]` | 让 bot 站住不动，再敲一次恢复自由行动；不给座位号就是全部 bot |
 | `/dash [N]` | 开关 bot 的近身攻击（贴脸时用不用双击方向键那一下）；不给座位号就是全部 bot |
 
+## 改资源：Pack_develop → build-pack → Pack_publish
+
+原版客户端把地图、模型、贴图、音效、`.ini` 全锁在加密的 `Pack\*.pkn` 里，散文件放在
+`Data\` 之类的目录下**根本不生效**。现在这条链是自己的：
+
+```text
+game_patched\Pack_develop\        明文资源树，想改什么改什么（Data\*.ini、Images\、Maps\、Models\…）
+        │  tools\build-pack.bat    增量：只重打改过的那一卷（一个子目录一卷，约 151 卷）
+        ▼
+game_patched\Pack_publish\*.pkn   和原版一模一样的加密格式，客户端经 bshook 从这里读
+```
+
+- **改完资源双击 `tools\build-pack.bat`**，再 `start.bat`。没改就什么都不做；改了几个文件
+  就只重写它们所在的几个小卷（`Maps\swamp\**` 对应 `Maps~swamp.pkn`），`git diff` 也只有那几卷。
+- 改到地图、武器、角色、物品、图标这些**服务端也要知道**的数据时，`build-pack.bat` 会自动接着跑
+  `tools\update-gamedata.bat` 把服务端那五份表重新提取；没动到它们就跳过。
+- `tools\build.bat` 打发布包之前会自动先跑一遍 `build-pack`，所以忘了也不会发出旧卷。
+- `.ini` 大多是 **UTF-16LE**（`Chinese.ini`、`ShopItem-Chn.ini`），`weapon.ini` 是 CP949 —— 用能保住
+  原编码的编辑器改，别让它悄悄转成 UTF-8。
+- BGM 不在资源包里：`game_patched\Sounds\*.ogg` 是明文散文件，直接换。
+- 格式细节和打包器的所有开关看 `tools\pkn.py` 开头的说明；
+  `tools\pkn.py list game_patched\Pack_publish\Data~.pkn` 能看一卷里装了什么。
+
 ## 运行测试
 
 服务端测试使用 Python 自带的 `unittest`：
@@ -456,8 +481,11 @@ python tools/gs_ctl.py help
 | `config/server-ClientFilter.config` | 服务器允许的**最低客户端版本**（手动维护；`0` = 不限制）|
 | `tools/build-ver.config` | 下一次打包的**版本号**（手动维护，发版前改它）|
 | `tools/` | 自写逆向、探针、截图和自动化脚本 |
+| `tools/pkn.py` · `tools/build-pack.bat` | ★ 资源包读写工具 + 一键增量打包（见下面「改资源」）|
 | `re/` | RTTI、虚表、包记录和映射文本等分析成果 |
 | `game_patched/` | 实际运行的客户端工作副本 |
+| `game_patched/Pack_develop/` | ★ **明文资源树**（原版 `Pack\*.pkn` 解开的 16266 个文件）：改资源改这里；进 Git，不进发布包 |
+| `game_patched/Pack_publish/` | ★ 打包器打出来的**加密资源卷**（原版格式，一个子目录一卷）+ `pack-index.json`：客户端实际读的；进 Git、进发布包 |
 | `logs/` | 抓包、运行日志和临时截图 |
 
 ## 版本号管理
@@ -505,7 +533,12 @@ python tools/gs_ctl.py help
    更新器自己被覆盖时旧 exe 改名 `*.update_old` 让位，下次启动由启动脚本
    静默清理。
 - **日常发版不需要重新编译 hook**：版本号不编译进 bshook.dll，只随 BUILD.ver
-  变化。
+  变化。★ 但只要 `hook\*.c` 真的改了、DLL 字节变了，就**必须先抬 `tools/build-ver.config`
+  再编**：`hook\build.bat` 每次都会把 `server/manifest-hook.json` 里当前版本号那一条刷成新的
+  SHA-256，在已发布的版本号下重编 = 线上那批玩家全被判「改过」。
+- **改了资源也是发一版**：`tools\build.bat` 打包前自动跑 `tools\build-pack.bat`，新卷跟着
+  整包走（`game_patched\Pack_publish\`），玩家照常整包更新；旧的 `game_patched\Pack\`
+  由更新后第一次 `start.bat` 自动删掉。
 
 ## 注意事项
 
@@ -537,6 +570,13 @@ python tools/gs_ctl.py help
 
 
 ## 常见问题
+
+### 升级之后 `game_patched\Pack\` 还在，占了 300 多 MB
+
+客户端已经改读 `game_patched\Pack_publish\`，旧的 `Pack\` 只是升级时留下的。**第一次
+`start.bat` 会自动把它删掉**（日志里有一行「[更新善后] 已删除旧资源目录」）。
+它不删只有一种情况：升级没做完、`bshook.dll` 还是旧的 —— 那时旧目录还在被用，先把
+更新跑完。
 
 ### 提示找不到 `bsloader.exe` 或 `bshook.dll`
 

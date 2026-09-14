@@ -32,8 +32,8 @@
 #>
 [CmdletBinding()]
 param(
-    # 原版资源目录 `Pack_decrypt`。不给的话，五个提取器各自去
-    # `Pack_decrypt\` 和 `..\..\main\Pack_decrypt\` 找素材（口径它们自己一致）。
+    # 明文资源树（`tools\pkn.py unpack` 解出来的那种目录）。不给的话，五个提取器各自去
+    # 仓库里的 `game_patched\Pack_develop` 找（目录名来自 server/config.py，口径它们自己一致）。
     [string]$Pack
 )
 
@@ -77,7 +77,7 @@ $pyPil = Get-PythonWithPillow
 $packArgs = @{ map = @(); wpn = @(); chr = @(); shop = @(); icon = @() }
 if ($Pack) {
     if (-not (Test-Path -LiteralPath (Join-Path $Pack 'Data\weapon.ini') -PathType Leaf)) {
-        Write-Host "[x] $Pack 不像 Pack_decrypt 目录（底下没有 Data\weapon.ini）" -ForegroundColor Red
+        Write-Host "[x] $Pack 不像明文资源树（底下没有 Data\weapon.ini）" -ForegroundColor Red
         exit 1
     }
     $data = Join-Path $Pack 'Data'
@@ -140,6 +140,31 @@ foreach ($s in $steps) {
     if ($LASTEXITCODE -ne 0) {
         Write-Host ''
         Write-Host "[x] $($s.Label)：测试没过 —— 产物可能是坏的，先别打包。后面的步骤没跑。" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# --- 记下「这五份数据对应哪一版明文树」---------------------------------------
+# tools\build-pack.ps1 用 tools\gamedata-stamp.json 判断要不要重跑本脚本（判据是
+# 明文树的哈希，不是时间戳）。只在提取的就是仓库里那棵树时才记：拿别的目录提取
+# 过的产物不该盖掉这个事实。目录名照旧只问 server/config.py。
+$developDir = $null
+foreach ($line in (& $py (Join-Path $Root 'server\config.py') --pack-dirs)) {
+    $pair = "$line".Trim() -split '=', 2
+    if ($pair.Count -eq 2 -and $pair[0] -eq 'PACK_DEVELOP_DIR') {
+        $developDir = Join-Path $Root ('game_patched\' + $pair[1])
+    }
+}
+$isDefaultTree = (-not $Pack)
+if ($Pack -and $developDir -and (Test-Path -LiteralPath $Pack)) {
+    $a = (Resolve-Path -LiteralPath $Pack).ProviderPath.TrimEnd('\')
+    $b = (Resolve-Path -LiteralPath $developDir).ProviderPath.TrimEnd('\')
+    if ($a -ieq $b) { $isDefaultTree = $true }
+}
+if ($isDefaultTree) {
+    & $py (Join-Path $Root 'tools\pkn.py') gamedata-stamp --write
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '[x] 五份都提取好了，但 tools\gamedata-stamp.json 没写成 —— build-pack 会再跑一遍提取。' -ForegroundColor Red
         exit 1
     }
 }

@@ -17,12 +17,14 @@ A ch02 mesh attached to ch00/ch01 has no matching bones -> NULL bone pointer
 -> crash in the CPU skinning loop (V0.3 shop FINDINGS 50 / D31a / D56).
 
 Usage:  python tools/audit_items.py [out.json]
-Needs Pack_decrypt/ (only present in the main worktree).
+Reads the plaintext resource tree game_patched/Pack_develop (name from server/config.py).
 """
 import collections, json, os, re, struct, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PACK = os.path.join(ROOT, "Pack_decrypt")
+sys.path.append(os.path.join(ROOT, "server"))
+import config as _config          # noqa: E402
+PACK = os.path.join(ROOT, "game_patched", _config.PACK_DEVELOP_DIR)
 DATA = os.path.join(ROOT, "server", "data")
 
 

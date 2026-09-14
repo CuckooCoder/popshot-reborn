@@ -968,6 +968,149 @@ function Assert-PackageDataClean {
 }
 
 # ---------------------------------------------------------------------------
+#  资源包：game_patched\Pack_develop（明文）-> game_patched\Pack_publish（加密卷）
+# ---------------------------------------------------------------------------
+
+function Get-PackDirs {
+    <# 三个资源目录的名字。唯一的源是 server/config.py（`--pack-dirs`），取法照端口表
+       （launch.ps1 的 `--ports`）；这里不许写目录名字面量，server/test_packdirs.py 盯着。 #>
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $py = Join-Path $Root 'runtime\python\python.exe'
+    if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { $py = 'python' }
+    $table = @{}
+    foreach ($line in (& $py (Join-Path $Root 'server\config.py') --pack-dirs)) {
+        $pair = "$line".Trim() -split '=', 2
+        if ($pair.Count -eq 2) { $table[$pair[0]] = $pair[1] }
+    }
+    foreach ($k in @('PACK_LEGACY_DIR', 'PACK_DEVELOP_DIR', 'PACK_PUBLISH_DIR')) {
+        if (-not $table.ContainsKey($k)) {
+            throw "读不出资源目录表（python server\config.py --pack-dirs 没给 $k）"
+        }
+    }
+    return $table
+}
+
+function Invoke-PknTool {
+    <# 跑 tools\pkn.py，只认退出码。EAP 降成 Continue：PowerShell 5.1 会把原生程序
+       写到 stderr 的行包成终止错误，而成不成只看退出码。函数作用域，出了函数自动还原。 #>
+    param([Parameter(Mandatory = $true)][string]$Root, [string[]]$Arguments)
+    $py = Join-Path $Root 'runtime\python\python.exe'
+    if (-not (Test-Path -LiteralPath $py -PathType Leaf)) { $py = 'python' }
+    $ErrorActionPreference = 'Continue'
+    # ★ 输出直接送到宿主：不接 Out-Host 的话 python 打的每一行都会混进本函数的返回值，
+    #   调用方拿到的就不是退出码而是一个数组。
+    & $py (Join-Path $Root 'tools\pkn.py') @Arguments | Out-Host
+    return $LASTEXITCODE
+}
+
+function Test-PackStale {
+    <# 卷或服务端数据有没有过期（只判断、不写）。$true = 过期。 #>
+    param([Parameter(Mandatory = $true)][string]$Root)
+    $stale = $false
+    $rc = Invoke-PknTool -Root $Root -Arguments @('pack', '--check')
+    if ($rc -eq 1) { $stale = $true }
+    elseif ($rc -ne 0) { throw "tools\pkn.py pack --check 出错（退出码 $rc）" }
+    $rc = Invoke-PknTool -Root $Root -Arguments @('gamedata-stamp')
+    if ($rc -eq 1) { $stale = $true }
+    elseif ($rc -ne 0) { throw "tools\pkn.py gamedata-stamp 出错（退出码 $rc）" }
+    return $stale
+}
+
+function Invoke-PackBuild {
+    <# 打包前先把资源卷打好，服务端数据跟上（D123）。
+
+       ① `tools\pkn.py pack`：增量 —— 只重写明文变了的卷，一个子目录一卷，原版格式；
+       ② 明文树变了（`tools\gamedata-stamp.json` 记的树哈希 ≠ 当前）就跑
+          `tools\update-gamedata.ps1` 重提服务端那五份数据（地形 / 武器 / 角色 / 物品 / 图标），
+          成功后由它自己写回戳；失败 ⇒ **卷和清单不回滚**（它们是对的），戳不更新，
+          下次再跑会自动重试 —— 打包在这种状态下中止，不打「新卷 + 旧数据」的包；
+       ③ 最后 `pack --check` 复核一遍，自相矛盾也中止。
+
+       和 `Invoke-HookBuild` 一样：同一个 powershell 进程里只真跑一次（`build-menu.ps1`
+       打「两个包」时会连着调两个打包脚本）；判据是「这一次构建跑过了」这个事实本身。
+       `tools\build-pack.ps1` 也是调这个函数（-Force / -Verify 透传）。 #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [switch]$Force,
+        [switch]$Verify
+    )
+    if (-not $Force -and (Test-Path 'Variable:Global:PopShotPackBuilt') -and $global:PopShotPackBuilt) {
+        Write-Host '  资源卷本次构建已经打过了，跳过' -ForegroundColor DarkGray
+        return
+    }
+    $dirs = Get-PackDirs -Root $Root
+    $src = Join-Path $Root ('game_patched\' + $dirs.PACK_DEVELOP_DIR)
+    $out = Join-Path $Root ('game_patched\' + $dirs.PACK_PUBLISH_DIR)
+    if (-not (Test-Path -LiteralPath $src -PathType Container)) {
+        throw "找不到明文资源树 $src —— 它在 git 里，检出完整的仓库再打包"
+    }
+    Write-Host ("  资源卷：game_patched\{0} -> game_patched\{1}（增量）…" -f $dirs.PACK_DEVELOP_DIR, $dirs.PACK_PUBLISH_DIR)
+    $packArgs = @('pack', '--src', $src, '--out', $out)
+    if ($Force) { $packArgs += '--force' }
+    if ($Verify) { $packArgs += '--verify' }
+    $rc = Invoke-PknTool -Root $Root -Arguments $packArgs
+    if ($rc -ne 0) { throw "tools\pkn.py pack 失败（退出码 $rc）—— 资源卷没打好，打包中止" }
+
+    $rc = Invoke-PknTool -Root $Root -Arguments @('gamedata-stamp')
+    if ($rc -eq 0) {
+        Write-Host '  服务端数据和明文树对得上，update-gamedata 跳过' -ForegroundColor DarkGray
+    } elseif ($rc -eq 1) {
+        Write-Host '  明文树变了，重提服务端数据（tools\update-gamedata.ps1）…'
+        # 子进程：它自己的 EAP 和 `exit` 都关在里面，这边只认退出码。
+        $ErrorActionPreference = 'Continue'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Root 'tools\update-gamedata.ps1') -Pack $src
+        $urc = $LASTEXITCODE
+        $ErrorActionPreference = 'Stop'
+        if ($urc -ne 0) {
+            throw ("资源卷已经更新，但服务端数据（五份产物）没提取成功（update-gamedata 退出码 $urc）。" +
+                   "修好后再跑一次 tools\build-pack.bat 会自动重试提取；在那之前不要打包。")
+        }
+    } else {
+        throw "tools\pkn.py gamedata-stamp 出错（退出码 $rc）"
+    }
+
+    $rc = Invoke-PknTool -Root $Root -Arguments @('pack', '--check')
+    if ($rc -ne 0) { throw "打完之后 pkn.py pack --check 仍说过期（退出码 $rc）—— 打包器自相矛盾，先别打包" }
+    $global:PopShotPackBuilt = $true
+}
+
+function Assert-PackagePackLayout {
+    <# 包里的资源目录必须是：`game_patched\Pack_publish` 的卷集合 == pack-index.json 记的
+       （名、大小、sha256 逐个对上），且**没有** Pack_develop（明文树）和旧 Pack。
+       返回卷数。 #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Root,
+        [Parameter(Mandatory = $true)][string]$PackageRoot
+    )
+    $dirs = Get-PackDirs -Root $Root
+    foreach ($bad in @($dirs.PACK_DEVELOP_DIR, $dirs.PACK_LEGACY_DIR)) {
+        if (Test-Path -LiteralPath (Join-Path $PackageRoot ('game_patched\' + $bad))) {
+            throw "自检失败：包里不该有 game_patched\$bad（明文树 / 旧资源目录不进发布包）"
+        }
+    }
+    $pub = Join-Path $PackageRoot ('game_patched\' + $dirs.PACK_PUBLISH_DIR)
+    $index = Join-Path $pub 'pack-index.json'
+    if (-not (Test-Path -LiteralPath $index -PathType Leaf)) {
+        throw "自检失败：包里没有 game_patched\$($dirs.PACK_PUBLISH_DIR)\pack-index.json（先跑 tools\build-pack.bat）"
+    }
+    $obj = Get-Content -LiteralPath $index -Raw -Encoding UTF8 | ConvertFrom-Json
+    $want = @{}
+    foreach ($p in $obj.volumes.PSObject.Properties) { $want[$p.Name] = $p.Value }
+    $have = @(Get-ChildItem -LiteralPath $pub -Filter '*.pkn' -File)
+    if ($have.Count -ne $want.Count) {
+        throw "自检失败：包里 $($have.Count) 卷，pack-index.json 记了 $($want.Count) 卷"
+    }
+    foreach ($f in $have) {
+        $rec = $want[$f.Name]
+        if (-not $rec) { throw "自检失败：包里多了清单没有的卷 $($f.Name)" }
+        if ($f.Length -ne $rec.size) { throw "自检失败：卷 $($f.Name) 大小 $($f.Length) != 清单 $($rec.size)" }
+        $sha = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($sha -ne $rec.sha256) { throw "自检失败：卷 $($f.Name) 的 sha256 和清单对不上" }
+    }
+    return $have.Count
+}
+
+# ---------------------------------------------------------------------------
 #  ZIP
 # ---------------------------------------------------------------------------
 

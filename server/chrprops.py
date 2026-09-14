@@ -3,7 +3,8 @@
 """chrprops.py —— 读 `bot_chrprops.json` 里的**角色属性表**（V0.3 M5）。
 
 和 `mapdata.py` / `weapondata.py` 同一套路数（D22 / D29 / D42）：产物是
-`tools/chrprops.py` 从原版 `Pack_decrypt/Data/ChrProps.ini` 离线抽出来的，
+`tools/chrprops.py` 从明文资源树 `game_patched/Pack_develop/Data/ChrProps.ini`
+（原版 Pack_decrypt 的副本）离线抽出来的，
 **随代码走** —— 进 git、进两个发布包，不放 `data/`（那儿只装用户数据）。
 
 ## 为什么需要它：服务端得**自己判命中**

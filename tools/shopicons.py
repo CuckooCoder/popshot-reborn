@@ -20,8 +20,8 @@
 
 ## 为什么在这里离线做，而不是服务端现场缩图
 
-和 `tools/shopdata.py` / `tools/mapdata.py` 同一个道理：**服务端包里没有
-`Pack_decrypt/`**（368 MB 客户端资源，云端根本没有），而且服务端的便携运行时
+和 `tools/shopdata.py` / `tools/mapdata.py` 同一个道理：**服务端包里没有明文资源树
+`game_patched/Pack_develop`**（540 MB 客户端资源，云端根本没有），而且服务端的便携运行时
 里没有 Pillow（`server/` 只用标准库）。所以：**这里离线生成，产物进 git、进包，
 服务端只负责把 PNG 字节原样吐出去。**
 
@@ -95,22 +95,28 @@ def load_pillow():
     return Image
 
 
+def develop_root():
+    """明文资源树 `game_patched\\Pack_develop`。目录名只在 `server/config.py` 里定一次。
+    `server/` 用 append 不用 insert(0)：tools/ 和 server/ 有同名模块（见 shopdata.py 开头）。"""
+    server_dir = os.path.join(ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.append(server_dir)
+    import config
+    return os.path.join(ROOT, "game_patched", config.PACK_DEVELOP_DIR)
+
+
 def find_source_dir(explicit=None):
-    """找 `Pack_decrypt/Images/Shop`（和 `shopdata.find_data_file` 同一套口径）。"""
+    """找 `Images/Shop`（明文资源树 `game_patched\\Pack_develop`，和 `shopdata.find_data_file` 同一套口径）。"""
     candidates = []
     if explicit:
         candidates.append(explicit)
-    candidates.append(os.path.join(ROOT, "Pack_decrypt", "Images", "Shop"))
-    candidates.append(os.path.abspath(os.path.join(
-        ROOT, "..", "..", "main", "Pack_decrypt", "Images", "Shop")))
+    candidates.append(os.path.join(develop_root(), "Images", "Shop"))
     for cand in candidates:
         if os.path.isdir(cand):
             return cand
     raise IconError(
-        "找不到原版图标目录 Images\\Shop。试过：\n  %s\n"
-        "★ 素材太大没进本工作副本，只在 main worktree 里。用参数指路，例如\n"
-        "  tools\\shopicons.py --src "
-        "D:\\git\\popshot-reborn\\main\\Pack_decrypt\\Images\\Shop"
+        "找不到图标目录 Images\\Shop。试过：\n  %s\n"
+        "用参数指路，例如  tools\\shopicons.py --src game_patched\\Pack_develop\\Images\\Shop"
         % "\n  ".join(candidates))
 
 

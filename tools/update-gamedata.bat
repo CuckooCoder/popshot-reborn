@@ -7,8 +7,9 @@ rem  Double-click entry point for re-extracting ALL original game data:
 rem  terrain, weapons, character props, shop items, item icon atlas.
 rem  Each step also runs that product's tests; the first failure stops it.
 rem
-rem  Double-click : extract everything, letting each tool find Pack_decrypt
-rem  Command line : update-gamedata.bat [path to Pack_decrypt]
+rem  Double-click : extract everything from game_patched\Pack_develop (the
+rem                 plaintext resource tree; its name comes from server\config.py)
+rem  Command line : update-gamedata.bat [path to a plaintext resource tree]
 rem
 rem  *** KEEP THIS FILE ASCII-ONLY ***
 rem  Under `chcp 65001` cmd.exe seeks around the batch file by byte offset,

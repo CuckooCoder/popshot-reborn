@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """weapondata.py —— 读 `bot_weapons.json` 里的**武器表**（V0.3 M3b）。
 
-和 `mapdata.py` 同一套路数（D22 / D29）：产物是 `tools/weapondata.py` 从原版
-`Pack_decrypt/Data/weapon.ini` 离线抽出来的，**随代码走** —— 进 git、进两个
+和 `mapdata.py` 同一套路数（D22 / D29）：产物是 `tools/weapondata.py` 从明文资源树
+`game_patched/Pack_develop/Data/weapon.ini`（原版 Pack_decrypt 的副本）离线抽出来的，**随代码走** —— 进 git、进两个
 发布包，不放 `data/`（那儿只装用户数据）。
 
 ## bot 开火要它干四件事（§43）

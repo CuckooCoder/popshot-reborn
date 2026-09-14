@@ -129,6 +129,40 @@ def port_table():
     """``{常量名: 端口号}``。给生成器和启动脚本用。"""
     return {name: globals()[name] for name in PORT_EXPORTS}
 
+
+#: ★ 客户端资源目录的名字 —— 和端口号同一套规矩：**这里是唯一的源**。
+#:
+#: | 谁 | 怎么拿到 |
+#: |---|---|
+#: | Python（打包器 `tools/pkn.py`、五个数据提取器） | 直接 `import config` |
+#: | C（`hook/bshook.c` 的资源目录重定向） | `hook/pack.h` —— 由 `tools/gen_pack_h.py` 从本文件生成 |
+#: | PowerShell（启动 / 打包 / build-pack 脚本） | `python server/config.py --pack-dirs` |
+#:
+#: 三个目录都在 `game_patched\` 下：
+#:
+#: * `PACK_LEGACY_DIR`  原版客户端写死的资源目录名（镜像 `0x6936b0` 的 `L"Pack/"`）。
+#:   客户端拿 `"Pack/<卷名>.pkn"` 这条串派生每一卷的密钥和卷头偏移（V0.1 §29），
+#:   所以它同时是打包器的密钥前缀 —— **永远不能改**，改了等于换密钥。
+#: * `PACK_DEVELOP_DIR` 明文资源树：改资源改这里；进 git，**不进发布包**。
+#: * `PACK_PUBLISH_DIR` 打包器的产物（加密卷 + `pack-index.json`）：hook 把客户端的
+#:   读取重定向到这里；进 git、进发布包。
+#:
+#: `server/test_packdirs.py` 盯着 `hook/pack.h` 和各脚本有没有长出第二份。
+PACK_LEGACY_DIR = "Pack"
+PACK_DEVELOP_DIR = "Pack_develop"
+PACK_PUBLISH_DIR = "Pack_publish"
+
+PACK_DIR_EXPORTS = (
+    "PACK_LEGACY_DIR",
+    "PACK_DEVELOP_DIR",
+    "PACK_PUBLISH_DIR",
+)
+
+
+def pack_dir_table():
+    """``{常量名: 目录名}``。给生成器和脚本用。"""
+    return {name: globals()[name] for name in PACK_DIR_EXPORTS}
+
 #: 一次成功注册之后，**同一个客户端 IP** 要等多久才能再注册（秒）。
 #: 前台按钮的倒计时和后台的 IP 限制**共用这一个值**（需求明确要求一致）。
 #: `0` = 完全不限制。
@@ -832,6 +866,10 @@ if __name__ == "__main__":
     if "--ports" in _sys.argv[1:]:
         for _name, _port in port_table().items():
             print(f"{_name}={_port}")
+    elif "--pack-dirs" in _sys.argv[1:]:
+        # 同款：每行一个 `名字=目录名`，给 launch.ps1 / build-*.ps1 用。
+        for _name, _dir in pack_dir_table().items():
+            print(f"{_name}={_dir}")
     else:
-        print("用法: python config.py --ports", file=_sys.stderr)
+        print("用法: python config.py --ports | --pack-dirs", file=_sys.stderr)
         raise SystemExit(2)

@@ -268,6 +268,36 @@ $RelayPeer     = $portTable['RELAY_PEER_PORT']
 $RelayUdpSync  = $portTable['RELAY_UDP_SYNC_PORT']
 $ClientUdpPort = $portTable['CLIENT_UDP_PORT']
 
+# --- 资源目录表：同样只问 server/config.py（--pack-dirs），不写目录名字面量 -------
+$packTable = @{}
+foreach ($line in (& $Python (Join-Path $Root 'server\config.py') --pack-dirs)) {
+    $pair = "$line".Trim() -split '=', 2
+    if ($pair.Count -eq 2) { $packTable[$pair[0]] = $pair[1] }
+}
+if ($packTable.Count -lt 3) {
+    throw "读不出资源目录表（python server\config.py --pack-dirs）—— 包不完整？"
+}
+$PackLegacyDir  = Join-Path $Root ('game_patched\' + $packTable['PACK_LEGACY_DIR'])
+$PackPublishDir = Join-Path $Root ('game_patched\' + $packTable['PACK_PUBLISH_DIR'])
+
+# 客户端（经 bshook 重定向）读 game_patched\Pack_publish\*.pkn —— 自研打包器的产物。
+# ★ 只有旧布局（Pack\ 有卷、Pack_publish\ 没有）时**照常启动**：半截更新（新脚本 + 旧 DLL）
+#   的机器也必须能起到登录界面，否则永远收不到「版本过旧」、更新器拉不起来 ——
+#   新 DLL 见不到 Pack_publish 会自己退回读 Pack\，旧 DLL 本来就读 Pack\。
+#   两个目录都没有卷才是真的包不完整。
+$hasPublishVolumes = (Test-Path -LiteralPath $PackPublishDir -PathType Container) -and
+    (@(Get-ChildItem -LiteralPath $PackPublishDir -Filter '*.pkn' -ErrorAction SilentlyContinue).Count -gt 0)
+$hasLegacyVolumes = (Test-Path -LiteralPath $PackLegacyDir -PathType Container) -and
+    (@(Get-ChildItem -LiteralPath $PackLegacyDir -Filter '*.pkn' -ErrorAction SilentlyContinue).Count -gt 0)
+if (-not $hasPublishVolumes -and -not $hasLegacyVolumes) {
+    throw ("game_patched\" + $packTable['PACK_PUBLISH_DIR'] + "\ 里没有资源卷 —— " +
+           "开发机先跑 tools\build-pack.bat；玩家请重新解压完整的包。")
+}
+if (-not $hasPublishVolumes) {
+    Say ("⚠ 资源目录还是旧布局（只有 game_patched\" + $packTable['PACK_LEGACY_DIR'] + "\），照常启动；" +
+         "更新完成后客户端会改读 " + $packTable['PACK_PUBLISH_DIR'] + "。") 'Yellow'
+}
+
 # 铁律 2：绝不让 2007 年的 GameGuard 真的跑起来（它会装内核驱动）。
 $gg = Join-Path $Root 'game_patched\GameGuard.des'
 if (Test-Path $gg) {
@@ -464,6 +494,35 @@ try {
         Say ("[更新善后] 已清理上次更新遗留的旧文件 " + $oldFiles.Count + " 个") 'DarkGray'
     }
 } catch { }
+
+# --- 更新善后 ②：删掉升级后残留的旧资源目录 game_patched\Pack（约 325 MB）--------
+# 客户端已由 bshook 重定向到 Pack_publish，旧目录只是占地方。三个条件全是**状态**：
+#   Pack_publish 有卷、旧 Pack 还在、而且**将要运行的这份 bshook.dll 会重定向**
+#   （DLL 字节里有 POPSHOT_PACK_REDIRECT_V1 —— hook/bshook.c 里那个标记串）。
+# 第三条挡的是半截更新：新脚本 + 新卷 + 旧 DLL 时删了 Pack，旧 DLL 读不到卷、到不了
+# 登录界面、也就永远收不到「版本过旧」。删不动（被占用）就跳过下次再删；绝不弹框。
+if ($hasPublishVolumes -and (Test-Path -LiteralPath $PackLegacyDir -PathType Container)) {
+    $dllHasRedirect = $false
+    try {
+        $dllBytes = [System.IO.File]::ReadAllBytes($dll)
+        $dllHasRedirect = [System.Text.Encoding]::ASCII.GetString($dllBytes).Contains('POPSHOT_PACK_REDIRECT_V1')
+    } catch { }
+    if ($dllHasRedirect) {
+        try {
+            $legacyFiles = @(Get-ChildItem -LiteralPath $PackLegacyDir -Recurse -Force |
+                             Where-Object { -not $_.PSIsContainer })
+            $legacyBytes = 0
+            foreach ($f in $legacyFiles) { $legacyBytes += $f.Length }
+            Remove-Item -LiteralPath $PackLegacyDir -Recurse -Force -ErrorAction Stop
+            Say ("[更新善后] 已删除旧资源目录 game_patched\" + $packTable['PACK_LEGACY_DIR'] +
+                 "（" + $legacyFiles.Count + " 个文件 / " + [int]($legacyBytes / 1MB) + " MB），客户端现在读 " +
+                 $packTable['PACK_PUBLISH_DIR']) 'DarkGray'
+        } catch { }
+    } else {
+        Say ("[更新善后] 旧资源目录 game_patched\" + $packTable['PACK_LEGACY_DIR'] +
+             " 先留着 —— 这份 bshook.dll 还不会读 " + $packTable['PACK_PUBLISH_DIR'] + "（更新没做完？）") 'Yellow'
+    }
+}
 
 # --- 4. 把配置交给 bshook ---------------------------------------------------
 # ★ 走环境变量而不是让 C 去解析 UTF-8 配置文件：bsloader.exe 本来就把环境

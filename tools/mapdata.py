@@ -548,25 +548,37 @@ def read_map_props(pack):
     return props
 
 
+def develop_root():
+    """明文资源树 `game_patched\\Pack_develop`（进 git，每个 worktree 都有）。
+
+    目录名只在 `server/config.py` 里定一次，这里不写字面量（`test_packdirs.py` 盯着）。
+    `server/` 用 append 不用 insert(0)：tools/ 和 server/ 里有同名模块（weapondata），
+    不能让 server/ 抢到前面去（见 shopdata.py 开头的告诫）。
+    """
+    server_dir = os.path.join(ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.append(server_dir)
+    import config
+    return os.path.join(ROOT, "game_patched", config.PACK_DEVELOP_DIR)
+
+
 def find_pack_root(explicit=None):
-    """找 `Pack_decrypt/`。它太大没进本工作副本，只在 `main` worktree 里。"""
+    """找明文资源树（`--pack` 指定的，或仓库里的 `game_patched\\Pack_develop`）。"""
     candidates = []
     if explicit:
         candidates.append(explicit)
-    candidates.append(os.path.join(ROOT, "Pack_decrypt"))
-    candidates.append(os.path.abspath(
-        os.path.join(ROOT, "..", "..", "main", "Pack_decrypt")))
+    candidates.append(develop_root())
     for cand in candidates:
         if os.path.isdir(os.path.join(cand, "Maps")):
             return cand
     raise SystemExit(
-        "找不到 Pack_decrypt\\Maps。试过：\n  " + "\n  ".join(candidates)
-        + "\n用 --pack 指定，例如 --pack D:\\git\\popshot-reborn\\main\\Pack_decrypt")
+        "找不到明文资源树的 Maps 目录。试过：\n  " + "\n  ".join(candidates)
+        + "\n用 --pack 指定明文资源树（tools\\pkn.py unpack 解出来的那种目录）")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="从原版 .map 提取地形数据")
-    ap.add_argument("--pack", help="Pack_decrypt 目录")
+    ap.add_argument("--pack", help="明文资源树目录（默认 game_patched\\Pack_develop）")
     ap.add_argument("--out", help="输出目录（默认 server\\bot_mapdata）")
     ap.add_argument("--verify", nargs="*", metavar="地图名",
                     help="额外导出可视化 PNG；不给名字就挑 5 张有代表性的")

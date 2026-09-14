@@ -2,7 +2,46 @@
 
 **只保留当前状态。** 做完的事从「正在做」挪走，不留历史；流水账进 `sessions/`。
 
-最后更新：2026-09-14（会话 50）：**`server.out` 按天切分 + 日志行补上完整日期**
+最后更新：2026-09-14（会话 51）：**客户端资源包工作流 —— 能改资源了**
+（用户点的题，**§114 / §115 / D123**）。
+
+```text
+game_patched\Pack_develop（明文，16266 文件，进 git 不进包）
+   → tools\build-pack.bat（tools/pkn.py 增量打包 + 明文树变了就自动跑 update-gamedata）
+   → game_patched\Pack_publish（151 卷原版格式加密卷 + pack-index.json，进 git 进包）
+   → bshook 在 kernel32!CreateFileW / FindFirstFileW / FindFirstFileExW 上把 Pack\*.pkn 改到 Pack_publish\
+```
+
+* **格式全部实测坐实**（§114）：读取器解开原版 82 卷 == Pack_decrypt 逐字节 16266/16266；自己打的
+  151 卷回读 == Pack_develop；两次打包字节相同；`--force` 重打哈希不变。金样 `server/testdata/pkn/`。
+* **hook 实机冒烟通过**（§115）：钩子装在 DllMain（早于解壳 1 秒），FindFirst 改写 1 次 + CreateFileW
+  改写 151 次，登录界面起来、60 秒无崩溃；升级演练里 `launch.ps1` 自动删掉了旧 `Pack`（82 文件 / 324 MB）
+  后游戏照常。`hook/bin` 已重编（`bshook.dll` 215552 字节），**版本已抬到 0.3.3**，`manifest-hook.json` 多了
+  V0.3.3 一条（V0.3.2 那条没动）。
+* **常量单源**：`server/config.py` 三个目录名 → `tools/gen_pack_h.py` → `hook/pack.h`；`--pack-dirs` 给 ps1；
+  `test_packdirs.py` 钉三边（连 `.ps1` 里的字面量都拦）。
+* **脚本链**：`build-pack.bat/.ps1`（增量 + 戳判据 + 自动 update-gamedata，实跑 83 秒，五份产物**零漂移**，
+  二次运行两步都跳过）；`build.bat` 打包前自动 `Invoke-PackBuild`，`build-portable` 排除 Pack_develop / Pack
+  并用 `Assert-PackagePackLayout` 逐卷核 sha256；`launch.ps1` 自检 + 更新善后删旧 Pack；`update-gamedata`
+  和五个提取器改读 Pack_develop；`.gitattributes` 新建、`.gitignore` 补规则。
+* `game_patched\Pack` **已从磁盘删掉**（演练时由 launch.ps1 删的；82 卷在 git 历史和 original_resource 分支里）。
+
+★★ **用户要做的 git 操作**（agent 不碰仓库状态）：
+
+```bash
+git rm -r --cached game_patched/Pack
+git add .gitattributes .gitignore game_patched/Pack_develop game_patched/Pack_publish   # 约 16400 文件 / 865 MB，要几分钟
+git add tools/pkn.py tools/gen_pack_h.py tools/build-pack.bat tools/build-pack.ps1 tools/gamedata-stamp.json hook/pack.h server/test_pkn.py server/test_packdirs.py server/testdata
+```
+
+⏳ **待用户实机验证**（登记在下面「⏳ 待用户验证」）：登录 → 大厅 → 商店界面 → 建房进图打一局；
+以及改一句 `Pack_develop\Data\Chinese.ini` 的文案 → `tools\build-pack.bat` → `start.bat` 看到新文案。
+
+⏳ **发版顺序**（下一版 V0.3.3）：`tools\build.bat`（自动先 build-pack）→ 提交 `BUILD.ver` +
+`server/manifest-hook.json` + `tools/update-manifest.json` → GitHub Release → 最后抬
+`config/server-ClientFilter.config`。老玩家整包更新后第一次 `start.bat` 自动删残留 `Pack`。
+
+上一轮（2026-09-14，会话 50）：**`server.out` 按天切分 + 日志行补上完整日期**
 （用户点的题，**§113 / D122**）。起因：云主机取回的 `logs/server.out`
 **一个文件 940 MB**，而 `log_retention_days = 3` 一直开着 —— 因为清理按 mtime 判老，
 **正在写的文件永远是「刚才」**。
@@ -981,6 +1020,23 @@ D49 的掉落 + 配方、D51 的角色卡、管理页七个标签页的版式与
 ## ⏳ 待用户验证
 
 **十九组**（A ~ L 区已全过，见上一节；逐条的验收清单在 `sessions/` 里）。
+
+**Z-83. ★★★ 客户端资源包工作流（§114 / §115 / D123）—— 打一局 + 改一句文案**
+
+agent 已验：登录界面起来、151 卷全部经重定向打开、60 秒无崩溃；升级演练里旧 `Pack` 被自动删掉。
+**没验的是登录之后的一切**（大厅文字、商店图标、进图的地图 / 模型 / 特效 / 音效都从新卷读）。
+
+1. `start.bat` → 登录 → 大厅 → 打开商店（看图标）→ 建房进图打一局（看地图、模型、特效、开枪音效）→ 结算。
+   期望：和以前一模一样。任何一处黑图 / 缺贴图 / 闪退 ⇒ 把 `logs\bshook_*.log` 里带 `PACK` 的行
+   和 `game_patched\Dump\LastCrashReport.txt` 发我。
+2. 改一句文案：用能保住 UTF-16 的编辑器打开 `game_patched\Pack_develop\Data\Chinese.ini`，
+   随便改一条大厅里看得见的翻译 → 双击 `tools\build-pack.bat`（应只重写 `Data~.pkn` 一卷，
+   接着自动跑 update-gamedata 五步）→ `start.bat` → 大厅里看到新文案。
+   再跑一次 `build-pack.bat` 应打「资源没变 / 都跳过」。
+3. （可选）对照：`set BSHOOK_KEEP_PACK_DIR=1` 再起 —— 现在 `Pack\` 已经删了，这条只在你把旧卷
+   拷回来时才有意义。
+
+当前状态：⏳ 等实机。
 
 **Z-82. ★ 称号卡片掉落页重构（D110 / §106）—— 管理页点一遍**
 

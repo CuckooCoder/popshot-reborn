@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 """shopdata.py —— 读 `shop_items.json` 里的**物品表**（V0.3 合成与商店 M1）。
 
-和 `weapondata.py` / `mapdata.py` 同一套路数：产物是 `tools/shopdata.py` 从原版
-`Pack_decrypt/Data/*.ini` 离线抽出来的，**随代码走** —— 进 git、进服务端包，
+和 `weapondata.py` / `mapdata.py` 同一套路数：产物是 `tools/shopdata.py` 从明文资源树
+`game_patched/Pack_develop/Data/*.ini`（原版 Pack_decrypt 的副本）离线抽出来的，**随代码走** —— 进 git、进服务端包，
 不放 `data/`（那儿只装用户数据和用户会手改的配置）。
 
 ## 这张表回答什么

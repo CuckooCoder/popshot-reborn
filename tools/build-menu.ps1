@@ -104,6 +104,19 @@ function Invoke-HookBuildOrExit {
     }
 }
 
+function Invoke-PackBuildOrExit {
+    <# 打包前先把资源卷打好（Pack_develop -> Pack_publish，增量）、服务端数据跟上（D123）。
+       和 hook 那一发同一个位置、同一个理由：在 `Clear-Stale` **之前**（打不成不陪葬旧产物），
+       又在「人已经决定要打了」之后。 #>
+    try {
+        Invoke-PackBuild -Root $Root
+    } catch {
+        Write-Host ''
+        Write-Host "[失败] $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
 function Build-Selected([bool]$DoClient, [bool]$DoServer, [bool]$DoZip,
                         [bool]$DoSave, [bool]$NoSmoke, [string]$Linux) {
     # ★ 两个包用同一个批次号：客户端包和服务端包必须成对使用（D079），
@@ -152,6 +165,7 @@ if ($PSBoundParameters.Count -gt 0) {
     $doServer = [bool]$Server
     if (-not $doClient -and -not $doServer) { $doClient = $true }   # 默认打客户端包
     Invoke-HookBuildOrExit
+    Invoke-PackBuildOrExit
     if (-not $Force) {
         $targets = @()
         if ($doClient) { $targets += @($ClientDir, "$ClientDir.zip") }
@@ -211,6 +225,7 @@ switch ($choice.Trim()) {
 }
 
 Invoke-HookBuildOrExit
+Invoke-PackBuildOrExit
 
 $targets = @()
 if ($doClient) { $targets += @($ClientDir, "$ClientDir.zip") }

@@ -4863,3 +4863,66 @@ bot 因此天然判不出挂机：它的同步包是服务端自己合成的，�
 一直是空的，差点以为它没用。失败路径打的三份尾巴各司其职：
 `server-boot.err` 装解释器警告、`server.err` 装装好之后抛的 traceback、
 `server.out` 装启动横幅。
+
+---
+
+## D123 · 客户端资源包工作流：复刻原版 pkn 格式 + API 层重定向 + 一目录一卷（用户 2026-09-14）
+
+用户要能改资源、加地图加道具。定下来的形状：`game_patched\Pack_develop`（明文，进 git 不进包）
+→ `tools\build-pack.bat`（`tools/pkn.py`，增量）→ `game_patched\Pack_publish`（加密卷，进 git 进包）
+→ bshook 把客户端对 `Pack\*.pkn` 的打开改到 `Pack_publish\`。格式事实在 §114 / §115。
+
+### 一、复刻原版格式，不做「自研格式 + hook 接管读取」（用户拍板）
+
+`PackReadFile 0x55e890` 返回的是**带虚表的流对象**，31 个调用点各自通过虚函数读它，另有 4 个包装函数也碰
+pak 单例 —— 接管读取要把整套流接口复现，只能靠实机逐功能验证，漏一处就是某个界面/地图加载崩。
+复刻原格式则客户端一个字节不改，正确性能**离线**证明（82 卷回读 == Pack_decrypt，再回读自己打的卷
+== Pack_develop）。代价是没有「直接读明文」的开发模式，用增量打包（按秒计）补。
+
+### 二、在 kernel32 导出上钩，不改游戏代码里的三个立即数
+
+挂载在应用初始化极早期（`0x40c923`），改立即数要等解壳 ⇒ `patch_thread` 轮询就是「比谁快」（铁律 10）。
+kernel32 常驻、导出地址与解壳无关，DllMain 里装（主线程还挂在 APC 上）在因果上早于一切游戏代码。
+另一个好处：客户端内部拼的串仍是 `Pack/…` ⇒ 密钥 / 卷头偏移的派生输入不变 ⇒ **打包器不用知道重定向目录**，
+`Pack_publish` 里的卷放回原版 `Pack\` 也能用。三条纪律：先装 `CreateFileW`，装不上就不装 FindFirst 那两个
+（枚举得到卷名却开不了文件更糟）；`Pack_publish` 不存在就不装（升级中间态要能起）；`BSHOOK_KEEP_PACK_DIR=1`
+可关（A/B 对照）。后备 B（改立即数 + DR0 VEH 触发）写在 §115，没用上。
+
+### 三、一个子目录一卷，不沿用原版 4 MB 顺序编号卷（用户拍板）
+
+客户端 `_wfindfirst(L"Pack/*.pkn")` 枚举目录里所有卷，名字数量不限。顺序编号卷中间插一个文件后面全体平移，
+一次改动能动 80 MB 的 git blob；一目录一卷（`Maps~swamp.pkn`，超 16 MiB 且有子目录再往下拆，叶子不拆）
+改一个文件只重写一个小卷，卷名一眼能看出装的什么。现状 151 卷，最大 17.6 MiB。
+
+### 四、hook 不需要密钥；共通常量只有三个目录名，放 `server/config.py`
+
+三把密钥都由客户端从路径 / 条目名 / salt 派生（§114），打包器复刻同一派生，没有可自由指定的密钥。
+真正跨语言共用的是 `Pack` / `Pack_develop` / `Pack_publish` 三个名字 —— 照端口那套：`config.py` 是源，
+`tools/gen_pack_h.py` 生成 `hook/pack.h`，PowerShell 走 `--pack-dirs`，`test_packdirs.py` 钉住三边
+（连 `.ps1` 里带引号的目录名字面量都拦）。**不做自定义密钥层**：要 detour `0x5608b0/0x560920/0x5600c0`
+三个派生函数，而 Pack_develop 明文本来就在 git 里，加密只防「拿发布包改」。
+
+### 五、build-pack 触发 update-gamedata 的判据是树哈希戳，不是「这次重写了卷」
+
+`tools/gamedata-stamp.json` 记「服务端五份数据对应的明文树哈希」，由 `update-gamedata.ps1` 五步全成功后写。
+正常路径上和「重写了卷」等价，但提取失败时戳不更新 ⇒ 下次 build-pack 自动重试，不会出现「卷新数据旧」
+还悄无声息的状态；打包脚本在这种状态下中止。判据是哈希这个事实，不是时间戳（铁律 10）。
+`start.bat` 不调 build-pack（用户拍板）；`tools\build.bat` 打包前自动跑。
+
+### 六、删老玩家机器上残留的 `Pack\` 放在 `launch.ps1` 更新善后，三个状态条件
+
+更新器整包覆盖、没有删除清单、没有更新后钩子（§更新器）；它提示玩家跑 `start.bat`，那就是更新后脚本。
+条件：`Pack_publish` 有卷 ∧ `Pack` 还在 ∧ **`bshook.dll` 字节里有 `POPSHOT_PACK_REDIRECT_V1`**（这份 DLL 会重定向）。
+第三条挡「半截更新」：新脚本 + 新卷 + 旧 DLL 时删了 `Pack`，旧 DLL 读不到卷、到不了登录界面、永远收不到
+「版本过旧」。同理 `launch.ps1` 在只有旧布局时**照常启动**（黄字提醒），两边都没有卷才 throw。
+实测（升级演练）：删了 82 文件 / 324 MB 后游戏照常经重定向启动。
+
+### 七、几个小决定
+
+* 填充区全写 0（读取器不碰；0 让 git 对象更小，一行常量可切成派生噪声）；`stamp` 写卷名派生、低 4 位为 0
+  的值（无读者，只是像原版）；条目按名排；salt = `sha256(全名‖内容)[:16]` ⇒ 同样明文打两次字节相同。
+* 原版垃圾文件（`*.bak` / `*.r19393` / `.zip`）先原样保留：第一版 Pack_publish 要和原版逐文件一致才好证明。
+* **改 hook 之前先把 `tools/build-ver.config` 抬到 0.3.3**：`gen_hook_manifest.py` 对最新版本原位刷新，在已发布的
+  0.3.2 下重编会把线上玩家的 DLL 哈希刷掉（D85）。
+* `Pack_decrypt/` 不动、继续被忽略（用户要求）；五个提取器和 `update-gamedata` 改读 `Pack_develop`。
+* git 操作（`git rm -r --cached game_patched/Pack`、`git add` 两棵树）留给用户，agent 不碰仓库状态。

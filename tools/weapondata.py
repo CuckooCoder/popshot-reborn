@@ -19,8 +19,8 @@ bot 开火要用到的四件事**全在这一张表里**（§43）：
 
 ## 服务端为什么不直接读 `weapon.ini`
 
-服务端包里**没有** `Pack_decrypt/` —— 那是 368 MB 客户端安装包解出来的资源，
-云端根本没有这个文件。和 M4 的地形数据同一个道理（D19 / D29）。
+服务端包里**没有**明文资源树 `game_patched/Pack_develop`（540 MB 客户端资源，
+云端根本没有）。和 M4 的地形数据同一个道理（D19 / D29）。
 
 ## 产物
 
@@ -495,21 +495,28 @@ def _preference(record):
 #  入口
 # ---------------------------------------------------------------------------
 
+def develop_root():
+    """明文资源树 `game_patched\\Pack_develop`。目录名只在 `server/config.py` 里定一次。
+    `server/` 用 append 不用 insert(0)：tools/ 和 server/ 各有一个 weapondata 模块。"""
+    server_dir = os.path.join(ROOT, "server")
+    if server_dir not in sys.path:
+        sys.path.append(server_dir)
+    import config
+    return os.path.join(ROOT, "game_patched", config.PACK_DEVELOP_DIR)
+
+
 def find_weapon_ini(explicit=None):
-    """找 `Pack_decrypt/Data/weapon.ini`（和 `mapdata.find_pack_root` 同一套口径）。"""
+    """找 `Data/weapon.ini`（明文资源树 `game_patched\\Pack_develop`，和 `mapdata.find_pack_root` 同一套口径）。"""
     candidates = []
     if explicit:
         candidates.append(explicit)
-    candidates.append(os.path.join(ROOT, "Pack_decrypt", "Data", "weapon.ini"))
-    candidates.append(os.path.abspath(os.path.join(
-        ROOT, "..", "..", "main", "Pack_decrypt", "Data", "weapon.ini")))
+    candidates.append(os.path.join(develop_root(), "Data", "weapon.ini"))
     for cand in candidates:
         if os.path.isfile(cand):
             return cand
     raise SystemExit(
         "找不到 weapon.ini。试过：\n  " + "\n  ".join(candidates)
-        + "\n用 --ini 指定，例如"
-          " --ini D:\\git\\popshot-reborn\\main\\Pack_decrypt\\Data\\weapon.ini")
+        + "\n用 --ini 指定，例如 --ini game_patched\\Pack_develop\\Data\\weapon.ini")
 
 
 def find_quest_weapon_inis(weapon_ini_path):

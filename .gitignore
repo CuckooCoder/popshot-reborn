@@ -11,7 +11,8 @@
 # 原版素材：体积大、且已在另一个分支保存，不进 main
 #   game_org         368 MB  原始安装结果（只读母本）
 #   原版安装包       352 MB  NSIS 安装包
-#   Pack_decrypt     540 MB / 16266 个文件，是 game_patched/Pack/*.pkn 解出来的，可再生
+#   Pack_decrypt     540 MB / 16266 个文件，原版 Pack/*.pkn 解出来的只读参照
+#                    （2026-09 起它的副本 game_patched/Pack_develop 进 git，改资源改那边）
 # ---------------------------------------------------------------------------
 /game_org/
 /原版安装包/
@@ -34,6 +35,15 @@
 /game_patched/BigShot.rpt
 /game_patched/GameGuard/*.erl
 # ★ GameGuard/GameGuard.ver 是原版安装带的，实测不是每次运行都变，保留。
+#
+# ★ 资源目录（2026-09 起，tools/pkn.py）：
+#   Pack_develop/   明文资源树，**要提交**（改资源改这里），打包时不进发布包
+#   Pack_publish/   tools\build-pack.bat 打出来的加密卷 + pack-index.json，**要提交**、进发布包
+#   Pack/           原版加密卷目录。客户端已被 bshook 重定向到 Pack_publish，这个目录不该
+#                   再出现；下面这条只是防有人把老包里的 Pack\ 拷回来又提交
+/game_patched/Pack/
+# 打包器写卷的临时文件（写完 os.replace，中途被打断才会留下）
+/game_patched/Pack_publish/*.tmp
 #
 # ★★★ UserConfig.ini **绝对不能忽略** —— 它看着像「本机设置」，其实是
 #   **构建输入**（V0.1 §49 / D021）：
