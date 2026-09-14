@@ -1,10 +1,10 @@
 {
  "format": 1,
  "packer": {"fill": 0, "key_prefix": "Pack/", "policy": "original-ext-v1", "sep": "~", "volume_cap": 16777216, "zlib_level": 9},
- "tree_hash": "f5078c00089d661b8eb8d60d581497a172691aa769cf532b390f70525c85cbf7",
+ "tree_hash": "dce713a853b0aeb7aada51501504d340522de50c03959c98f4eacad558bb8e6d",
  "volumes": {
-  "Data~.pkn": {"group": "Data", "sha256": "933f5d0b391fd8ae235e373eb908102dc3b2694f470dc3f7f0e3cd94179bf26e", "size": 531456, "source": "Data", "members": [
-   ["Chinese.ini", 103892, "b4d3a37902c721e112a9f70ca0dc75dc6222ea0ba0cf4e5a6642871a9d2b3dd3"],
+  "Data~.pkn": {"group": "Data", "sha256": "1b8a75170ae8b4252221be9b30c73e27c2630f5562dc93aecc474bc09a59e59e", "size": 533504, "source": "Data", "members": [
+   ["Chinese.ini", 109306, "cfc9d265b36902135a59bbbe6757b1246dbcc33d65c280e22d21054c22bc7ce8"],
    ["Chinese.ini.r19467", 103870, "6a20b3f802a68c72bc57d438ac42467940b8b4e8e0ddeafebc1a30d0ca2bb584"],
    ["Chinese.ini.r19470", 103892, "b4d3a37902c721e112a9f70ca0dc75dc6222ea0ba0cf4e5a6642871a9d2b3dd3"],
    ["ChineseSlang.ini", 18118, "f317651baa1821bf1961dfe2faaba73ccd6c163a00ecdaa1bba94f31e09a6129"],
@@ -26,14 +26,14 @@
    ["NewMutu.ini", 75463, "8682da49f038ae4d58348a8e261f73abd81b04f65a539fb00c8955e8028e1f7e"],
    ["NewMutuConfig.ini", 324, "3a654705cd7b8967de2a631430b87cea0868fc8167006e4967d380f747891e10"],
    ["Pet.ini", 449, "780d57799cf806866be27550e5b1cba5961835b2f1260f6d7ea2a1d450f18322"],
-   ["Promotion-chn.ini", 101560, "2197f652ad29fe0a4a87e69f9076bd5cd7ef02862e6611dbbb210a24469ded74"],
+   ["Promotion-chn.ini", 101560, "20253c775e72e0b6e93c78cd7acd59126852af89c03862434d94084ff1120d1b"],
    ["Promotion-jpn.ini", 17940, "a1d4b24eb3ac4cc215c7fab8a39a2384667cb3e9d49bbf0f59e350ef37464ec5"],
    ["Promotion.ini", 57900, "821244737538f16327cb9a0f5c9d5087f35860de4ca0fab03df07a1779be296a"],
-   ["ShopItem-Chn.ini", 328804, "03c5e4f5081114a4b5bf8932283ed009e972c6140f1081960566f44a47647391"],
+   ["ShopItem-Chn.ini", 328730, "43e21e36da9445a2e0f6abefb76e72e3f44f46663c9fa17bb50ba681614e2916"],
    ["ShopItem-Jpn.ini", 332662, "3e6a8012af937ee9c8cb8223817c576b88a9c71249aa51a41eff92439f2e5c98"],
    ["ShopItem.ini", 402958, "65ebc68762f79ca4ad9ce16386e88d5b3300634d44baefd4976fe7348577a29d"],
    ["Status.ini", 1786, "94b8d5632e0a89d9991e1eecbaccbe518e83794074c3d3fed40e00c040899da1"],
-   ["TipMsg-Chn.ini", 1932, "5125db2be1be5e0b8f74af218e591701e7b2ce7917a5e5af780e64aa9a3c8b60"],
+   ["TipMsg-Chn.ini", 1932, "fd848263e33c376287a8900ef1f8d3936b4f6696614ccf35d033db888c2f66ba"],
    ["TipMsg-Jpn.ini", 1828, "4a3ffdb6d6186b0aacfd1b9e8e3b3a2699fca74c5c355639ac75965fae0b9663"],
    ["TipMsg.ini", 2442, "6147832dc4a2b6615c45f51889de5e1e1c5f2777bec5e68e65fdcafc85150dfa"],
    ["config.ini", 629, "1e399d807ec31dcf1fc50547460e5bdcae8653b448596a2103526a304cf4157c"],
@@ -43,7 +43,7 @@
    ["weapon-censorship.ini", 95855, "7bbd0ddaf5ebaaadb8db91e32973a1efeb88a9f7238e2f35b020fa4c560dc4de"],
    ["weapon.ini", 221519, "00084834adea094c8bb038ad08627886e32b2224fd08238d0d26eb0d8db81616"]
   ]},
-  "Data~Quest.pkn": {"group": "Data", "sha256": "3ba429d23cbd00455e4b725f1658e00d515a3ffa2edd32bcb407082ca9afdc78", "size": 1082368, "source": "Data/Quest", "members": [
+  "Data~Quest.pkn": {"group": "Data", "sha256": "e3c6abf4ec9f84a73ce2c4ac59b6270bd822f82993074847bb6b7acc0815d699", "size": 1082368, "source": "Data/Quest", "members": [
    ["Quest/ChrProps-international.ini", 54, "9c6cbc470c405f715ca4c0eaad777635310c7715391a2723f001fb0713b9ec46"],
    ["Quest/ChrProps.ini", 854, "5e839585bf0f159e42f3d000bdbde00fad8d8ebf39ecb6e30516c1ffb6ced227"],
    ["Quest/LevelQuest/lvl01Clear.txt", 1898, "9d2004c70e2cdaf1c62e46fca3bfd65ec2f5947142f7c52ecc0c54b30b02eb6b"],
@@ -247,7 +247,7 @@
    ["Quest/Quest05/Quest05Retry.txt", 562, "3471fb0e076416d447325b7f5eff8505d40008f3a3f317582499597e3f0c1cbf"],
    ["Quest/Quest05/Quest05Retry.uni", 966, "1b299f80c5c5ab92858abe765a5e57249bb4e04476a8e2164b0cf6b5c63e5785"],
    ["Quest/Quest05/Quest05Tracing.txt", 426, "7e7d94d1936fbc868f1d582ffa68faa3f870b58b30f2e7fc5293c2603e4b8259"],
-   ["Quest/Quest05/Quest05Tracing.uni", 842, "923a632ffb9d47aa717399b5de69f31f7fcef4ed3f8d6ac81b44433927969cdd"],
+   ["Quest/Quest05/Quest05Tracing.uni", 852, "3569bcfc305a85feb10cf475362d08cde6181e89269877ed1fc7bec6c8531be5"],
    ["Quest/Quest05/boss05-1.ini", 7235, "eb9a8e12ddd9ef288925cfca6b7eb06a28ee35f80bc782aa971e61e2e3a09f6f"],
    ["Quest/Quest05/boss05-2.ini", 7462, "a9e1e79d100c16e8fdcb348dce456240fe1b3693c5919a8dfedbfdc11324f34d"],
    ["Quest/Quest05/boss05-3.ini", 7270, "a67b427660677e007e899c1288bbe91ef3edb53f536c62568893d50a80aeb907"],

@@ -905,11 +905,20 @@ def main(argv=None):
     if not getattr(args, "func", None):
         ap.print_help()
         return 2
-    # 条目名里有韩文；被 PowerShell / cmd 捕获时 stdout 是 GBK，编不出来的字符打成 ?
-    # 而不是让整条命令炸掉（打包成功与否只看退出码和 --report）。
+    # ★ 自己把 stdout / stderr 钉死成 utf-8 —— 消息是中文、条目名里还有韩文。
+    #
+    # 不钉的话：调用方一旦**捕获**输出（`build-common.ps1` 的 `| Out-Host`、或者
+    # 赋值给变量），CPython 就发现 stdout 不是控制台，改用 `GetACP()` = cp936 编码
+    # （`chcp 65001` 改的是控制台代码页，**改不了 GetACP()**）；而入口 bat 的
+    # `chcp 65001` 让 PowerShell 按 utf-8 去解那串 GBK 字节 —— 一个汉字碎成两个
+    # 替换符，韩文直接编不出来。这就是 2026-09-14 那次 build-pack 满屏乱码。
+    # 只补 `errors="replace"` 挡不住：它治的是「编不出来」，不治「编错了」。
+    #
+    # 走控制台那条路本来就是 utf-8（`_WindowsConsoleIO` 强制），所以两条路一致，
+    # 不管谁来调（PowerShell / cmd / CI / 重定向到文件）都对。`errors` 留着兜意外。
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
-            stream.reconfigure(errors="replace")
+            stream.reconfigure(encoding="utf-8", errors="replace")
     try:
         return args.func(args)
     except PknError as e:

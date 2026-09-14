@@ -24,6 +24,8 @@ ROOT = os.path.dirname(HERE)
 HEADER = os.path.join(ROOT, "hook", "pack.h")
 BSHOOK = os.path.join(ROOT, "hook", "bshook.c")
 GENERATOR = os.path.join(ROOT, "tools", "gen_pack_h.py")
+PKN = os.path.join(ROOT, "tools", "pkn.py")
+BUILD_COMMON = os.path.join(ROOT, "tools", "build-common.ps1")
 GITATTRIBUTES = os.path.join(ROOT, ".gitattributes")
 GITIGNORE = os.path.join(ROOT, ".gitignore")
 
@@ -141,6 +143,35 @@ class NoSecondCopyTests(unittest.TestCase):
             for line in lines:
                 self.assertNotIn('"Pack_decrypt"', line, "%s: %s" % (rel, line.strip()))
                 self.assertNotIn("'Pack_decrypt'", line, "%s: %s" % (rel, line.strip()))
+
+
+class PackToolEncodingTests(unittest.TestCase):
+    """`tools\\pkn.py` 的中文输出：编码端和解码端都必须钉死 utf-8。
+
+    2026-09-14 的症状是**只有 python 打的那几行乱码**，PowerShell 自己
+    `Write-Host` 的中文却是好的 —— 因为 `build-common.ps1` 的
+    `Invoke-PknTool` 用 `| Out-Host` 捕获输出，一捕获 stdout 就成了管道，
+    CPython 随即放弃 `WriteConsoleW` 改用 `GetACP()` = cp936；而入口 bat 的
+    `chcp 65001` 让 PowerShell 按 utf-8 去解那串 GBK 字节。
+
+    两端缺一不可，所以两条都钉着。**判据是「文件里有没有这两个事实」**，
+    不是「跑一遍看看乱不乱」—— 乱码落在哪一行取决于缓冲边界，跑通一次不算数。
+    """
+
+    def test_pkn_pins_utf8_on_its_own_stdout(self):
+        text = repo_file(PKN)
+        m = re.search(r"\.reconfigure\(([^)]*)\)", text)
+        self.assertIsNotNone(m, "pkn.py 不再 reconfigure stdout 了？")
+        self.assertIn('encoding="utf-8"', m.group(1),
+                      "pkn.py 的 reconfigure 必须带 encoding=\"utf-8\" —— "
+                      "只写 errors 挡不住「编错了」，只挡「编不出来」")
+
+    def test_build_common_pins_the_decoding_side(self):
+        lines = code_lines(repo_file(BUILD_COMMON), "#")
+        self.assertTrue(
+            any("[Console]::OutputEncoding" in line for line in lines),
+            "build-common.ps1 必须钉一次 [Console]::OutputEncoding —— "
+            "不经入口 bat 直接跑 .ps1 时控制台是 936，捕获 python 的 utf-8 会乱码")
 
 
 class GitRulesTests(unittest.TestCase):

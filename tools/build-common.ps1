@@ -18,6 +18,14 @@
 
 Set-StrictMode -Version 2.0
 
+# --- python 的中文输出：把控制台解码端钉成 UTF-8 ---------------------------
+# 直接跑这几个 .ps1（没经过入口 .bat 的 chcp 65001）时控制台默认是 936，
+# 而 Invoke-PknTool 的 `| Out-Host` 会把 python 的 stdout 变成管道 —— 两端
+# 编码不一致，中文就碎成替换符。python 那端由 tools\pkn.py 自己钉 utf-8，
+# 这端钉一次解码。写法照抄 tools\quest-clear.ps1（无控制台的宿主里 setter
+# 会抛 IOException，所以包 try）。
+try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
+
 # --- server/ 里【不】进发布包的东西 ----------------------------------------
 # 其余 .py 一律进包（见文件头的理由）。
 $script:ServerExcludeExact = @(
@@ -999,6 +1007,10 @@ function Invoke-PknTool {
     $ErrorActionPreference = 'Continue'
     # ★ 输出直接送到宿主：不接 Out-Host 的话 python 打的每一行都会混进本函数的返回值，
     #   调用方拿到的就不是退出码而是一个数组。
+    # ★★ 但 Out-Host 会把 python 的 stdout 变成**管道** —— CPython 一旦发现 stdout
+    #   不是控制台就改用 GetACP()=cp936 编码。所以 python 那端必须自己钉 utf-8
+    #   （tools\pkn.py 的 reconfigure），这端的解码由文件顶上那句
+    #   [Console]::OutputEncoding 钉住。两端只要有一端没钉，中文就是乱码。
     & $py (Join-Path $Root 'tools\pkn.py') @Arguments | Out-Host
     return $LASTEXITCODE
 }
