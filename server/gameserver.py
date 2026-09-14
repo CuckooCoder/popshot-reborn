@@ -5425,6 +5425,7 @@ def reset_sync_trails(room, why, new_match=False):
         #   反过来新一局必须清，否则上一局死在最后的人整个下一局都不判挂机。
         if new_match:
             conn.dead_since = None
+            conn.afk_when_down = False
         # ★ 开火记录跟着清（§92）：上一张图的弹道配不上这一张图的爆点，
         #   留着只会让击退方向偶尔配错一发。
         shots = getattr(conn, "peer_shots", None)
@@ -6055,12 +6056,16 @@ def conn_afk_clock_expired(conn, now=None):
 def conn_is_afk(conn, now=None):
     """这条连接**是不是在挂机**：进图之后连续这么久没有任何「他在玩」的证据。
 
-    ★★ **躺着的时候这个钟是停的**（用户 2026-09-14 第四轮）：死了等复活、
-    以及命用完之后整局观战的人，**本来就按不了键**。躺着的那一段
-    ① 不判（拿「这么久没动静」判他，等于把刚被打死的真玩家写成挂机）、
+    ★★ **躺着的时候整个判定是冻住的**（用户 2026-09-14 第四 / 第六轮）：
+    死了等复活、以及命用完之后整局观战的人，**本来就按不了键**。躺着那一段
+    ① **维持他倒下那一刻的结论**（`afk_when_down`）—— 在玩的还是在玩、
+       挂机的还是挂机；
     ② **也不计时** —— 复活时把表往前拨过那一段（`note_seat_respawned()`），
-    死前欠的那几秒接着数。
-    ★ 为什么不是「复活后重新起钟」：挂机的人本来就容易在一轮没数完之前
+       死前欠的那几秒接着数。
+
+    ★ ①**不是**「躺着一律当游戏中」（第五轮之前就是那样，用户第六轮报的
+    正是它）：挂机的人每局要死三次，那几秒会把「挂机中」闪回「游戏中」。
+    ★ ②为什么不是「复活后重新起钟」：挂机的人本来就容易在一轮没数完之前
     就被 boss 打死，每死一次清一次的话**永远数不满**，这个功能就废了。
 
     `dead_since` 既是闩也是暂停的起点：`None` = 活着。由死亡广播上闩、
@@ -6075,7 +6080,7 @@ def conn_is_afk(conn, now=None):
     `note_player_input()` 那条路，`last_input_at` 一直是 `None`。
     """
     if getattr(conn, "dead_since", None) is not None:
-        return False
+        return bool(getattr(conn, "afk_when_down", False))
     if getattr(conn, "afk_carried", False):
         return True
     return conn_afk_clock_expired(conn, now)
@@ -6088,15 +6093,16 @@ def note_seat_settled(room):
     都要重新攒证据（单人局还要攒满 45 秒）⇒ 管理页上会一局一局地闪。
     把上一局的结论带过来，**只有开始挂机的第一局**是未知状态。
 
-    ★★ 判据用 `conn_afk_clock_expired()` 而**不是** `conn_is_afk()`：
-    挂机的人正是「第三条命被打死」才结算的，结算那一刻他一定躺着 ——
-    用 `conn_is_afk()` 的话躺着那条豁免会把结论抹成「没挂机」，
-    这条继承永远生效不了。
+    ★ 记的就是**他这会儿显示的那个状态**（`conn_is_afk()`）。挂机的人正是
+    「第三条命被打死」才结算的，结算那一刻他一定躺着 —— 而躺着时
+    `conn_is_afk()` 回的是他倒下那一刻定格的结论（第六轮），正是要的东西。
+    ⚠ 第五轮这里用的是 `conn_afk_clock_expired()`，因为那时「躺着」一律回
+    False，直接问结论会把继承抹掉。第六轮定格之后这条绕路就不需要了。
     """
     for holder in getattr(room, "seats", None) or ():
         conn = None if holder is None else getattr(holder, "conn", None)
         if conn is not None:
-            conn.afk_carried = conn_afk_clock_expired(conn)
+            conn.afk_carried = conn_is_afk(conn)
 
 
 def seat_conn(room, seat):
@@ -6110,18 +6116,25 @@ def seat_conn(room, seat):
 
 
 def note_seat_died(room, seat, now=None):
-    """`seat` 的死亡刚广播出去 —— 上闩，挂机的钟从这一刻**暂停**。
+    """`seat` 的死亡刚广播出去 —— 把结论定格、上闩，挂机的钟从这一刻**暂停**。
 
     ★ 挂在**死亡广播**那一处而不是 `0x0408` 上报那一处：上报可能被判成
     幽灵死亡 / 重复而不广播（`on_report_hp_zero`），只有广播出去的那一发
     才是「他真的倒下了」。
 
+    ★★ **先定格再上闩**（用户 2026-09-14 第六轮）：`afk_when_down` 记的是
+    他**倒下前一刻**显示的状态，躺着那几秒就一直显示它。顺序反了的话
+    `conn_is_afk()` 已经走进「躺着」那一支，定格下来的永远是上一次的值。
+
     ★ **已经躺着就不动那个起点**：暂停的起点只能是第一次倒下那一刻，
     再盖一次等于把中间那段又算回去（按状态翻转上闩，铁律 10）。
     """
     conn = seat_conn(room, seat)
-    if conn is not None and getattr(conn, "dead_since", None) is None:
-        conn.dead_since = time.monotonic() if now is None else now
+    if conn is None or getattr(conn, "dead_since", None) is not None:
+        return
+    now = time.monotonic() if now is None else now
+    conn.afk_when_down = conn_is_afk(conn, now)
+    conn.dead_since = now
 
 
 def note_seat_respawned(room, seat, now=None):
@@ -6141,6 +6154,7 @@ def note_seat_respawned(room, seat, now=None):
         return
     dead_since = getattr(conn, "dead_since", None)
     conn.dead_since = None
+    conn.afk_when_down = False
     if dead_since is None or conn.last_input_at is None:
         return
     now = time.monotonic() if now is None else now
@@ -6347,12 +6361,15 @@ class Conn:
     #     复活时拿它把钟往前拨过那一段，见 `conn_is_afk()`。
     #   `last_action_at`= 最后一次**看见他打中 / 捡到 / 得分**的时刻。
     #     单人局里这是唯一看得见的证据（§111），开局 / 换图时锚一次。
+    #   `afk_when_down` = 他**倒下前一刻**是不是在挂机。躺着那几秒一直显示它
+    #     （用户 2026-09-14 第六轮：别把「挂机中」闪回「游戏中」）。
     #   `afk_carried`   = 上一局结算时他就在挂机 ⇒ 这一局一上来就算挂机，
     #     直到看见真证据（用户 2026-09-14 第五轮）。
     last_input_at = None
     last_keys = None
     last_action_at = None
     dead_since = None
+    afk_when_down = False
     afk_carried = False
     #: ★ 诊断（`note_human_fire`）的类级默认 —— 控制通道造的假连接也得有。
     human_fire_logged = frozenset()

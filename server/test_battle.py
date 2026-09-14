@@ -25,6 +25,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import botsync                                                 # noqa: E402
 import cards                                                   # noqa: E402
 import gameserver                                              # noqa: E402
 from gameserver import (                                       # noqa: E402
@@ -496,6 +497,72 @@ class DeathBroadcastTests(BattleRoom):
                          bodies(self.bob, OP_RESPAWN_CHARACTER))
 
 
+class AfkAcrossTheWholeRoundTests(BattleRoom):
+    """★★ 一局走到底：进图 → 挂机 → 被打死 → **结算界面** → 回房间 →
+    **读图界面** → 再进图。用户 2026-09-14 第六轮报的两处（等复活那几秒、
+    结算和开局加载界面）全在这条线上。
+
+    守的是一句话：**「挂机中」一旦亮起来，在整条链上不许闪回「游戏中」**，
+    只有他真按了键才许变回去。单条用例分开看都过得去，串起来才发现
+    「房间状态还是游戏中、而判据被某一段重置了」这种洞。
+    """
+
+    def place(self, conn):
+        return gameserver.conn_place(conn)
+
+    def die(self, conn, seat):
+        gameserver.Conn.on_game_packet(
+            conn, OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=seat * 100000 + 100001, seat=seat,
+                            arg=0xFF, deaths=0, x=100.0, y=200.0))
+
+    def test_the_afk_label_never_flickers_back_across_the_round(self):
+        stale = gameserver.time.monotonic() - gameserver.AFK_SOLO_AFTER_S - 1
+        self.bob.last_action_at = stale
+        afk, playing = gameserver.PLACE_AFK_QUEST, gameserver.PLACE_PLAY_QUEST
+
+        # ① 进图之后一直没有「他在玩」的证据
+        self.assertEqual(afk, self.place(self.bob), "进图后一直没动")
+        self.assertEqual(playing, self.place(self.alice), "alice 没挂机")
+
+        # ② 被怪打死，等复活那几秒（第六轮报的第一处）
+        self.die(self.bob, 1)
+        self.assertEqual(afk, self.place(self.bob), "等复活那几秒")
+
+        # ③ 结算界面 —— 房间**还是**「游戏中」，判据也得维持住（第二处）
+        gameserver.Conn.send_end_game(self.alice)
+        self.assertEqual(SESSION_STATUS_PLAYING, self.room.status)
+        self.assertEqual(afk, self.place(self.bob), "结算界面")
+        self.assertTrue(self.bob.afk_carried, "结算时要把结论带进下一局")
+
+        # ④ 结算看完回房间 —— 这一段本来就该是「待机房间」
+        for member in self.members:
+            gameserver.Conn.on_game_packet(member, gameserver.OP_LEAVE_RESULT,
+                                           b"")
+        self.assertEqual(gameserver.PLACE_ROOM_QUEST, self.place(self.bob))
+
+        # ⑤ 房主按 F5，全员读图 —— 房间又变「游戏中」，判据仍要维持住（第二处）
+        gameserver.Conn.on_game_packet(self.alice, OP_COUNT_GAME_READY, b"")
+        gameserver.Conn.on_game_packet(self.alice, OP_COUNT_GAME_READY, b"")
+        self.assertEqual(SESSION_STATUS_PLAYING, self.room.status)
+        self.assertEqual(afk, self.place(self.bob), "开局读图界面")
+
+        # ⑥ 真进图了：上一局带过来的结论接着用，不用重新攒证据
+        for member in self.members:
+            gameserver.Conn.on_game_packet(member, OP_LOADING_DONE, b"")
+        self.assertEqual(afk, self.place(self.bob), "新一局一上来")
+
+        # ⑦ 他终于按了一下方向键 —— 当场变回「游戏中」
+        state = botsync.character_state(100, 200, keys=botsync.KEY_RIGHT)
+        packet = botsync.build_peer_packet(
+            1, botsync.OP_HEARTBEAT, botsync.heartbeat_body(0, 1, state),
+            game_id=1)
+        now = gameserver.time.monotonic()
+        gameserver.Conn.note_player_input(self.bob, packet, now)
+        gameserver.Conn.note_player_input(self.bob, packet, now)
+        self.assertEqual(playing, self.place(self.bob), "按了键就该变回去")
+
+
 class RespawnWatchdogTests(BattleRoom):
     """★ bug调查/8「人死了不复活」：客户端那条「死后 5 秒自己发 `0x0413`」的链
     有时候断掉（线上一天 15 次，全在 3 人以上的局），受害者从此躺在地上到本局
@@ -539,14 +606,22 @@ class RespawnWatchdogTests(BattleRoom):
     # ---------------------------------------- 挂机判定的「躺着」闩（2026-09-14）
     #  ★ 放在这一组是因为它挂的就是这条链上的三个点（死亡广播 / 本人 0x0413 /
     #    看门狗补包），单元层面的判据在 `test_gameserver.AfkTests`。
-    def test_dying_takes_him_out_of_the_afk_judgement(self):
-        """★ 死了等复活的人**按不了键** —— 再拿「这么久没按键」判他，就是把
-        刚被打死的真玩家写成挂机（用户 2026-09-14）。"""
+    def test_dying_freezes_the_verdict_instead_of_clearing_it(self):
+        """★ 躺着那几秒**维持死前的状态**（用户 2026-09-14 第六轮）：
+        死前在挂机的还是挂机，死前在玩的还是在玩。"""
         self.bob.last_input_at = gameserver.time.monotonic() - 600
         self.assertTrue(gameserver.conn_is_afk(self.bob))
         self.die(self.bob, 1)
         self.assertIsNotNone(self.bob.dead_since)
-        self.assertFalse(gameserver.conn_is_afk(self.bob))
+        self.assertTrue(gameserver.conn_is_afk(self.bob),
+                        "死前在挂机，等复活那几秒不该闪回「游戏中」")
+
+    def test_an_active_player_who_dies_still_reads_as_playing(self):
+        """反过来那一半（用户第二轮点的题）：真玩家被打死，等复活那几秒
+        仍是「游戏中」—— 他那会儿本来就按不了键。"""
+        self.alice.last_input_at = gameserver.time.monotonic()
+        self.die(self.alice, 0)
+        self.assertFalse(gameserver.conn_is_afk(self.alice))
 
     def test_his_own_respawn_resumes_the_clock_where_it_stopped(self):
         """★ 站起来那一刻钟**接着数**（用户 2026-09-14 第四轮）：他死之前

@@ -3972,33 +3972,33 @@ class AfkTests(unittest.TestCase):
         self.feed(conn, self.event(gameserver.PEER_OP_JUMP), 500.0)
         self.assertFalse(conn.afk_carried)
 
-    def test_being_down_still_wins_over_the_carried_flag(self):
-        """★ 躺着的人一律不判 —— 继承标记也不该把他写成挂机。"""
-        conn = self.make_conn()
+    def test_a_carried_flag_is_frozen_in_too_when_he_falls(self):
+        """★ 上一局带过来的「挂机」在他倒下那一刻一起定格 —— 挂机的人这一局
+        第一次死之前根本没机会按键，定不住的话又闪回「游戏中」了。"""
+        room, conn = self.playing_room()
         conn.afk_carried = True
-        conn.dead_since = 100.0
-        self.assertFalse(gameserver.conn_is_afk(conn, now=200.0))
+        gameserver.note_seat_died(room, 0, now=100.0)
+        self.assertTrue(conn.afk_when_down)
+        self.assertTrue(gameserver.conn_is_afk(conn, now=200.0))
 
-    def test_the_settlement_verdict_ignores_the_lying_down_exemption(self):
+    def test_the_settlement_carries_the_verdict_he_fell_with(self):
         """★★ 挂机的人正是「第三条命被打死」才结算的 —— 结算那一刻他一定
-        躺着。用 `conn_is_afk()` 记继承标记的话，躺着那条豁免会把结论抹成
-        「没挂机」，这条继承**永远生效不了**。
-
-        所以记的是 `conn_afk_clock_expired()`：光看钟，而且把「现在」倒回
-        他倒下那一刻（钟就是在那儿停的）。
+        躺着。记的就是他倒下时定格的那个结论（第六轮之后 `conn_is_afk()`
+        在躺着时回的正是它）。
         """
         room, conn = self.playing_room()
         conn.last_action_at = 100.0
-        conn.dead_since = 100.0 + gameserver.AFK_SOLO_AFTER_S + 5
-        self.assertFalse(gameserver.conn_is_afk(conn))      # 躺着，不判
+        gameserver.note_seat_died(
+            room, 0, now=100.0 + gameserver.AFK_SOLO_AFTER_S + 5)
+        self.assertTrue(gameserver.conn_is_afk(conn))       # 躺着也照说挂机
         gameserver.note_seat_settled(room)
-        self.assertTrue(conn.afk_carried)                   # 但钟确实到期了
+        self.assertTrue(conn.afk_carried)
 
     def test_a_player_who_died_while_still_active_carries_nothing(self):
         """刚打完东西就被打死 —— 钟没到期，不许带着「挂机」进下一局。"""
         room, conn = self.playing_room()
         conn.last_action_at = 100.0
-        conn.dead_since = 105.0
+        gameserver.note_seat_died(room, 0, now=105.0)
         gameserver.note_seat_settled(room)
         self.assertFalse(conn.afk_carried)
 
@@ -4081,18 +4081,36 @@ class AfkTests(unittest.TestCase):
                              (session_type, last))
 
     # -------------------------------------------- 躺着的人不判（第二轮加的）
-    def test_a_dead_player_waiting_to_respawn_is_still_playing(self):
-        """★ 用户 2026-09-14 第二轮：死了等复活 / 命用完进观战的人**按不了键**
-        —— 拿「这么久没按键」去判他，等于把刚被打死的真玩家写成挂机。
+    def test_lying_down_holds_whatever_he_showed_before_he_fell(self):
+        """★★ 躺着那几秒**维持死前的状态**（用户 2026-09-14 第六轮）。
+
+        两个方向都要对：
+        * 死前在玩的真玩家，等复活那几秒仍是「游戏中」——「他按不了键」不该
+          被算成挂机（第二轮点的题）；
+        * 死前已经在挂机的，那几秒仍是「挂机中」—— 挂机的人每局要死三次，
+          一律当「游戏中」的话状态会一直闪（第六轮报的就是它）。
         """
-        _room, conn = self.playing_room()
-        conn.last_input_at = time.monotonic() - gameserver.AFK_AFTER_S - 60
-        self.assertEqual(gameserver.PLACE_AFK_QUEST,
-                         gameserver.conn_place(conn))
-        conn.dead_since = time.monotonic()
+        for afk_before, expected in ((True, gameserver.PLACE_AFK_QUEST),
+                                     (False, gameserver.PLACE_PLAY_QUEST)):
+            room, conn = self.playing_room()
+            conn.last_input_at = time.monotonic() - (
+                gameserver.AFK_AFTER_S + 60 if afk_before else 1)
+            before = gameserver.conn_place(conn)
+            gameserver.note_seat_died(room, 0)
+            self.assertEqual(before, gameserver.conn_place(conn), afk_before)
+            self.assertEqual(expected, gameserver.conn_place(conn), afk_before)
+
+    def test_standing_up_hands_the_verdict_back_to_the_clock(self):
+        """复活之后就不再冻着了 —— 钟接着数，该翻就翻。"""
+        room, conn = self.playing_room()
+        conn.last_input_at = 100.0
+        gameserver.note_seat_died(room, 0, now=105.0)
         self.assertFalse(gameserver.conn_is_afk(conn))
-        self.assertEqual(gameserver.PLACE_PLAY_QUEST,
-                         gameserver.conn_place(conn))
+        gameserver.note_seat_respawned(room, 0, now=165.0)
+        self.assertFalse(conn.afk_when_down)
+        self.assertFalse(gameserver.conn_is_afk(conn, now=165.0))
+        self.assertTrue(gameserver.conn_is_afk(
+            conn, now=165.0 + gameserver.AFK_AFTER_S))
 
     def test_the_death_broadcast_lays_him_down_and_the_respawn_stands_him_up(self):
         """上闩 / 撤闩都挂在**广播**那一刻，是状态翻转不是计时器（铁律 10）。"""
