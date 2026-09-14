@@ -48,6 +48,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import asynclog
 import config as server_config
 import crashwatch
+import daylog
 import udpsync
 from netlisten import create_listener, tune_stream
 
@@ -322,7 +323,8 @@ def connect_remote(target_host, target_port, proxy=None):
 
 
 def ts():
-    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    """和 `gameserver.ts()` 同一个格式（带完整日期，见那边的说明）。"""
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def log(msg):
@@ -833,6 +835,12 @@ class UdpSyncRelay:
 
 
 def main():
+    # `relay.out` / `relay.err` 和 `server.out` 一个毛病：启动脚本重定向出来的
+    # 文件只增不减，mtime 永远是刚才 ⇒ 保留天数对它一天都不起作用。挂着不关的
+    # 客户端能让它跑上好几天。同样交给 daylog 按天切（用户 2026-09-14）。
+    # ★ 放在 `main()` 里而不是模块级：`relay` 被 test_online / test_latency /
+    #   test_proxy 直接 import，单测里 stdout 必须原样不动。
+    daylog.install(stem="relay", banner="中继启动")
     ap = argparse.ArgumentParser(
         description="本机 TCP 中继：把客户端的连接转发到联机服务器")
     ap.add_argument("--target", default=None,

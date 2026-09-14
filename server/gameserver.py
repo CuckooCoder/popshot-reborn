@@ -5269,7 +5269,16 @@ NOISY_OPCODES = {
 
 
 def ts():
-    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    """日志行的时间戳。**带完整日期**（用户 2026-09-14）。
+
+    以前只有 `HH:MM:SS.mmm`：玩家把几行日志贴回来、或者事后翻归档，
+    都判断不出是哪一天的。`server.out` 现在按天切分（`daylog.py`），文件名
+    已经带日期了，但**单独一行被复制出去时文件名就跟不过去** —— 排查问题时
+    贴的恰恰就是单独几行，所以日期得写进行里。
+    `authserver` / `relay` / `eventlog` 的 `ts()` 必须和这里一模一样，
+    不然几份日志按时间对不上。
+    """
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def hexdump(b, maxlen=512):
@@ -10869,7 +10878,7 @@ class Conn:
 
         ★ 监听那一半保留着（M4 第一步留下的）—— 下行还是 🔍静态，实机出问题
         时第一手证据就是这些行。★ 同时写一份进 `eventlog`（`logs/online.log`）：
-        `server.out` 每次启动都会被覆盖，而实机观测丢了要重进一次游戏才能再采。
+        `server.out` 到期会被清掉，而实机观测丢了要重进一次游戏才能再采。
 
         ⚠ **`0x0700` 不在应答之列** —— 它不是商店专用的（`0x5541c1` 有 6 个
         调用点，大厅和房间也发），拿它触发货架下发会在大厅里乱发 `0x0500`。
@@ -11513,7 +11522,7 @@ class Conn:
             self.log(f"hook 完整性：{why_hook}")
 
             # ★ 上下线流水里必须能查到「这条连接跑的是哪个版本」——
-            #   server.out 每次启动都被覆盖，版本号要进 online.log 才留得住
+            #   server.out 到期就被清掉，版本号要进 online.log 才留得住
             #   （这本来就是给「拿到 log 不知道对方版本」的排查场景用的）。
             self.online(f"+ 版本上报 ip={self.peer()} 客户端版本={have}")
             if self.args.hold:
@@ -12436,7 +12445,7 @@ def main():
     try:
         serve(args.port, args, host=args.host)
     except OSError as e:
-        asynclog.emit(f"!! 端口 {args.port} 绑定失败（旧进程没退？）: {e}")
+        asynclog.emit(f"[{ts()}] !! 端口 {args.port} 绑定失败（旧进程没退？）: {e}")
 
 
 def listen(port, host="::"):

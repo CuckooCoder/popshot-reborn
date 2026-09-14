@@ -9,12 +9,15 @@
 """
 import io
 import os
+import sys
 import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
 
+import asynclog
 import config as server_config
+import daylog
 import eventlog
 import logcleanup
 
@@ -54,6 +57,14 @@ class FindStaleTests(unittest.TestCase):
             "server-20260901-013012.out", "server-20260901-013012.err",
             "relay-20260901-013012.out", "relay-20260901-013012.err",
             "bsloader-20260901-013012.out", "bsloader-20260901-013012.err",
+            # ★ `daylog` 跨零点切出来的那一份（用户 2026-09-14）。**这才是
+            #   真正会被删掉的东西** —— 今天那份 server.out 一直在写，
+            #   mtime 永远是刚才，清理永远够不着它。
+            "server-20260901.out", "server-20260901.err",
+            "relay-20260901.out", "relay-20260901.err",
+            # 启动脚本的重定向兜底（daylog 装好之前那一小段）。
+            "server-boot.out", "server-boot.err",
+            "relay-boot.out", "relay-boot.err",
             "bshook_20260813_142534_pid24332.log",
             "online.log", "online-20260810.log",
             # ★ 逐连接抓包现在名字里带 `logcleanup.RUN_STAMP`（同一天多次
@@ -324,6 +335,276 @@ class OnlineLogRotationTests(unittest.TestCase):
         # 同一天里重启不该切出任何 online-YYYYMMDD.log。
         self.assertEqual([], [n for n in os.listdir(self.tmp.name)
                               if n.startswith("online-")])
+
+
+class LogTimestampTests(unittest.TestCase):
+    """日志行的时间戳**必须带日期**（用户 2026-09-14）。
+
+    以前只有 `HH:MM:SS.mmm`，玩家贴回来几行、或者事后翻归档都判断不出是
+    哪一天的。四份 `ts()` 必须**长得一模一样**，否则 `server.out` 和
+    `online.log` / 逐连接抓包的行按时间对不上。
+    """
+
+    def test_all_four_timestamps_carry_a_full_date(self):
+        # 在函数里 import：test_logs 本来很轻，不值得为这一条把 gameserver
+        # 拖进模块导入。
+        import authserver
+        import gameserver
+        import relay
+        for name, fn in (("gameserver", gameserver.ts), ("authserver", authserver.ts),
+                         ("eventlog", eventlog.ts), ("relay", relay.ts)):
+            with self.subTest(name):
+                self.assertRegex(fn(), r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3}$")
+
+
+class DayLogNameTests(unittest.TestCase):
+    """切出来叫什么名字。**这个名字同时是清理的入口** —— 起错了就永远清不掉。"""
+
+    def test_the_date_goes_in_front_of_the_extension(self):
+        self.assertEqual(os.path.join("logs", "server-20260913.out"),
+                         daylog.dated_name(os.path.join("logs", "server.out"),
+                                           (2026, 9, 13)))
+
+    def test_the_rolled_name_is_one_the_cleaner_recognises(self):
+        for stem in ("server.out", "server.err", "relay.out"):
+            rolled = daylog.dated_name(stem, (2026, 9, 13))
+            with self.subTest(stem):
+                self.assertTrue(logcleanup.is_log_name(rolled))
+
+    def test_it_does_not_collide_with_the_launchers_restart_archive(self):
+        # 启动脚本归档 bsloader 那份用的是「`-<mtime 精确到秒>`」
+        # （`Move-LogAside` / wincompat.ps1）。两种后缀长得不一样，
+        # 同一天里两套并存也不会撞名。
+        self.assertNotEqual("server-20260913-013012.out",
+                            daylog.dated_name("server.out", (2026, 9, 13)))
+
+
+class DayLogRotateTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.dir, "server.out")
+
+    def test_the_rolled_file_keeps_its_mtime_so_it_can_age_out(self):
+        """切名**不能**让文件「变新」—— 那样清理还得再等满一个保留期。"""
+        touch(self.path, days_ago=5)
+        self.assertTrue(daylog.rotate_to_dated(self.path, (2026, 9, 1)))
+        rolled = os.path.join(self.dir, "server-20260901.out")
+        self.assertTrue(os.path.exists(rolled))
+        self.assertFalse(os.path.exists(self.path))
+        # 这一条才是整件事的目的：切完立刻就轮得到清理。
+        self.assertEqual([rolled], logcleanup.find_stale(self.dir, 3))
+
+    def test_an_existing_target_is_left_alone(self):
+        touch(self.path)
+        keep = touch(os.path.join(self.dir, "server-20260901.out"), size=7)
+        self.assertFalse(daylog.rotate_to_dated(self.path, (2026, 9, 1)))
+        self.assertTrue(os.path.exists(self.path))     # 原样接着写
+        self.assertEqual(7, os.path.getsize(keep))     # 已有的那份没被顶掉
+
+    def test_nothing_to_roll_is_not_an_error(self):
+        self.assertFalse(daylog.rotate_to_dated(self.path, (2026, 9, 1)))
+        self.assertFalse(daylog.rotate_to_dated(self.path, None))
+
+
+class DaySinkTests(unittest.TestCase):
+    """顶替 `sys.stdout` 的那个流。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.dir, "server.out")
+
+    def read(self, name="server.out"):
+        with open(os.path.join(self.dir, name), encoding="utf-8") as f:
+            return f.read()
+
+    def sink(self, **kw):
+        """造一个流，并保证测完把句柄放掉 —— 不放 Windows 上临时目录删不掉。"""
+        made = daylog.DaySink(self.path, **kw)
+        self.addCleanup(made.close)
+        return made
+
+    def test_lines_land_in_the_file(self):
+        sink = self.sink()
+        sink.write("一行日志\n")
+        sink.flush()
+        self.assertEqual("一行日志\n", self.read())
+
+    def test_crossing_midnight_rolls_yesterday_aside(self):
+        """判据是「当前这个句柄是哪天开的」，不是任何定时器（铁律 10）。"""
+        sink = self.sink()
+        sink.write("昨天的\n")
+        sink.flush()
+        sink._day = (2026, 9, 1)          # 假装这个句柄是 9/1 开的
+        sink.write("今天的\n")
+        sink.flush()
+        self.assertEqual("昨天的\n", self.read("server-20260901.out"))
+        self.assertEqual("今天的\n", self.read())
+
+    def test_a_leftover_file_from_another_day_is_rolled_on_first_write(self):
+        """重启后接着写的那份可能是好几天前的 —— 不切就永远新鲜、永远清不掉。"""
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write("上次那一段\n")
+        old = time.time() - 3 * 86400
+        os.utime(self.path, (old, old))
+        stamp = time.strftime("%Y%m%d", time.localtime(old))
+
+        sink = self.sink()
+        sink.write("这次这一段\n")
+        sink.flush()
+        self.assertEqual("上次那一段\n", self.read("server-%s.out" % stamp))
+        self.assertEqual("这次这一段\n", self.read())
+
+    def test_a_same_day_restart_appends_instead_of_truncating(self):
+        # 用户 2026-09-01：「日志不要被覆盖、只清理过期的」。
+        first = self.sink()
+        first.write("第一次启动\n")
+        first.flush()
+        second = self.sink()
+        second.write("第二次启动\n")
+        second.flush()
+        self.assertEqual("第一次启动\n第二次启动\n", self.read())
+        self.assertEqual(["server.out"], sorted(os.listdir(self.dir)))
+
+    def test_a_file_it_cannot_open_falls_back_instead_of_losing_the_line(self):
+        # 拿一个**目录**占住这个名字，`open()` 必然失败 —— 比造「磁盘满」
+        # 稳，而且各平台都一样。
+        os.mkdir(self.path)
+        buf = io.StringIO()
+        sink = self.sink(fallback=buf)
+        sink.write("写不进文件也不许把这行弄丢\n")
+        self.assertIn("不许把这行弄丢", buf.getvalue())
+
+    def test_stderr_flushes_every_line(self):
+        """traceback 攒在缓冲区里等于没记 —— err 那一路必须写一行刷一次。"""
+        sink = self.sink(autoflush=True)
+        sink.write("Traceback (most recent call last):\n")
+        self.assertIn("Traceback", self.read())        # 没 flush() 就读到了
+
+
+class LiveMidnightRollTests(unittest.TestCase):
+    """★★ 用户 2026-09-14 问的就是这一条：**服务端一直不关，过零点会切吗？**
+
+    上面 `DaySinkTests` 那条是手工把 `_day` 拨回去的，只验了切名那一段。
+    这一条跑的是**线上唯一会发生的那条路**：`asynclog` 的写线程 + 被换掉的
+    `sys.stdout`，中间**一次都不重开进程、不重开流**，只有钟往前走。
+
+    云主机一开几个月，永远等不到「下次启动」—— 要是只有启动时才切，
+    那就等于永远不切，和改之前一模一样。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.dir, "server.out")
+
+    def read(self, name="server.out"):
+        with open(os.path.join(self.dir, name), encoding="utf-8") as f:
+            return f.read()
+
+    def test_a_process_that_never_restarts_still_rolls_at_midnight(self):
+        before = time.mktime((2026, 9, 13, 23, 59, 50, 0, 0, -1))
+        after = time.mktime((2026, 9, 14, 0, 0, 10, 0, 0, -1))
+        now = [before]
+
+        def fake_localtime(when=None):
+            # 只有「现在几点」是假的；问文件 mtime 还是照真的答。
+            return time.localtime(now[0] if when is None else when)
+
+        sink = daylog.DaySink(self.path, _localtime=fake_localtime)
+        self.addCleanup(sink.close)
+        real_out = sys.stdout
+        asynclog.start()
+        self.addCleanup(asynclog.stop)
+        sys.stdout = sink
+        try:
+            asynclog.emit("[2026-09-13 23:59:50.000] 打烊前最后一句")
+            self.assertTrue(asynclog.drain(timeout=5.0))
+            now[0] = after                 # ← 过零点。**进程什么都没做。**
+            asynclog.emit("[2026-09-14 00:00:10.000] 新一天第一句")
+            self.assertTrue(asynclog.drain(timeout=5.0))
+        finally:
+            # 断言之前先换回来：断言失败时 unittest 要往 stdout/stderr 写。
+            sys.stdout = real_out
+
+        self.assertIn("打烊前最后一句", self.read("server-20260913.out"))
+        self.assertIn("新一天第一句", self.read())
+        # 零点之后那一行**不许**落进昨天那份 —— 切早了切晚了都算错。
+        self.assertNotIn("新一天第一句", self.read("server-20260913.out"))
+        self.assertNotIn("打烊前最后一句", self.read())
+
+    def test_a_day_with_nothing_to_say_does_not_leave_an_empty_file(self):
+        """空转两天再写一行也切得对，而且**不会**留下两个空文件。
+
+        判据是「当前这个句柄是哪天开的」，不是「过了几个零点」——
+        所以中间没人说话的那些天根本不存在，也就不该有文件。
+        """
+        now = [time.mktime((2026, 9, 13, 10, 0, 0, 0, 0, -1))]
+        sink = daylog.DaySink(self.path,
+                              _localtime=lambda when=None:
+                              time.localtime(now[0] if when is None else when))
+        self.addCleanup(sink.close)
+        sink.write("9/13 说了一句\n")
+        sink.flush()
+        now[0] = time.mktime((2026, 9, 16, 10, 0, 0, 0, 0, -1))   # 空转 3 天
+        sink.write("9/16 才又说一句\n")
+        sink.flush()
+        self.assertEqual(["server-20260913.out", "server.out"],
+                         sorted(os.listdir(self.dir)))
+        self.assertEqual("9/13 说了一句\n", self.read("server-20260913.out"))
+        self.assertEqual("9/16 才又说一句\n", self.read())
+
+
+class DayLogInstallTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = self.tmp.name
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_install_takes_over_stdout_and_stderr(self):
+        real_out, real_err = sys.stdout, sys.stderr
+        self.addCleanup(setattr, daylog, "_installed", None)
+        daylog._installed = None
+        out_path, err_path = daylog.install(stem="server", logdir=self.dir,
+                                            banner="服务端启动")
+        # ★ `install()` 往 atexit 里挂了这两个流，它们不会被回收 ⇒ 句柄不放，
+        #   Windows 上临时目录就删不掉。测完显式关掉。
+        self.addCleanup(sys.stderr.close)
+        self.addCleanup(sys.stdout.close)
+        try:
+            print("走 print 的那一行")
+            sys.stdout.flush()
+            sys.stderr.write("走 stderr 的那一行\n")
+        finally:
+            # ★ 先把流换回来再断言：断言失败时 unittest 要往 stderr 写，
+            #   写进临时目录就等于把失败信息扔了。
+            sys.stdout, sys.stderr = real_out, real_err
+        with open(out_path, encoding="utf-8") as f:
+            out = f.read()
+        with open(err_path, encoding="utf-8") as f:
+            err = f.read()
+        self.assertIn("走 print 的那一行", out)
+        self.assertIn("走 stderr 的那一行", err)
+        # 分隔线：文件现在跨重启追加，没有它就分不清哪一段是哪次运行写的。
+        self.assertIn("服务端启动", out)
+        self.assertRegex(out, r"pid=\d+")
+
+    def test_installing_twice_does_not_re_wrap_the_streams(self):
+        real_out, real_err = sys.stdout, sys.stderr
+        self.addCleanup(setattr, sys, "stdout", real_out)
+        self.addCleanup(setattr, sys, "stderr", real_err)
+        self.addCleanup(setattr, daylog, "_installed", None)
+        daylog._installed = None
+        first = daylog.install(stem="server", logdir=self.dir)
+        second = daylog.install(stem="relay", logdir=self.dir)
+        self.addCleanup(sys.stderr.close)
+        self.addCleanup(sys.stdout.close)
+        sys.stdout, sys.stderr = real_out, real_err
+        self.assertEqual(first, second)
 
 
 if __name__ == "__main__":

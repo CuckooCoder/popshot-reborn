@@ -355,7 +355,10 @@ class Handler(admin.AdminRoutes, http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         # 默认实现往 stderr 写 Apache 风格的行，和服务端其它日志格式不一致。
         # ★ 绝不打 query string / 请求体 —— 密码就在里面（D067）。
-        asynclog.emit(f"[web] {self.address_string()} {fmt % args}")
+        # ★ 时间戳和别处一律用同一个（用户 2026-09-14）：这些行以前**一个
+        #   时间都没有**，夹在 server.out 里既排不进时序，也看不出「谁哪天
+        #   在爆破 /admin」。
+        asynclog.emit(f"[{eventlog.ts()}] [web] {self.address_string()} {fmt % args}")
 
     # -------------------------------------------------------------- 路由
     def do_GET(self):
@@ -779,7 +782,7 @@ def main():
     if cooldown is None:
         cooldown = server_config.load()[0]["register_cooldown_seconds"]
     note = f"注册冷却 {cooldown} 秒" if cooldown else "注册冷却已关闭"
-    asynclog.emit(f"注册页 http://127.0.0.1:{args.port}/（{note}）")
+    asynclog.emit(f"[{eventlog.ts()}] 注册页 http://127.0.0.1:{args.port}/（{note}）")
     serve(args.port, AccountStore(args.accounts), args.host, cooldown=cooldown)
 
 

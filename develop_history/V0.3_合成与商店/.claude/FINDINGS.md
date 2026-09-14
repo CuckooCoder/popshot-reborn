@@ -4586,3 +4586,58 @@ jobs=8 和 jobs=16 实测同样是 40 秒（拆巨型用例之前）—— 瓶�
 
 ★ 线上更要命的是**每天 `DAILY_HOUR` 那一次**：只要有人恰好在那一刻传包，
 同样删。修法见 D120 末尾（`Store` 自己记在途集合，按事实分流，不加时间窗）。
+
+
+## §113 ★★★ 「保留天数」对一个**一直在写**的文件永远无效 —— 必须先按天切开（实测云日志，2026-09-14）
+
+云主机取回来的 `logs/server.out` **一个文件 940 MB**（2 天，965 万行，
+平均 97.5 字节/行）。`log_retention_days = 3` 一直是开着的，它一次都没被清过。
+
+原因是 `logcleanup` 的判据是 **mtime**，而**正在写的文件 mtime 永远是刚才**
+⇒ 只要进程不停，这个文件就永远「新鲜」。云主机一开几个月，于是只有这一个文件。
+`online.log` 早就没这毛病，因为 `eventlog` 跨零点把昨天那份改名走了 ——
+**改完名就没人再写它，mtime 冻住，这才轮得到被删。**
+
+⇒ **「按天切」和「自动清理」是一套机制的两半，缺一半等于两半都没有。**
+
+### ★ 谁持有句柄，决定谁能切
+
+`server.out` / `server.err` / `relay.out` 是**启动脚本重定向**出来的
+（`Start-Process -RedirectStandardOutput` / `nohup … > x.out`）。那个句柄
+不是 Python 开的，Windows 上拿着它改不了名 ⇒ **只要还走重定向，进程内就
+没有任何办法切它**。所以修法只能是「让 Python 自己开这个文件」（D122），
+而不是在切名那一步想办法。
+
+### ★ 还有一批行**一个时间戳都没有**
+
+`server/web/server.py` 的 `log_message()`（`[web] <ip> "GET /admin …" 401 -`）
+直接 `asynclog.emit()`，没有 `[ts]` 前缀。云端那份里全是这种行 ——
+既排不进时序，也看不出「谁哪天在爆破 `/admin`」。同类还有 `bot.py` 的
+可达图预热那几行。已一并补上（D122）。
+
+### ★ 本版**没有**同类问题的（查过，别再查一遍）
+
+| 日志 | 为什么没事 |
+|---|---|
+| `online.log` | `eventlog` 早就按天切（本版之前就有） |
+| `bshook_*.log` | 每次客户端运行一份，文件名带日期 ⇒ 关掉就不再写，照常被清 |
+| `bsloader.out/.err` | 同上，且量极小；启动脚本 `Move-LogAside` 归档 |
+| `game_*` / `auth_*` | 每条连接一份，连接断了就不再写 |
+| `logs_client_crash/` | 自己有 `crash_keep_days`（`crashstore`） |
+| `server/data/backups` | 自己有 `backup_keep_days`（`databackup`） |
+
+**第二轮补上的**（用户当场点名要做）：
+
+* `updater/src/log.c` 的 `logs/updater.log` —— 原来只追加、永不切、永不删。
+  已加 `rotate_if_stale()`，跨天切成 `updater-YYYYMMDD.log`，规则和
+  `daylog.dated_name()` 一字不差；`BsPatcherChn.exe` 已重编，
+  `selftest` 加 5 条闸门（92 checks, 0 failed）。行内容本来就带完整日期 ✅。
+
+**确认过、决定不动的**：
+
+* `hook/bshook.c` 的日志行只有 `[HH:MM:SS.mmm]`。★ 用户说「它本身有行数上限」
+  —— **查了，没有**：`BSLOG_RING_BYTES` 是 4 MB 的**内存环**（异步写的内存
+  预算），不是文件上限，磁盘上实测有 29 MB 的单份 `bshook_*.log`。
+  但**它确实不需要改**：文件名带日期、每次客户端运行一份，退出后就没人再写
+  ⇒ mtime 冻住 ⇒ 照常被清掉。只有「一局打过零点」那半份分不清是哪天，
+  用户 2026-09-14 拍板先不动（要改得重编 DLL + 动 `manifest-hook.json`）。

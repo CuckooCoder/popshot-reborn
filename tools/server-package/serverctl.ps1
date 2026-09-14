@@ -224,13 +224,20 @@ if ($busy.Count -gt 0) {
 $appArgs = @("`"$AppPy`"", '--no-control', '--no-tcp-relay')
 if ($DebugLog) { $appArgs += '--verbose' }
 
-# ★ 上一次那份先归档，别覆盖（同一天多次重启也留得住）。见 Move-LogAside。
-Move-LogAside (Join-Path $LogDir 'server.out') | Out-Null
-Move-LogAside (Join-Path $LogDir 'server.err') | Out-Null
+# ★ server.out / server.err 现在由服务端**自己**开（`server\daylog.py`）：
+#   追加写、跨零点切成 server-YYYYMMDD.out，到期随日志清理一起删掉
+#   （用户 2026-09-14：云主机上那份重定向出来的 server.out 涨到了 940 MB，
+#    因为正在写的文件 mtime 永远是刚才，保留天数对它一天都不起作用。
+#    **云主机正是重灾区** —— 它一开几个月，永远等不到「下次启动」）。
+#   所以这里两件事都不做了：
+#     * 不再 Move-LogAside —— 追加写本来就没有覆盖风险；
+#     * 不再重定向到同名文件 —— 那会和服务端抢同一个句柄。
+#   重定向只留一对 `*-boot.*`，兜住 daylog 装好**之前**那一小段
+#   （解释器的 SyntaxWarning、import 当场就炸的 traceback）。
 Start-Process -FilePath $Python -WorkingDirectory $Root `
     -ArgumentList $appArgs `
-    -RedirectStandardOutput (Join-Path $LogDir 'server.out') `
-    -RedirectStandardError  (Join-Path $LogDir 'server.err') `
+    -RedirectStandardOutput (Join-Path $LogDir 'server-boot.out') `
+    -RedirectStandardError  (Join-Path $LogDir 'server-boot.err') `
     -WindowStyle Hidden | Out-Null
 
 $ok = $false
@@ -241,9 +248,16 @@ for ($i = 0; $i -lt 60; $i++) {
     if ($up -eq $Ports.Count) { $ok = $true; break }
 }
 if (-not $ok) {
-    Say '[启动失败] 端口没起全，下面是 logs\server.err 的末尾：' 'Red'
-    Get-FileTailLines (Join-Path $LogDir 'server.err') 20
-    Get-FileTailLines (Join-Path $LogDir 'server.out') 20
+    # 三份都看：import 就炸了落在 *-boot.err，起来之后抛的落在 server.err，
+    # 业务上的「端口被占」一类是服务端自己 log 出来的，落在 server.out。
+    Say '[启动失败] 端口没起全，下面是日志的末尾：' 'Red'
+    foreach ($name in @('server-boot.err', 'server.err', 'server.out')) {
+        $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+        if ($tail.Count -gt 0) {
+            Say "  --- logs\$name ---" 'Yellow'
+            $tail
+        }
+    }
     exit 1
 }
 
@@ -280,7 +294,9 @@ Say "    ⚠ 云主机的【安全组】也要单独加这条 UDP 规则，只�
 Say ''
 Say '  日志' 'Cyan'
 Say '    logs\online.log   谁连上、谁断开、从哪个 IP、在线多久（精简模式也照记）'
-Say '    logs\server.out   服务端全部输出（每次启动会被覆盖）'
+Say '    logs\server.out   服务端全部输出（今天的；过零点自动切成 server-<日期>.out）'
+Say '    logs\server.err   服务端的报错输出（同样按天切）'
+Say '    ★ 过了保留天数的日志会被自动删掉；天数看 server.config 的 log_retention_days。'
 Say '    ★ 玩家说进不去，先看 logs\online.log。'
 Say ''
 Say '  这个窗口可以关掉，服务端会继续跑。要停请运行 stop.bat。' 'Cyan'

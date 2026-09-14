@@ -341,13 +341,20 @@ if ($running -and $lastMode -eq $Mode) {
     #   启动日志应出现「中继服   已关闭（--no-tcp-relay）」。
     $appArgs += '--no-tcp-relay'
 
-    # ★ 上一次那份先归档，别覆盖（同一天多次重启也留得住）。见 Move-LogAside。
-    Move-LogAside (Join-Path $LogDir 'server.out') | Out-Null
-    Move-LogAside (Join-Path $LogDir 'server.err') | Out-Null
+    # ★ server.out / server.err 现在由服务端**自己**开（`server\daylog.py`）：
+    #   追加写、跨零点切成 server-YYYYMMDD.out，到期随日志清理一起删掉
+    #   （用户 2026-09-14：云主机上那份重定向出来的 server.out 涨到了 940 MB，
+    #    因为正在写的文件 mtime 永远是刚才，保留天数对它一天都不起作用）。
+    #   所以这里两件事都不做了：
+    #     * 不再 Move-LogAside —— 追加写本来就没有覆盖风险；
+    #     * 不再重定向到同名文件 —— 那会和服务端抢同一个句柄。
+    #   重定向只留一对 `*-boot.*`，兜住 daylog 装好**之前**那一小段
+    #   （解释器的 SyntaxWarning、import 当场就炸的 traceback）。它每次启动
+    #   覆盖，因为它只对「这一次启动」有意义。
     Start-Process -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList $appArgs `
-        -RedirectStandardOutput (Join-Path $LogDir 'server.out') `
-        -RedirectStandardError  (Join-Path $LogDir 'server.err') `
+        -RedirectStandardOutput (Join-Path $LogDir 'server-boot.out') `
+        -RedirectStandardError  (Join-Path $LogDir 'server-boot.err') `
         -WindowStyle Hidden | Out-Null
 
     # 等端口真的起来再往下走，别用固定 Sleep 赌。
@@ -357,8 +364,16 @@ if ($running -and $lastMode -eq $Mode) {
         if ((Get-ListenerPid $AuthPort) -and (Get-ListenerPid $GamePort)) { $ok = $true; break }
     }
     if (-not $ok) {
-        Say '[启动失败] 服务端端口没起来，下面是 logs\server.err 的末尾：' 'Red'
-        Get-FileTailLines (Join-Path $LogDir 'server.err') 20
+        # 三份都看：import 就炸了落在 *-boot.err，起来之后抛的落在 server.err，
+        # 业务上的「端口被占」一类是服务端自己 log 出来的，落在 server.out。
+        Say '[启动失败] 服务端端口没起来，下面是日志的末尾：' 'Red'
+        foreach ($name in @('server-boot.err', 'server.err', 'server.out')) {
+            $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+            if ($tail.Count -gt 0) {
+                Say "  --- logs\$name ---" 'Yellow'
+                $tail
+            }
+        }
         exit 1
     }
     Set-Content -Path $ModeFile -Value $Mode -Encoding utf8
@@ -401,12 +416,12 @@ if ($relayPid -and $lastSignature -eq $relaySignature) {
         @{ Port = $RelayUdpSync; Proto = 'UDP'; Label = '位置同步中继' }
     ) '本机中继'
     $relayScript = Join-Path $Root 'server\relay.py'
-    Move-LogAside (Join-Path $LogDir 'relay.out') | Out-Null
-    Move-LogAside (Join-Path $LogDir 'relay.err') | Out-Null
+    # 和服务端同一个理由（见上面那段）：relay.out / relay.err 由中继自己开、
+    # 自己按天切；重定向只留 `relay-boot.*` 兜住 daylog 装好之前那一小段。
     Start-Process -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList @("`"$relayScript`"") `
-        -RedirectStandardOutput (Join-Path $LogDir 'relay.out') `
-        -RedirectStandardError  (Join-Path $LogDir 'relay.err') `
+        -RedirectStandardOutput (Join-Path $LogDir 'relay-boot.out') `
+        -RedirectStandardError  (Join-Path $LogDir 'relay-boot.err') `
         -WindowStyle Hidden | Out-Null
     $ok = $false
     for ($i = 0; $i -lt 40; $i++) {
@@ -421,8 +436,14 @@ if ($relayPid -and $lastSignature -eq $relaySignature) {
         Say "         游戏从 UDP $ClientUdpPort 收位置数据" 'Green'
         Say '         ⚠ 服务器要放行 UDP —— 没放行会自动退回 TCP，网络不稳定时会比较卡。' 'Gray'
     } else {
-        Say '!! 中继没起来，「远程服务器」会连不上；「本机服务器」不受影响。看 logs\relay.err' 'Red'
-        Get-FileTailLines (Join-Path $LogDir 'relay.err') 20
+        Say '!! 中继没起来，「远程服务器」会连不上；「本机服务器」不受影响。' 'Red'
+        foreach ($name in @('relay-boot.err', 'relay.err', 'relay.out')) {
+            $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+            if ($tail.Count -gt 0) {
+                Say "  --- logs\$name ---" 'Yellow'
+                $tail
+            }
+        }
     }
 }
 

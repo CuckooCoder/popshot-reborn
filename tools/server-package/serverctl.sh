@@ -37,29 +37,10 @@ die() {
     exit 1
 }
 
-# --- 启动前把上一次那份日志改名归档 ----------------------------------------
-# `>` 是截断语义，同一天重启第二次就把上一次的 server.out 冲掉了
-# （用户 2026-09-01）。所以起进程**之前**先把旧的挪走，新进程照旧写
-# server.out —— 文档和「看 logs/server.err 末尾」的失败诊断都不用改。
-#
-# 归档名用**文件自己的最后修改时间**（`mv` 保留 mtime）⇒ logcleanup 按
-# mtime 老化立刻就对，不会因为刚归档过而白白多留几天。
-# 挪不动 / 目标重名就原样返回，让调用方照旧覆盖 —— 归档不值得为它冒
-# 「服务端起不来」的险。
-rotate_log() {
-    target="$1"
-    [ -s "$target" ] || return 0
-    stamp=$(date -r "$target" '+%Y%m%d-%H%M%S' 2>/dev/null) || return 0
-    [ -n "$stamp" ] || return 0
-    case "$target" in
-        *.*) stem="${target%.*}"; ext=".${target##*.}" ;;
-        *)   stem="$target";      ext="" ;;
-    esac
-    archived="${stem}-${stamp}${ext}"
-    [ -e "$archived" ] && return 0
-    mv "$target" "$archived" 2>/dev/null || return 0
-    return 0
-}
+# ★ 这里曾经有个 rotate_log()：启动前把上一次那份 server.out 改名归档，
+#   因为 `>` 是截断语义（用户 2026-09-01「日志不要被覆盖」）。2026-09-14 起
+#   服务端自己开这两个文件、自己**追加**写、自己按天切（server/daylog.py），
+#   压根不再有覆盖这回事，所以它被删掉了。启动脚本只重定向 *-boot.*。
 
 # --- 挑一个 Python ---------------------------------------------------------
 # 优先用包里自带的；没有就用系统的 python3（要求 3.10+）。
@@ -257,12 +238,20 @@ fi
 #   客户端包 tools/launch.ps1 同一个决定。$RELAY_PORT 不再监听、不回
 #   0x0210，玩家间同步整场走 0x040e/0x040f 回退路径。启动日志应出现
 #   「中继服   已关闭（--no-tcp-relay）」。
-rotate_log "$LOGDIR/server.out"
-rotate_log "$LOGDIR/server.err"
+# ★ server.out / server.err 现在由服务端**自己**开（server/daylog.py）：
+#   追加写、跨零点切成 server-YYYYMMDD.out，到期随日志清理一起删掉
+#   （用户 2026-09-14：云主机上那份重定向出来的 server.out 涨到了 940 MB，
+#    因为正在写的文件 mtime 永远是刚才，保留天数对它一天都不起作用。
+#    **云主机正是重灾区** —— 它一开几个月，永远等不到「下次启动」）。
+#   所以这里两件事都不做了：
+#     * 不再 rotate_log —— 追加写本来就没有覆盖风险；
+#     * 不再重定向到同名文件 —— 那会和服务端抢同一个文件。
+#   重定向只留一对 *-boot.*，兜住 daylog 装好**之前**那一小段
+#   （解释器的 SyntaxWarning、import 当场就炸的 traceback）。
 if [ "$VERBOSE" = "--verbose" ]; then
-    nohup "$PY" "$APP" --no-control --no-tcp-relay --verbose >"$LOGDIR/server.out" 2>"$LOGDIR/server.err" &
+    nohup "$PY" "$APP" --no-control --no-tcp-relay --verbose >"$LOGDIR/server-boot.out" 2>"$LOGDIR/server-boot.err" &
 else
-    nohup "$PY" "$APP" --no-control --no-tcp-relay >"$LOGDIR/server.out" 2>"$LOGDIR/server.err" &
+    nohup "$PY" "$APP" --no-control --no-tcp-relay >"$LOGDIR/server-boot.out" 2>"$LOGDIR/server-boot.err" &
 fi
 NEWPID=$!
 echo "$NEWPID" > "$PIDFILE"
@@ -283,9 +272,15 @@ while [ "$i" -lt 30 ]; do
 done
 
 if [ "$ok" -ne 1 ]; then
-    echo "[启动失败] 端口没起全，下面是 logs/server.err 和 logs/server.out 的末尾："
-    tail -n 20 "$LOGDIR/server.err" 2>/dev/null
-    tail -n 20 "$LOGDIR/server.out" 2>/dev/null
+    # 三份都看：import 就炸了落在 *-boot.err，起来之后抛的落在 server.err，
+    # 业务上的「端口被占」一类是服务端自己 log 出来的，落在 server.out。
+    echo "[启动失败] 端口没起全，下面是日志的末尾："
+    for name in server-boot.err server.err server.out; do
+        if [ -s "$LOGDIR/$name" ]; then
+            echo "  --- logs/$name ---"
+            tail -n 20 "$LOGDIR/$name" 2>/dev/null
+        fi
+    done
     rm -f "$PIDFILE"
     exit 1
 fi
@@ -320,7 +315,9 @@ echo "      只是自动退回 TCP，等于这个功能没开。"
 echo ""
 echo "  日志"
 echo "    logs/online.log   谁连上、谁断开、从哪个 IP、在线多久（精简模式也照记）"
-echo "    logs/server.out   服务端全部输出（每次启动会被覆盖）"
+echo "    logs/server.out   服务端全部输出（今天的；过零点自动切成 server-<日期>.out）"
+echo "    logs/server.err   服务端的报错输出（同样按天切）"
+echo "    ★ 过了保留天数的日志会被自动删掉；天数看 server.config 的 log_retention_days。"
 echo "    ★ 玩家说进不去，先看 logs/online.log。"
 echo ""
 echo "  服务端在后台跑，关掉这个终端不影响它。要停请执行 sh stop.sh。"

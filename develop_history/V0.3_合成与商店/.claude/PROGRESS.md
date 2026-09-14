@@ -2,7 +2,47 @@
 
 **只保留当前状态。** 做完的事从「正在做」挪走，不留历史；流水账进 `sessions/`。
 
-最后更新：2026-09-14（会话 49）：**全量测试提速**（用户点的题，**§112 / D120 / D121**）。
+最后更新：2026-09-14（会话 50）：**`server.out` 按天切分 + 日志行补上完整日期**
+（用户点的题，**§113 / D122**）。起因：云主机取回的 `logs/server.out`
+**一个文件 940 MB**，而 `log_retention_days = 3` 一直开着 —— 因为清理按 mtime 判老，
+**正在写的文件永远是「刚才」**。
+
+* 新模块 `server/daylog.py`：`app.py` / `relay.py` 入口处 `daylog.install()`，
+  把 `sys.stdout` / `sys.stderr` 换成自己开文件、跨零点切名的流。
+  今天那份仍叫 `server.out`（文档和工具全不用改），昨天的变成 `server-20260913.out`
+  —— 没人再写它 ⇒ mtime 冻住 ⇒ 到期被 `logcleanup` 删掉。`relay.out/err` 同治。
+* 启动脚本三处（`launch.ps1` / `serverctl.ps1` / `serverctl.sh`）重定向改成
+  `*-boot.out/.err`（只兜 `install()` 之前那一小段），并删掉 `Move-LogAside` /
+  `rotate_log` —— 自己开文件用 `"a"`，本来就不会覆盖了。
+* 四份 `ts()` 一律带完整日期 `2026-09-14 15:14:27.305`；另把 `[web]` / `[bot]`
+  那几处**一个时间戳都没有**的行补齐。
+* `eventlog._rotate_unlocked` 改成调 `daylog.rotate_to_dated`，两处切名同一套。
+* ★ 新开关 `--no-day-log`，**打包自检必须传**（`daylog` 按包根算路径，
+  不关就往发出去的包里塞一份启动日志）；`Assert-PackageDataClean` 跟着多验
+  一条「包里的 `logs\` 必须是空的」。
+
+* ★ **`logs/updater.log` 一起修了**（用户第二轮点名）：`updater/src/log.c` 加
+  `rotate_if_stale()`，跨天切成 `updater-YYYYMMDD.log`，命名和 `daylog` 一致；
+  `selftest` 加 5 条闸门（**92 checks, 0 failed**），`BsPatcherChn.exe` **已重编**
+  （在工作区，用户说放下一个版本一起发）。
+* ★ **`bshook_*.log` 不动**（用户拍板）。顺带查清：它**没有**文件行数上限
+  （`BSLOG_RING_BYTES` 是 4 MB 内存环，不是文件上限；磁盘上有 29 MB 的单份），
+  但它每次运行一份、退出就不再写，照常被清 —— 本来就不是同一个毛病。
+
+★ **3593 项全绿**（`test_logs.py` 新增 17 条），三条路都真跑过：
+
+| 验的东西 | 怎么验的 | 结果 |
+|---|---|---|
+| Windows 启动脚本 | `shutdown.ps1` → 把 `server.out` 的 mtime 拨到昨天 → `launch.ps1 -NoGame` | 切出 `server-20260913.out`（**mtime 保住在昨天**）+ 新 `server.out` 带启动分隔线 |
+| **一直不重启，过零点切不切** | `LiveMidnightRollTests`：真 `asynclog` 写线程 + 真 `sys.stdout` 替换，只把钟从 23:59:50 拨到 00:00:10 | **会切**，两边一行都不串；空转 3 天再写也对、且不留空文件 |
+| `serverctl.sh`（Linux 侧） | 搭「服务端包」形状的沙箱 + 指向真 Python 的 `python3` 垫片，Git Bash 里跑 `start` / `stop` / 两条失败路径 | 全通。失败时三份尾巴各司其职；沙箱没 pyc ⇒ `server-boot.err` 真接住了 2.3 KB SyntaxWarning |
+| `updater.log` 切分 | 沙箱里无头（`POPSHOT_UPDATER_NOUI=1`）跑三次，中间把 mtime 拨到昨天 | 切出 `updater-20260913.log`（mtime 保住）；同一天第三次只追加 |
+
+⏳ **仍欠一遍真 Linux**：这台机器没有 WSL 发行版也没 docker。
+云主机目前是 Windows（日志路径是 `C:\Users\Administrator\…`），走的是已验的
+`serverctl.ps1` 那条。
+
+上一轮（会话 49）：**全量测试提速**（用户点的题，**§112 / D120 / D121**）。
 `server/run_tests.py` 加 `-j`、**默认并行**（按 TestCase 类分片）：
 3.14 **153.6s → 27~34s**、Win7 3.8 **278.7s → 60~66s**。
 半路挖出并修掉**两个生产 bug**（都不是并行引入的，是被并行顶到台面上的）：
@@ -17,7 +57,7 @@
 ★ 验收全量**别再用 `... | tail -N`**：管道要等进程整个跑完才吐第一个字节，
 中途零输出 —— 会话 48/49 之前的「卡死 20 分钟」就是这么误判出来的（§112 ①）。
 
-上一轮（会话 48）：**玩家状态多一档「挂机中」**（用户点的题，
+再上一轮（会话 48）：**玩家状态多一档「挂机中」**（用户点的题，
 **D118 / D119 / §110 / §111**）。起因：云上有人开鼠标连点器挂任务模式，用户不禁止挂机，
 但**要重启服务端时分不出「真有人在玩」还是「一屋子挂机的」**。
 

@@ -8,8 +8,9 @@
    而 `--verbose` 的逐包 dump 一开就是几十 MB，没法长期开着。
 2. **它要能一眼看完。** 全部前缀 ``[online]``，一条事件一行，
    `grep online logs/server.out` 就是一份完整的上下线流水。
-3. **它另外落一份盘**（``logs/online.log``）。`server.out` 会被启动脚本覆盖，
-   上下线记录不该跟着没。
+3. **它另外落一份盘**（``logs/online.log``）。`server.out` 里什么都有、也因此
+   涨得最快，保留天数一到就整份被清掉；上下线记录是「几个月后回头查事故」
+   要用的，不该跟着一起没。
 
 ★ **不打密码，也不打完整票据**（CLAUDE.md 铁律 9 / D067）。账号名和 IP 是要
 记的 —— 那正是这份日志存在的意义。
@@ -32,6 +33,9 @@
 `logcleanup` 也就永远清不到它。所以跨过零点时把昨天那份改名成
 ``online-YYYYMMDD.log``，让它自己老去、到期被清掉。当天那份始终叫
 ``online.log``，文档和 ⏳ 里那些「把 logs\\online.log 发回来」不用改。
+
+★ 切名那一句在 `daylog.rotate_to_dated()`，和 `server.out` 共用
+（用户 2026-09-14 起 `server.out` 也这么切）—— 两处的命名规则必须一致。
 """
 from __future__ import annotations
 
@@ -40,8 +44,9 @@ import threading
 import time
 
 import asynclog
-#: 切名那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
-import atomicfile
+#: 切名那一句（内含 `os.replace` 的重试外壳，见 `atomicfile.py` 文件头）。
+#: ★ 和 `server.out` 共用同一份实现 —— 运维看 `logs/` 时不该看到两种切法。
+import daylog
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PATH = os.path.join(ROOT, "logs", "online.log")
@@ -58,9 +63,10 @@ _fh_day = None
 
 
 def ts():
-    """和 `gameserver.ts()` 同一个格式，好让两边的行按时间对得上。"""
+    """和 `gameserver.ts()` 同一个格式（带完整日期），好让两边的行按时间对得上。"""
     now = time.time()
-    return time.strftime("%H:%M:%S", time.localtime(now)) + f".{int(now % 1 * 1000):03d}"
+    return (time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now))
+            + f".{int(now % 1 * 1000):03d}")
 
 
 def configure(path=None, to_file=True, to_stdout=True, verbose=None):
@@ -104,14 +110,7 @@ def _rotate_unlocked(day):
     同名文件已存在）就**原样接着写** —— 切分是为了让清理够得着它，
     不值得为它冒「日志写不进去」的险。
     """
-    stem, ext = os.path.splitext(_path)
-    target = f"{stem}-{day[0]:04d}{day[1]:02d}{day[2]:02d}{ext}"
-    if os.path.exists(target):
-        return
-    try:
-        atomicfile.replace(_path, target)
-    except OSError:
-        pass
+    daylog.rotate_to_dated(_path, day)
 
 
 def _fh_unlocked():

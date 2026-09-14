@@ -460,11 +460,20 @@ def pick_logs(logdir, session_start, pid, crash_epoch):
         seen.add(key)
         picked.append(path)
 
-    for name in ("server.out", "server.err", "relay.out", "relay.err",
+    for name in ("server.out", "server.err",
+                 # 启动脚本的重定向兜底：服务端/中继装好 daylog **之前**那一小段
+                 # （解释器的 SyntaxWarning、import 当场就炸的 traceback）只在
+                 # 这里边，崩溃现场不能漏掉它。见 `daylog.py`。
+                 "server-boot.out", "server-boot.err",
+                 "relay.out", "relay.err", "relay-boot.out", "relay-boot.err",
                  "bsloader.out", "bsloader.err", "online.log"):
         take(os.path.join(logdir, name))
-    take(os.path.join(logdir, "online-%s.log"
-                      % time.strftime("%Y%m%d", time.localtime(crash_epoch))))
+    # 崩溃**那一天**那几份按天切出来的。它们可能比本次会话还老（服务端昨天
+    # 跨了零点、今天才重启），mtime 判据够不着，所以按日期点名要。
+    crash_day = time.strftime("%Y%m%d", time.localtime(crash_epoch))
+    for name in ("online-%s.log", "server-%s.out", "server-%s.err",
+                 "relay-%s.out", "relay-%s.err"):
+        take(os.path.join(logdir, name % crash_day))
     if pid:
         for path in glob.glob(os.path.join(logdir, "bshook_*_pid%d.log" % pid)):
             take(path)

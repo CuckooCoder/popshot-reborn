@@ -12,6 +12,55 @@
 
 static wchar_t g_root[MAX_PATH * 2];
 
+int log_dated_name(const wchar_t *path, unsigned year, unsigned month,
+                   unsigned day, wchar_t *out, size_t cap)
+{
+    const wchar_t *p;
+    const wchar_t *dot = NULL;
+    size_t stem;
+    int n;
+
+    if (!path || !out || cap == 0) return 0;
+    /* 最后一个点，但只在最后一段里找 —— `C:\a.b\updater` 不该被当成有后缀。 */
+    for (p = path; *p; p++) {
+        if (*p == L'\\' || *p == L'/') dot = NULL;
+        else if (*p == L'.') dot = p;
+    }
+    stem = dot ? (size_t)(dot - path) : wcslen(path);
+    n = _snwprintf(out, cap, L"%.*s-%04u%02u%02u%s",
+                   (int)stem, path, year, month, day, dot ? dot : L"");
+    /* MSVC 的 _snwprintf 截断时返回负数**且不补 0**，所以两头都要挡。 */
+    if (n < 0 || (size_t)n >= cap) { out[0] = 0; return 0; }
+    out[cap - 1] = 0;
+    return 1;
+}
+
+/* 跨天了就把 `updater.log` 改名成 `updater-<它自己最后修改的那天>.log`。
+
+   改完就没人再写它 ⇒ mtime 冻住 ⇒ 才轮得到 logs\ 的自动清理把它删掉。
+   判据是「盘上那份是哪天写的」，不是任何定时器 —— 更新器是跑一趟就退的
+   短命进程，根本没有「定时」可言（铁律 10）。
+
+   改不动（目标重名 / 正被别人开着 / 权限不够）一律**当没发生、原样接着写**：
+   记日志不值得为它冒「更新流程出岔子」的险。和 server\daylog.py 同一个取舍。 */
+static void rotate_if_stale(const wchar_t *path)
+{
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    FILETIME local;
+    SYSTEMTIME was, now;
+    wchar_t target[MAX_PATH * 2];
+
+    if (!GetFileAttributesExW(path, GetFileExInfoStandard, &fad)) return;
+    if (!FileTimeToLocalFileTime(&fad.ftLastWriteTime, &local)) return;
+    if (!FileTimeToSystemTime(&local, &was)) return;
+    GetLocalTime(&now);
+    if (was.wYear == now.wYear && was.wMonth == now.wMonth
+        && was.wDay == now.wDay) return;                /* 还是今天，不用切 */
+    if (!log_dated_name(path, was.wYear, was.wMonth, was.wDay,
+                        target, MAX_PATH * 2)) return;
+    MoveFileW(path, target);
+}
+
 void log_init(const wchar_t *package_root, const char *tag_line)
 {
     wcsncpy(g_root, package_root ? package_root : L"", MAX_PATH * 2 - 1);
@@ -117,6 +166,9 @@ void log_vline(const char *fmt, va_list ap)
     _snprintf(line, sizeof(line), "[%s] %s\r\n", stamp, body);
     line[sizeof(line) - 1] = 0;
 
+    /* ★ 先切再开：这里是**唯一**碰这个文件的地方，而且开一次只写一行就关，
+       所以切名那一刻手上没有任何句柄压着它。 */
+    rotate_if_stale(path);
     f = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, NULL,
                     OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (f == INVALID_HANDLE_VALUE) return;

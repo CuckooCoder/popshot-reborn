@@ -4740,3 +4740,126 @@ bot 因此天然判不出挂机：它的同步包是服务端自己合成的，�
 `ModuleNotFoundError` 当场 throw。`test_ports.PortTableTests` 抓住了。
 修法和 `app.py` / `relay.py` 一样：文件头补一句 `sys.path.insert(0, …)`。
 ⇒ **往 `server/` 里加模块间 import 之前先问「这个文件会不会被当脚本直接跑」。**
+
+
+## D122 · `server.out` 由**服务端自己开**、自己按天切；启动脚本只留 `*-boot.*`（用户 2026-09-14）
+
+§113：云主机上 `server.out` 涨到 940 MB，保留天数一天都没起作用。
+要修就得能在**进程内**把它切走，而重定向出来的句柄不归 Python ⇒
+**只能让 Python 自己开这个文件**。
+
+新模块 `server/daylog.py`（`DaySink` + `rotate_to_dated`）：
+
+* `app.py` / `relay.py` 在入口处 `daylog.install()`，把 `sys.stdout` /
+  `sys.stderr` 换成按天切分的流。`asynclog._Stdout` 本来就**每次现查**
+  `sys.stdout`（那边的注释写明了），所以换掉它=接管全部日志，
+  几百个调用点一个不用改，任何一句裸 `print()` 也一起接管；
+* 今天那份仍叫 `server.out`（文档、工具、`bot_motion_compare.py` 的
+  `logs/server.out` 全不用改），跨零点切成 `server-20260913.out`；
+* `eventlog._rotate_unlocked` 改成调 `daylog.rotate_to_dated` ——
+  **两处切名必须同一套命名**，运维看 `logs/` 时不该看到两种切法。
+
+启动脚本（`launch.ps1` / `serverctl.ps1` / `serverctl.sh`）三处一起改：
+重定向改成 `server-boot.out` / `server-boot.err`，并**删掉**
+`Move-LogAside` / `rotate_log` 那两句。
+
+### ★ `--no-day-log`：打包自检**必须**关掉它
+
+`daylog` 的落脚点是**按包根算**的，而打包自检（`Invoke-ServerSmokeTest`）
+把包里的服务端真跑一遍 ⇒ 不关的话，包里那个本该空着的 `logs\` 就躺着
+一份启动日志随包发出去。和 `--no-online-log` / `--no-log-cleanup` /
+`--no-backup` 是同一类开关，加进同一处 `$argList`。
+
+★ 因此 `install()` 得从模块级挪进 `main()`（要先读到这个开关）。
+中间没有任何日志产生 —— `asynclog` 的写线程每次现查 `sys.stdout`，晚装几毫秒
+不丢东西；参数解析失败时那句 usage 照旧走原始 stderr，落进 `server-boot.err`。
+
+★ **光加开关不算完**（同 D7 那条教训）：`Assert-PackageDataClean` 跟着多验一条
+「包里的 `logs\` 必须是空的」。以后谁再往启动路径上挂个往 `logs\` 写东西的，
+在打包时炸出来，而不是等玩家解压时才发现。
+
+### ★ 为什么非得多出 `*-boot.*` 这一对
+
+不能让两个写手抢同一个文件。而重定向又**不能不要**：`install()` 之前那一小段
+（解释器的 `SyntaxWarning`、import 当场就炸的 traceback）只在那里边，
+`-WindowStyle Hidden` 下丢了就再也看不到。所以启动失败的诊断现在**打三份尾巴**：
+`server-boot.err`（起不来）/ `server.err`（起来之后抛的）/ `server.out`（端口被占一类）。
+
+### ★ 切分判据是「当前这个句柄是哪天开的」，不是定时器（铁律 10）
+
+放在**每次写之前**判：零点没人说话就不切，第一行真要写时才切，
+而那一行本来就属于新的一天。服务端空转两天再写一行也切得对。
+重启时另判一次「盘上那份的 mtime 是不是今天」—— 否则一个上个月留下的
+`server.out` 会永远新鲜、永远清不掉（`eventlog` 本来就这么干）。
+
+### ★ 跨重启**追加**，不再归档
+
+`Move-LogAside`（用户 2026-09-01「日志不要被覆盖」）当初存在的唯一理由是
+`>` 的截断语义。自己开文件用 `"a"` 之后这个理由没了，同一天的多次运行
+落在同一份里，靠 `install()` 写的那条
+`==== 服务端启动 2026-09-14 15:14:27 pid=31308 ====` 分段。
+`Move-LogAside` 只剩 `bsloader.*` 在用（那是 C 程序，管不了自己的文件）。
+
+### ★ 改名失败就原样接着写
+
+和 `eventlog` 同一个取舍：切分是为了让清理够得着，不值得为它冒
+「日志写不进去」的险。`atomicfile.replace`（D120）已经吃掉「杀软扫一瞬」
+那一档，它还失败就是真有人长期占着，重试多少次都没用。
+开文件本身失败（磁盘满 / 目录只读）时**退回启动脚本给的那个原始流**，
+绝不把这一行弄丢。
+
+### ★ 日志行补上完整日期
+
+四份 `ts()`（`gameserver` / `authserver` / `relay` / `eventlog`）一律改成
+`2026-09-14 15:14:27.305`。用户的原话是「只有时间，导致查问题的时候不好判断
+到底是哪天的 log」—— **文件名带日期解决不了这个**，因为排查时贴出来的
+恰恰是单独几行。代价 +11 字节/行（实测 +11.3%），而总量现在是有界的。
+另外把 `[web]` / `[bot]` 那几处**一个时间戳都没有**的行也补上了（§113）。
+
+`test_logs.py` 新增 15 条，其中
+`test_all_four_timestamps_carry_a_full_date` 钉死「四份必须长得一样」。
+
+### ★ 「一直不重启的服务端，过零点会切吗？」—— 会，而且这是全部要害
+
+用户当场追问的就是这条，因为**云主机永远等不到「下次启动」**：要是只有启动
+那一下才切，结果和改之前一模一样。
+
+切分判据放在 `DaySink.write()` 里（`_fh_unlocked()`），**每写一行比一次**
+「当前这个句柄是哪天开的 vs 现在是哪天」⇒ 过零点后**第一行**就切，
+进程什么都不用做。零点没人说话就不切，也不该切 —— 那一天根本没有日志。
+
+`DaySink` 因此多一个 `_localtime` 注入点（和 `atomicfile` / `crashwatch`
+同一套做法），`test_logs.LiveMidnightRollTests` 两条钉死：
+
+* 跑**真的** `asynclog` 写线程 + 真的 `sys.stdout` 替换，中间一次不重开，
+  只把钟从 23:59:50 拨到 00:00:10 —— 昨天那行必须在 `server-20260913.out`、
+  今天那行必须在 `server.out`，**两边都不许串**；
+* 空转 3 天再写一行也切得对，且**不留空文件**（中间那几天根本不存在）。
+
+### ★ `updater.log` 一起修（用户 2026-09-14 第二轮点名）
+
+同一个毛病：`updater/src/log.c` 只追加、永不切 ⇒ `logcleanup` 永远够不着。
+加 `rotate_if_stale()`：开文件前看一眼盘上那份是哪天写的，跨天就 `MoveFileW`
+成 `updater-YYYYMMDD.log`。**先切再开**是安全的 —— 那是全工程唯一碰这个文件
+的地方，而且开一次只写一行就关，切名那一刻手上没句柄。
+
+* 命名规则抽成 `log_dated_name()` 并**暴露到 log.h**，好让 `selftest` 钉住
+  （和 `apply_is_protected` 同一个做法）。必须和 `daylog.dated_name()` 一致。
+* `selftest` 加 5 条，`build.bat` 的闸门跑到 **92 checks, 0 failed**；
+  `BsPatcherChn.exe` 已重编（用户说放下一个版本一起发）。
+* ★ 踩到：`small` **不能**当变量名 —— `windows.h` 的 `rpcndr.h` 里
+  `#define small char`，报的是莫名其妙的 `C2628: "wchar_t"后面接"char"`。
+
+### ★ `serverctl.sh` 在 Git Bash 沙箱里真跑过了
+
+这台机器没有 WSL 发行版也没有 docker，所以搭了个「服务端包」形状的临时目录
+（`tools/serverctl.sh` + `server/` + `config/` + `logs/` + 一个指向真 Python 的
+`python3` 垫片），`start` / `stop` / 两条失败路径全跑通。脚本本身只用 POSIX sh
++ `nohup` / `kill -0` / `tar`，端口判断全走 Python，所以这一遍覆盖的是**真逻辑**，
+不是 mock。⏳ 仍然欠一遍真 Linux —— 但云主机目前是 Windows（走 `serverctl.ps1`）。
+
+★ 意外收获：沙箱里没有 `__pycache__`，于是 `server-boot.err` **真的接住了**
+2.3 KB 的 `SyntaxWarning` —— 这正是这对文件存在的理由，本机因为有 pyc 缓存
+一直是空的，差点以为它没用。失败路径打的三份尾巴各司其职：
+`server-boot.err` 装解释器警告、`server.err` 装装好之后抛的 traceback、
+`server.out` 装启动横幅。

@@ -18,13 +18,18 @@
 
 判据是**文件的最后修改时间**，不是文件名里的日期：
 
-* 正在写的日志（`server.out` / 今天的 `online.log` / 活着的连接那份
+* 正在写的日志（今天的 `server.out` / 今天的 `online.log` / 活着的连接那份
   `game_NNN_*.txt`）mtime 就是刚才，**永远不会被选中**；
 * 客户端那些 `bshook_20260813_142534_pid24332.log` 文件名里虽然带日期，
   但没有任何东西保证别的写日志的人也这么命名。mtime 是所有文件都有的。
 
 删不掉的文件（Windows 上另一个进程正开着它、权限不够）**只跳过，不报错** ——
 清垃圾绝不能把服务端弄挂。
+
+★ 光有这里还不够：一个**一直在写**的文件 mtime 永远是刚才，保留天数对它
+一天都不起作用。所以长期只增的那几份必须先**按天切开**（`daylog.py` /
+`eventlog.py`），切出来的 `server-20260913.out` 才轮得到这里来删。
+2026-09-14 之前 `server.out` 没切，云主机上实测长到了 940 MB。
 """
 from __future__ import annotations
 
@@ -60,7 +65,10 @@ DAILY_HOUR = 4
 #: 逆向时手工留下的截图 / 探针输出也不该被自动清掉。
 #:
 #: 覆盖的是**所有**真正会自动长出来的东西：
-#:   server.out / server.err / relay.out / relay.err / bsloader.out / bsloader.err
+#:   server.out / server.err        服务端主日志（今天的）
+#:   server-*.out / server-*.err    `daylog` 按天切出来的昨天及更早（真正会被删的）
+#:   server-boot.out / server-boot.err  启动脚本的重定向兜底（daylog 装好之前那一小段）
+#:   relay.* / bsloader.*           中继、客户端加载器，同上三种形态
 #:   bshook_*.log            客户端注入 DLL 的日志
 #:   online.log / online-*.log  连接事件流水（后者是 eventlog 按天切出来的）
 #:   game_* / auth_* / conn_*   逐连接的抓包落盘（只有 --verbose 才产生）

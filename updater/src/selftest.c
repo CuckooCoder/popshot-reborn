@@ -30,6 +30,7 @@
 #include "probe.h"
 #include "apply.h"
 #include "config.h"
+#include "log.h"
 #include "speedtest.h"
 #include "ui_window.h"
 
@@ -225,6 +226,34 @@ static void protected_tests(void)
           "BigShot.exe NOT protected");
     check(!apply_is_protected(L"tools/x.py"), "tools/x.py NOT protected");
     check(!apply_is_protected(L"BUILD.ver"), "BUILD.ver NOT protected");
+}
+
+static void logname_tests(void)
+{
+    /* 切出来的名字**就是**自动清理的入口：名字起错了，那份日志永远不会被
+       删掉，而这事在开发机上一点症状都没有（用户 2026-09-14）。
+       规则必须和 server\daylog.py 的 dated_name() 一模一样。 */
+    wchar_t out[MAX_PATH * 2];
+    /* `small` 不能用做变量名：windows.h 的 rpcndr.h 里 `#define small char`。 */
+    wchar_t tiny[8];
+
+    check(log_dated_name(L"C:\\pkg\\logs\\updater.log", 2026, 9, 13,
+                         out, MAX_PATH * 2)
+          && wcscmp(out, L"C:\\pkg\\logs\\updater-20260913.log") == 0,
+          "log_dated_name inserts -YYYYMMDD before the extension");
+    check(log_dated_name(L"updater.log", 2026, 1, 2, out, MAX_PATH * 2)
+          && wcscmp(out, L"updater-20260102.log") == 0,
+          "log_dated_name zero-pads month/day");
+    /* 只在最后一段里找点号：目录名里的点不算后缀。 */
+    check(log_dated_name(L"C:\\a.b\\updater", 2026, 9, 13, out, MAX_PATH * 2)
+          && wcscmp(out, L"C:\\a.b\\updater-20260913") == 0,
+          "log_dated_name ignores dots in directory names");
+    /* 放不下就老实说放不下 —— 截断出来的半个路径改名会改到别处去。 */
+    check(!log_dated_name(L"C:\\pkg\\logs\\updater.log", 2026, 9, 13,
+                          tiny, 8),
+          "log_dated_name refuses to truncate");
+    check(!log_dated_name(NULL, 2026, 9, 13, out, MAX_PATH * 2),
+          "log_dated_name survives a NULL path");
 }
 
 static void hash_tests(void)
@@ -773,6 +802,7 @@ int selftest_run(int preview)
     frame_tests();
     manifest_tests();
     protected_tests();
+    logname_tests();
     hash_tests();
     util_tests();
     proxylist_tests();

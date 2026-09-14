@@ -1692,9 +1692,9 @@ def _muzzle(x, y, toward_x):
 BOT_DIAG_FIRE_ANYWHERE = os.environ.get(
     "BOT_DIAG_FIRE_ANYWHERE", "") not in ("", "0")
 if BOT_DIAG_FIRE_ANYWHERE:
-    asynclog.emit("[bot] ★★ BOT_DIAG_FIRE_ANYWHERE 已开 —— bot 会无视交战距离和地形"
-                  "遮挡开枪，并逐帧报「为什么不开枪」。这是取证用的临时开关，"
-                  "正常游玩别开。")
+    asynclog.emit(f"[{gameserver.ts()}] [bot] ★★ BOT_DIAG_FIRE_ANYWHERE 已开 —— "
+                  "bot 会无视交战距离和地形遮挡开枪，并逐帧报「为什么不开枪」。"
+                  "这是取证用的临时开关，正常游玩别开。")
 
 
 def _followable_humans(room):
@@ -10289,7 +10289,7 @@ def _warm_worker_loop():
         except Exception as error:          # noqa: BLE001 —— 纯缓存，不许炸
             # ★ 一份炸了不能把这条线程带走：它死了之后**所有**图都不再预热，
             #   而预热失败本身一点行为都不影响（游戏线程该算就自己算）。
-            asynclog.emit(f"[bot] ⚠ 可达图预热线程吞掉一个异常: {error!r}")
+            asynclog.emit(f"[{gameserver.ts()}] [bot] ⚠ 可达图预热线程吞掉一个异常: {error!r}")
         finally:
             with _WARM_CV:
                 _WARM_WORKER[1] -= 1
@@ -10330,11 +10330,12 @@ def _warm_navigation_now(terrain, who, seeds, label):
         terrain.bullet_coarse()
         coarse_ms = (time.monotonic() - started) * 1000
         count = botnav.warm(terrain, who, seeds)
-        asynclog.emit(f"[bot] 可达图预热完毕 {label}：{count} 个落脚点，"
+        asynclog.emit(f"[{gameserver.ts()}] [bot] 可达图预热完毕 {label}："
+                      f"{count} 个落脚点，"
                       f"{(time.monotonic() - started) * 1000:.0f} ms"
                       f"（其中弹道粗网格 {coarse_ms:.0f} ms）")
     except Exception as error:              # noqa: BLE001 —— 纯缓存，不许炸
-        asynclog.emit(f"[bot] ⚠ 可达图预热失败 {label}: {error!r}")
+        asynclog.emit(f"[{gameserver.ts()}] [bot] ⚠ 可达图预热失败 {label}: {error!r}")
 
 
 def warm_navigation(room, why):

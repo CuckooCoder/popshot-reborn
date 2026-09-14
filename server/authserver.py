@@ -79,7 +79,8 @@ VERBOSE = False
 
 
 def ts():
-    return datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+    """和 `gameserver.ts()` 同一个格式（带完整日期，见那边的说明）。"""
+    return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
 
 def log(msg, fh=None):

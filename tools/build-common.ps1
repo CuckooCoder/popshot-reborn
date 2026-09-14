@@ -842,9 +842,13 @@ function Invoke-ServerSmokeTest {
     #   跟 `--accounts` 指同一个临时目录：下面 finally 里一起删掉，也顺带
     #   免掉 app.py 那句「账号存档不在备份范围内」的告警。
     #   ★ 光挪走不算完 —— 挪没挪干净由 `Assert-PackageDataClean` 验收。
+    # --no-day-log：★ 同一个道理（用户 2026-09-14 / D122）。服务端现在自己开
+    #   `logs\server.out` 并按天切，而它是**按包根算路径**的 —— 不关掉的话
+    #   自检跑完，包里那个本该空着的 `logs\` 就躺着一份 server.out 随包发出去。
+    #   自检的 stdout/stderr 本来就重定向在 $work\smoke.out，一个字也不会丢。
     $argList = @(
         "`"$app`"", '--no-control', '--no-online-log', '--no-log-cleanup',
-        '--no-backup',
+        '--no-backup', '--no-day-log',
         '--auth-port',  "$authPort",
         '--game-port',  "$gamePort",
         '--relay-port', "$relayPort",
@@ -914,7 +918,8 @@ function Invoke-ServerSmokeTest {
 }
 
 function Assert-PackageDataClean {
-    <# `server\data\` 里除了 `-AllowNames` 点名的，一个文件都不该有。
+    <# 包里那两个「只装运行时产物」的目录必须是空的：`server\data\`（除了
+       `-AllowNames` 点名的）和 `logs\`。
 
        ★ 为什么要有它：那个目录装的是**用户数据**（运营配置 / 账号 / 备份），
          随包发出去就意味着开服的人「解压覆盖老目录」升级时，管理页改过的
@@ -945,6 +950,20 @@ function Assert-PackageDataClean {
                "解压覆盖升级时会盖掉他改过的运营配置（D7 / 铁律 11）。" +
                "多半是启动路径上又多了个「缺文件就地生成」的东西，" +
                "让它跟着 --data-dir 走。")
+    }
+
+    # ★ `logs\` 同理（用户 2026-09-14 / D122）：服务端现在自己开
+    #   `logs\server.out` 并按天切，路径按**包根**算 —— 自检忘了加
+    #   `--no-day-log` 的话，包里就躺着一份别人机器上的启动日志发出去了。
+    $logDir = Join-Path $PackageRoot 'logs'
+    if (Test-Path -LiteralPath $logDir -PathType Container) {
+        $strayLogs = @(Get-ChildItem -LiteralPath $logDir -Force)
+        if ($strayLogs.Count) {
+            $names = (($strayLogs | ForEach-Object { $_.Name }) -join '、')
+            throw ("自检失败：包里的 logs\ 不是空的（$names）。" +
+                   "那个目录只装运行时产物，不该随包发出去。" +
+                   "多半是自检那一发少传了 --no-day-log。")
+        }
     }
 }
 

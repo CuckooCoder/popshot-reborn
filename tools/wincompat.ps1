@@ -331,8 +331,11 @@ function Move-LogAside {
     #
     # 为什么非得改名不可：`Start-Process -RedirectStandardOutput` 是 `>` 语义
     # （截断新建），PowerShell 没有「追加」模式。所以在起进程**之前**把旧的
-    # 挪走，新进程照旧写 `server.out` —— 文档、`launch.ps1` 读 server.err 尾巴
-    # 的失败诊断、`logcleanup` 的白名单全都不用改。
+    # 挪走，新进程照旧写同名文件 —— 文档和 `logcleanup` 的白名单都不用改。
+    #
+    # ★ 2026-09-14 起 **server / relay 不再走这条路**：那两个进程自己开日志、
+    #   自己追加、自己按天切（`server\daylog.py`），重定向只剩 `*-boot.*`。
+    #   现在只有 `bsloader.out/.err` 还用它 —— 那是个 C 程序，没法自己管文件。
     #
     # 归档名用**文件自己的最后修改时间**，不是「现在」：
     #   1. 名字标的是那次运行**结束**的时刻，比标归档时刻有意义；

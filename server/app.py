@@ -43,6 +43,7 @@ import bot                                                     # noqa: F401
 import config as server_config
 import crashstore
 import databackup
+import daylog
 import eventlog
 import gameserver
 import logcleanup
@@ -140,6 +141,10 @@ def build_arg_parser():
                     help="逐包 hexdump + 抓包落盘。逆协议时开，日常别开")
     ap.add_argument("--no-online-log", action="store_true",
                     help="连接事件只打到屏幕，不写 logs/online.log")
+    ap.add_argument("--no-day-log", action="store_true",
+                    help="不接管 stdout/stderr，日志原样交给启动脚本的重定向"
+                         "（打包自检用：自检把包里的服务端真跑一遍，不该往"
+                         "包内的 logs/ 里写一份 server.out 随包发出去）")
     ap.add_argument("--log-retention-days", type=int, default=None, metavar="天",
                     help="logs/ 里超过这么多天没动过的日志文件会被删掉（0 = 不清理）。"
                          "默认读 server.config 的 log_retention_days")
@@ -403,6 +408,19 @@ def _report_first_run_upgrades(created):
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
 
+    # ★★ 接管 stdout/stderr：落到 `logs/server.out` / `logs/server.err`，
+    #    并且**跨零点自动切成 `server-YYYYMMDD.out`**（用户 2026-09-14，daylog.py）。
+    #    不这么做的话这两个文件就是启动脚本的重定向产物，mtime 永远是刚才，
+    #    `logcleanup` 的保留天数对它们一天都不起作用 —— 云主机上实测涨到 940 MB。
+    #
+    #    ★ 排在**解析完参数**之后（不是模块级）：`--no-day-log` 得先读到。
+    #      这中间没有任何日志产生，`asynclog` 的写线程每次现查 `sys.stdout`，
+    #      所以晚装几毫秒不丢东西；解析参数失败时那句 usage 照旧走原始 stderr，
+    #      落进启动脚本的 `server-boot.err`，正是它该去的地方。
+    log_paths = None
+    if not args.no_day_log:
+        log_paths = daylog.install(banner="服务端启动")
+
     # 运营配置和备份的落脚点。**必须排在所有人碰它之前** —— `ensure_files` /
     # `BackupService` / 管理页都是**每次现取** `shopcfg.DATA_DIR`（谁都没在
     # import 时抓快照，见 databackup.py `_data_dir`），所以在这儿改就全体生效。
@@ -458,7 +476,11 @@ def main(argv=None):
             f" 不用重启，下一条连接就按新值判）")
     for warning in filter_warnings:
         log(f"⚠ 版本门禁: {warning}")
-    # 上下线流水另存一份：`server.out` 每次启动都会被覆盖，连接记录不该跟着没。
+    if log_paths:
+        log(f"服务端日志: {log_paths[0]}（跨零点自动切成 server-YYYYMMDD.out，"
+            f"和别的日志一起按保留天数清理；报错另在 server.err）")
+    # 上下线流水另存一份：`server.out` 到期就会被清掉，连接记录不该跟着没
+    # —— 上下线是「几个月后回头查事故」要用的，比 3 天的保留期活得久。
     # `--verbose` 时另外放行 `eventlog.debug()`（转发耗时 / 中继 RTT 这类遥测，D112）。
     if args.no_online_log:
         eventlog.configure(to_file=False, verbose=args.verbose)
@@ -470,8 +492,8 @@ def main(argv=None):
         log("调试日志: 已放行 [online-debug]（转发耗时 / 中继 RTT / 客户端异常上报）")
 
     # 等级曲线换代后的存档对齐（§229 / D150）。**必须排在 `eventlog.configure`
-    # 之后** —— `server.out` 每次启动都会被覆盖，这份清单要留在不被覆盖的
-    # 那一份流水里，否则重启一次就再也查不到「谁从几级变成了几级」。
+    # 之后** —— `server.out` 到期会被清掉，这份清单要留在活得更久的
+    # 那一份流水里，否则过几天就再也查不到「谁从几级变成了几级」。
     # 只在服务端真的启动时跑，那时没人在线；幂等，清单为空就一个字都不打。
     _report_level_realign(accounts)
 
