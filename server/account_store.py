@@ -37,6 +37,11 @@ import savecrypt
 #: ★ `shopcfg` 顶层只 import `shopdata` + 标准库，不绕回来 import 本模块。
 import shopcfg
 
+#: 顶上去那一句 `os.replace` 的重试外壳（V0.3商店 2026-09-14）。
+#: 没有它的话，杀软 / 索引器 / 同步盘扫一眼刚落盘的 tmp，这一次写盘就丢了 ——
+#: 下面 `lock` 的注释里写的「结算奖励就丢了」说的正是它。只依赖标准库。
+import atomicfile
+
 
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_PATH = os.path.join(SERVER_DIR, "data", "accounts.json")
@@ -501,7 +506,7 @@ class AccountStore:
                 f.write("\n")
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp, self.path)
+            atomicfile.replace(tmp, self.path)
         finally:
             try:
                 os.unlink(tmp)

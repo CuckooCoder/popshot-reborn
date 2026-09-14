@@ -57,6 +57,27 @@ def _template_dir():
     return _TEMPLATE.name
 
 
+#: 默认存档（里头那个默认管理员）同样**只造一次**（2026-09-14）。
+#:
+#: ★ 和上面三份配置一模一样的道理，只是这次是实测出来的：新建一个
+#:   `AccountStore` 要先把文件写出来（`ensure_exists`）**9.9 毫秒**，
+#:   `ensure_item_fields()` 再建默认管理员又写一次 **10.2 毫秒**；
+#:   而「复制一份现成的」只要 0.9 毫秒，之后 `AccountStore()` 0.2 毫秒。
+#:   这一组现在 240 个用例，省下来的是 4.6 秒。
+#: ★ 隔离一点没变：复制出来的是**各自独立的文件**，每个用例照旧一份
+#:   自己的存档、一个自己的 `AccountStore`。
+_ACCOUNTS_TEMPLATE = None
+
+
+def _accounts_template():
+    global _ACCOUNTS_TEMPLATE
+    if _ACCOUNTS_TEMPLATE is None:
+        _ACCOUNTS_TEMPLATE = tempfile.TemporaryDirectory()
+        path = os.path.join(_ACCOUNTS_TEMPLATE.name, "accounts.json")
+        AccountStore(path).ensure_item_fields()
+    return os.path.join(_ACCOUNTS_TEMPLATE.name, "accounts.json")
+
+
 class _AdminCase(unittest.TestCase):
     """一台真的 HTTP 服务器 + 一份临时存档 + 一份临时 `server/data/`。"""
 
@@ -77,9 +98,11 @@ class _AdminCase(unittest.TestCase):
         #   存档也放进这份 data 目录 —— 和真实布局一样，数据备份才会把它卷进去。
         self.data_dir = os.path.join(self.tmp.name, "data")
         os.makedirs(self.data_dir)
-        self.accounts = AccountStore(os.path.join(self.data_dir, "accounts.json"))
-        # 默认管理员由启动时的幂等补齐建出来（和真实开服同一条路）。
-        self.accounts.ensure_item_fields()
+        # 默认管理员是启动时的幂等补齐建出来的（和真实开服同一条路）——
+        # 那一步的产物就是 `_accounts_template()`，这里复制一份用。
+        accounts_path = os.path.join(self.data_dir, "accounts.json")
+        shutil.copyfile(_accounts_template(), accounts_path)
+        self.accounts = AccountStore(accounts_path)
 
         saved_dir = shopcfg.DATA_DIR
         shopcfg.DATA_DIR = self.data_dir

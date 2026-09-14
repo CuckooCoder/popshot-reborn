@@ -4786,28 +4786,28 @@ class BotUnstallTests(TerrainMixin, BotFireRoom):
         self.assertEqual(0, self.bot_conn.probe_side)
 
 
-class BotFrozenSceneTests(TerrainMixin, TwoBotFrameRoom):
-    """★★★★★ `bug调查/14` 里三个「所有 bot 卡住不动」的现场，在**真图**上重放。
+class FrozenSceneChecks(object):
+    """★★★★★ `bug调查/14` 里一个「所有 bot 卡住不动」的现场，在**真图**上重放。
 
-    坐标 / 血量 / 地图全部照 `server.out` 抄。线上这三处分别停了
+    坐标 / 血量 / 地图全部照 `server.out` 抄。线上那三处分别停了
     **129.6 / 161 / 144.9 秒**，一格没挪。
 
-    ⚠ 这三张图要 `server/bot_mapdata/` 里的真产物，不是合成地形 ——
+    ⚠ 这些图要 `server/bot_mapdata/` 里的真产物，不是合成地形 ——
       抖动和卡死都只在真地形上才复现得出来。
+
+    ★ **一个现场一个类**（2026-09-14）：三个现场原来挤在一条用例里，
+      那条是全量第二慢（3.14 19 秒 / 3.8 47 秒），而 `run_tests.py -j`
+      是**按类**分片的 —— 挤在一起它就自己堵住一个进程。拆开之后三个
+      现场各走一个进程，红了也不用读文案才知道是哪张图。
+      两条断言仍然留在同一个类里：它们共用 `botnav` 对这张图的预热
+      （第二条只要 0.9 秒就是这么来的），分开放就要热两遍。
     """
 
     session_type = 1
     arguments = (1, 0, 0)
 
-    #: (标题, 图名, 甲方 (x, y, 血), 乙方 (x, y, 血))
-    SCENES = (
-        ("Iceria00 01:20:25", "Iceria00",
-         (2343.0, 836.0, 0.14), (2337.0, 832.0, 0.04)),
-        ("Forest02 09:21:48", "Forest02",
-         (1160.0, 583.0, 0.40), (147.0, 526.0, 0.40)),
-        ("Forest00 00:21:27", "Forest00",
-         (1019.0, 460.0, 0.23), (985.0, 656.0, 0.12)),
-    )
+    #: (标题, 图名, 甲方 (x, y, 血), 乙方 (x, y, 血))。子类填。
+    SCENE = None
 
     def setUp(self):
         super().setUp()
@@ -4836,58 +4836,64 @@ class BotFrozenSceneTests(TerrainMixin, TwoBotFrameRoom):
                            * (1.0 - spec[2]))
         return conn
 
-    def test_no_scene_parks_the_bots_any_more(self):
-        for title, map_name, first, second in self.SCENES:
-            terrain = self.install_terrain(mapdata.load(map_name))
-            who = {}
-            for seat, spec in zip(self.seats, (first, second)):
-                who[seat] = bot._character_of(self.arm(seat, spec))
-            travel = {seat: 0.0 for seat in self.seats}
-            for step in range(120):
-                for seat in self.seats:
-                    conn = self.room.seats[seat].conn
-                    conn.frame_seq = step
-                    botplan.PLANNER.settle()   # A* 是后台线程，替它跑完
-                    before = conn.body.x
-                    intent = bot._decide(self.room, conn, seat, terrain,
-                                         time.monotonic(),
-                                         step * bot.BOT_DECISION_TICKS)
-                    for _ in range(bot.BOT_DECISION_TICKS):
-                        conn.body = bot.botmove.tick(
-                            terrain, conn.body, who[seat],
-                            direction=intent[0], fast_run=bool(intent[3]))
-                    conn.battle_pos = (conn.body.x, conn.body.y)
-                    travel[seat] += abs(conn.body.x - before)
+    def replay(self, steps):
+        """把这个现场摆好，推 `steps` 格决策；回 `(地形, 每个座位挪了多少)`。"""
+        _title, map_name, first, second = self.SCENE
+        terrain = self.install_terrain(mapdata.load(map_name))
+        who = {}
+        for seat, spec in zip(self.seats, (first, second)):
+            who[seat] = bot._character_of(self.arm(seat, spec))
+        travel = {seat: 0.0 for seat in self.seats}
+        for step in range(steps):
             for seat in self.seats:
-                self.assertGreater(
-                    travel[seat], 100.0,
-                    "%s 座位 %d 120 格决策只挪了 %.0f 像素"
-                    % (title, seat, travel[seat]))
+                conn = self.room.seats[seat].conn
+                conn.frame_seq = step
+                botplan.PLANNER.settle()   # A* 是后台线程，替它跑完
+                before = conn.body.x
+                intent = bot._decide(self.room, conn, seat, terrain,
+                                     time.monotonic(),
+                                     step * bot.BOT_DECISION_TICKS)
+                for _ in range(bot.BOT_DECISION_TICKS):
+                    conn.body = bot.botmove.tick(
+                        terrain, conn.body, who[seat],
+                        direction=intent[0], fast_run=bool(intent[3]))
+                conn.battle_pos = (conn.body.x, conn.body.y)
+                travel[seat] += abs(conn.body.x - before)
+        return terrain, travel
+
+    def test_no_scene_parks_the_bots_any_more(self):
+        _terrain, travel = self.replay(120)
+        for seat in self.seats:
+            self.assertGreater(
+                travel[seat], 100.0,
+                "%s 座位 %d 120 格决策只挪了 %.0f 像素"
+                % (self.SCENE[0], seat, travel[seat]))
 
     def test_they_end_up_inside_engaging_distance(self):
         """★ 不只是「在动」—— 它们得真的凑到打得着的距离上。"""
-        for title, map_name, first, second in self.SCENES:
-            terrain = self.install_terrain(mapdata.load(map_name))
-            who = {}
-            for seat, spec in zip(self.seats, (first, second)):
-                who[seat] = bot._character_of(self.arm(seat, spec))
-            for step in range(240):
-                for seat in self.seats:
-                    conn = self.room.seats[seat].conn
-                    conn.frame_seq = step
-                    botplan.PLANNER.settle()
-                    intent = bot._decide(self.room, conn, seat, terrain,
-                                         time.monotonic(),
-                                         step * bot.BOT_DECISION_TICKS)
-                    for _ in range(bot.BOT_DECISION_TICKS):
-                        conn.body = bot.botmove.tick(
-                            terrain, conn.body, who[seat],
-                            direction=intent[0], fast_run=bool(intent[3]))
-                    conn.battle_pos = (conn.body.x, conn.body.y)
-            bodies = [self.room.seats[s].conn.body for s in self.seats]
-            span = abs(bodies[0].x - bodies[1].x)
-            self.assertLessEqual(span, bot.BOT_ENGAGE_RANGE,
-                                 "%s 最后还隔着 %.0f 像素" % (title, span))
+        self.replay(240)
+        bodies = [self.room.seats[s].conn.body for s in self.seats]
+        span = abs(bodies[0].x - bodies[1].x)
+        self.assertLessEqual(span, bot.BOT_ENGAGE_RANGE,
+                             "%s 最后还隔着 %.0f 像素" % (self.SCENE[0], span))
+
+
+class Iceria00FrozenSceneTests(FrozenSceneChecks, TerrainMixin,
+                               TwoBotFrameRoom):
+    SCENE = ("Iceria00 01:20:25", "Iceria00",
+             (2343.0, 836.0, 0.14), (2337.0, 832.0, 0.04))
+
+
+class Forest02FrozenSceneTests(FrozenSceneChecks, TerrainMixin,
+                               TwoBotFrameRoom):
+    SCENE = ("Forest02 09:21:48", "Forest02",
+             (1160.0, 583.0, 0.40), (147.0, 526.0, 0.40))
+
+
+class Forest00FrozenSceneTests(FrozenSceneChecks, TerrainMixin,
+                               TwoBotFrameRoom):
+    SCENE = ("Forest00 00:21:27", "Forest00",
+             (1019.0, 460.0, 0.23), (985.0, 656.0, 0.12))
 
 
 class BotWalkOvershootTests(TerrainMixin, BotFireRoom):

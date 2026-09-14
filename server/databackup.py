@@ -59,6 +59,9 @@ import shutil
 import threading
 import time
 
+#: 顶上去那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）——
+#: 文件头「Windows 上这不是可选项」那一段说的就是它挡住的那个异常。
+import atomicfile
 import account_store
 import config as server_config
 import logcleanup
@@ -204,7 +207,7 @@ def write_bytes_atomic(path, data):
             fp.write(data)
             fp.flush()
             os.fsync(fp.fileno())
-        os.replace(tmp, path)
+        atomicfile.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             try:
@@ -526,7 +529,7 @@ class BackupService(object):
                 "files": files,
             }
             shopcfg.write_json(os.path.join(tmp, MANIFEST_NAME), manifest)
-            os.rename(tmp, final)          # 到这一步之前列表里看不到它
+            atomicfile.rename(tmp, final)          # 到这一步之前列表里看不到它
         except BaseException:
             shutil.rmtree(tmp, ignore_errors=True)
             raise
@@ -540,7 +543,7 @@ class BackupService(object):
         `.tmp-del-*`，下次清理顺手扫掉，不会留下一个没有 manifest 的孤儿。"""
         root = self.backup_dir()
         doomed = os.path.join(root, TMP_PREFIX + "del-" + backup_id)
-        os.rename(os.path.join(root, backup_id), doomed)
+        atomicfile.rename(os.path.join(root, backup_id), doomed)
         shutil.rmtree(doomed)
 
     def remove(self, backup_id):

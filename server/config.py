@@ -24,6 +24,19 @@ from __future__ import annotations
 
 import os
 import re
+import sys
+
+# ★★ 本模块**同时是 CLI**：`launch.ps1` / `serverctl.sh` 靠
+#    `python server/config.py --ports` 拿端口表，拿不到就直接 throw、游戏起不来。
+#    而便携 Python 带着 `python314._pth`，直接跑脚本时**不会**把脚本所在目录
+#    放进 `sys.path` —— 下面这一句不加，`import atomicfile` 当场
+#    `ModuleNotFoundError`（2026-09-14 加 `atomicfile` 时就这么炸过一次，
+#    `test_ports.PortTableTests` 当场抓住）。`app.py` / `relay.py` 同一句。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+#: 顶上去那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
+#: 只依赖标准库，不会绕回来 import 本模块。
+import atomicfile                                              # noqa: E402
 
 
 #: 认证服端口。客户端硬编码（V0.1 §24：原服 222.73.1.42:47611），不可配置。
@@ -724,7 +737,7 @@ def _write_text_atomic(path, text):
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        atomicfile.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             try:

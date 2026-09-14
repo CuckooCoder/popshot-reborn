@@ -553,13 +553,21 @@ class IncrementalEdgeCacheTests(unittest.TestCase):
         self.assertEqual([], wrong[:4])
 
 
-class RealIncrementalEdgeCacheTests(unittest.TestCase):
-    """★★ 真产物上的同一条：每张图逐件罐子打碎，继承的边必须逐条对得上。"""
+class IncrementalEdgeCacheOnRealMap(object):
+    """★★ 真产物上的同一条：一张图逐件罐子打碎，继承的边必须逐条对得上。
 
-    #: ★ 只挑两张：一次「整套重算再比一遍」和一次泛洪一样贵，全铺开就是
-    #:   一分钟的单测。会话 55 离线**穷举**跑过 12 张真图 × 每件罐子，
-    #:   一格都没错（§170），这里留的是回归哨兵。
-    MAPS = ("Esperan03", "Iceria00")
+    ★ 只挑两张图：一次「整套重算再比一遍」和一次泛洪一样贵，全铺开就是
+      一分钟的单测。会话 55 离线**穷举**跑过 12 张真图 × 每件罐子，
+      一格都没错（§170），这里留的是回归哨兵。
+
+    ★ **一张图一个类**（2026-09-14）：两张图原来在一条用例里用 for 串着跑，
+      那条是全量最慢的一条（3.14 24 秒 / 3.8 60 秒），而 `run_tests.py -j`
+      按**类**分片 —— 串在一起它一个人就是整个并行全量的地板。
+      拆开之后两张图各走一个进程，断言一条没减。
+    """
+
+    #: 子类填图名。
+    MAP = None
 
     #: 每隔几格核一格 —— 同上，是为了让这条用例跑得完，不是判据的一部分。
     STRIDE = 4
@@ -568,10 +576,10 @@ class RealIncrementalEdgeCacheTests(unittest.TestCase):
     def setUpClass(cls):
         import chrprops                                        # noqa: PLC0415
         cls.who = chrprops.get(1)
-        cls.maps = [m for m in (mapdata.load(n) for n in cls.MAPS)
-                    if m is not None and m.breakables]
-        if not cls.maps:
-            raise unittest.SkipTest("没有带破坏物的地形产物")
+        cls.terrain = mapdata.load(cls.MAP)
+        if cls.terrain is None or not cls.terrain.breakables:
+            raise unittest.SkipTest("没有 %s 的地形产物（或者它没有破坏物）"
+                                    % cls.MAP)
 
     def seeds(self, terrain, points):
         out = []
@@ -582,30 +590,38 @@ class RealIncrementalEdgeCacheTests(unittest.TestCase):
         return out
 
     def test_every_single_break_matches_a_full_rebuild(self):
-        for root in self.maps:
-            points = [p for group in root.points.values() for p in group]
-            botnav.warm(root, self.who, self.seeds(root, points))
-            opened = root.variant(())
-            botnav.warm(opened, self.who, self.seeds(opened, points))
-            for item in root.breakables:
-                alive = frozenset(i for i in root.alive if i != item.index)
-                variant = root.variant(alive)
-                botnav.warm(variant, self.who, self.seeds(variant, points))
-                graph = botnav.graph_of(variant, self.who)
-                wrong = []
-                for index, key in enumerate(sorted(graph)):
-                    if index % self.STRIDE:
-                        continue
-                    entry = graph[key]
-                    _bx, fresh = botnav._run_attempts(variant, entry[0],
-                                                      self.who)
-                    want = tuple(e for e in fresh if e is not None)
-                    if want != entry[1]:
-                        wrong.append((key, entry[0]))
-                self.assertEqual([], wrong[:3],
-                                 "%s 碎掉 %d 号之后有 %d/%d 格继承错了"
-                                 % (root.name, item.index, len(wrong),
-                                    len(graph)))
+        root = self.terrain
+        points = [p for group in root.points.values() for p in group]
+        botnav.warm(root, self.who, self.seeds(root, points))
+        opened = root.variant(())
+        botnav.warm(opened, self.who, self.seeds(opened, points))
+        for item in root.breakables:
+            alive = frozenset(i for i in root.alive if i != item.index)
+            variant = root.variant(alive)
+            botnav.warm(variant, self.who, self.seeds(variant, points))
+            graph = botnav.graph_of(variant, self.who)
+            wrong = []
+            for index, key in enumerate(sorted(graph)):
+                if index % self.STRIDE:
+                    continue
+                entry = graph[key]
+                _bx, fresh = botnav._run_attempts(variant, entry[0], self.who)
+                want = tuple(e for e in fresh if e is not None)
+                if want != entry[1]:
+                    wrong.append((key, entry[0]))
+            self.assertEqual([], wrong[:3],
+                             "%s 碎掉 %d 号之后有 %d/%d 格继承错了"
+                             % (root.name, item.index, len(wrong), len(graph)))
+
+
+class Esperan03IncrementalEdgeCacheTests(IncrementalEdgeCacheOnRealMap,
+                                         unittest.TestCase):
+    MAP = "Esperan03"
+
+
+class Iceria00IncrementalEdgeCacheTests(IncrementalEdgeCacheOnRealMap,
+                                        unittest.TestCase):
+    MAP = "Iceria00"
 
 
 if __name__ == "__main__":

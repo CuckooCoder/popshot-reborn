@@ -63,6 +63,9 @@ import threading
 import time
 import zipfile
 
+#: 落位那几句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
+import atomicfile
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -175,7 +178,7 @@ def install_id(logdir=None, generate=True):
         tmp = "%s.%d.tmp" % (path, os.getpid())
         with open(tmp, "w", encoding="ascii", newline="\n") as fp:
             fp.write(new + "\n")
-        os.replace(tmp, path)
+        atomicfile.replace(tmp, path)
     except OSError:
         pass                                # 写不下就每次现生成，不值得报错
     return new
@@ -614,7 +617,7 @@ class Collector:
             zf.writestr("meta.json",
                         json.dumps(meta, ensure_ascii=False, indent=2,
                                    sort_keys=True) + "\n")
-        os.replace(tmp, out_path)
+        atomicfile.replace(tmp, out_path)
         return meta
 
     def _remaining(self, zf):
@@ -781,7 +784,7 @@ class CrashWatcher:
             os.makedirs(self.logdir, exist_ok=True)
             with open(tmp, "w", encoding="utf-8", newline="\n") as fp:
                 json.dump(state, fp, ensure_ascii=False, sort_keys=True)
-            os.replace(tmp, path)
+            atomicfile.replace(tmp, path)
         except OSError:
             pass
 
@@ -931,7 +934,7 @@ class CrashWatcher:
         if self.max_bytes and size > self.max_bytes:
             # 裁到最后还是超 —— 传上去也只会被 413，不如就地说清楚。
             keep = out[:-4] + ".toobig.zip"
-            os.replace(out, keep)
+            atomicfile.replace(out, keep)
             self.log("崩溃上传 ✗ 包 %.1f MB 超过上限 %.1f MB，没有上传；"
                      "现场留在 %s" % (size / 1048576.0,
                                      self.max_bytes / 1048576.0, keep))

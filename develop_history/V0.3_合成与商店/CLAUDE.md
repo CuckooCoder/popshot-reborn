@@ -219,8 +219,31 @@ D:\git\popshot-reborn\main\Pack_decrypt\Images\Shop\  ← 物品图标（韩文�
 
 脚本只负责把它跑起来。要 agent 自己点鼠标打一局还得 computer-use 授权，
 而且开始菜单里的「炮炮火枪手」指向的是**只读原版** `game_org\...\bigshot.exe`，
-**不是 `game_patched`**。⇒ 在有正确入口之前：**能自己跑的验证自己做完**
-（起服务端、看日志、跑测试），只有「真打一局、看界面长什么样」才停下来请用户操作。
+**不是 `game_patched`**。⇒ 正确入口是 start.bat/start-debug.bat：**能自己跑的验证自己做完**
+（起服务端、看日志、跑测试、看界面长什么样），只有「真打一局」才停下来请用户操作。
+
+---
+
+## ★ 跑测试 —— **用默认的并行，别跑串行**
+
+```powershell
+runtime\python\python.exe server\run_tests.py            # 3.14，默认并行
+runtime-win7\python\python.exe server\run_tests.py       # Win7 的 3.8，同上
+runtime\python\python.exe server\run_tests.py test_shop  # 只跑几个模块 / 某个类
+```
+
+| | 串行（`-j1`） | **默认并行** |
+|---|---|---|
+| 3.14 | 151 秒 | **27 秒** |
+| Win7 3.8 | 273 秒 | **62 秒** |
+
+- ★★ **别加 `-j1`**。两套运行时都要绿，串行跑一遍就是 7 分钟，并行 1.5 分钟。
+  只有「怀疑某条红是并行引起的」才拿 `-j1` 复核一次，那是排查手段不是日常姿势。
+- ★★ **别拿 `... | tail -N` 看结果**：管道要等进程整个跑完才吐第一个字节，
+  中途零输出。2026-09-14 就因为这个把一次正常的 4 分 40 秒当成卡死、反复
+  kill 重来，「全量要等二十分钟」的印象就是这么来的（§112 ①）。
+  要么直接看输出，要么 `> logs\test.out 2>&1` 再 `Get-Content -Tail 5`。
+- 加新测试的三条前提、失败怎么读，见 `.claude/PLAN.md` 的 M9。
 
 ---
 

@@ -185,6 +185,37 @@ M5 依赖 M3+M4；M6 依赖 M2；M7 依赖 M4+M6；**M8 是纯 Web 活，可与 
 
 - 新测试模块**必须加进 `server/run_tests.py` 的 `MODULES` 元组**，否则不会被跑。
 - **Win7 兼容**：`runtime-win7\python\python.exe server\run_tests.py` 也要绿。
+- **怎么跑**见本版 `CLAUDE.md` 的「跑测试」一节 —— 一句话：**用默认的并行，
+  别加 `-j1`**，两套运行时都跑。
+
+### ★ 并行的三条前提（2026-09-14，D121）
+
+`run_tests.py` 默认把 500 个 TestCase 类分给 N 个子进程。进程之间能隔离靠的是
+本来就有的三件事，**加新测试时要继续成立，否则会随机红 —— 随机红比慢贵得多**：
+
+1. 读写配置一律走 `shopcfg.DATA_DIR`（`run_tests._prepare()` 给每个子进程指一个
+   空的临时目录）；存档、备份一律进 `tempfile.TemporaryDirectory()`。
+2. socket 一律 `bind((host, 0))` 要临时端口，**代码里不许出现端口字面量**。
+3. **不往仓库里写文件**（读 `hook/*.c` / `tools/*.py` 那几条是只读的）。
+
+真有非独占不可的测试，把它单独留在**一个类**里 —— 分片粒度就是类，一个类
+整个在同一个进程里按顺序跑。
+
+### ★ 写新用例时顺手做的两件事
+
+- **一条用例别用大 `for` 串一批场景**：分片粒度是类，串在一起那条就是整个
+  并行全量的地板。一场景一个类（样板：`test_botnav` 的
+  `Esperan03/Iceria00IncrementalEdgeCacheTests`、`test_botsync` 的三个
+  `*FrozenSceneTests`），红了还能直接从类名看出是哪张图。
+- **夹具里别重复造贵东西**：造一次放模块级、每条用例复制一份
+  （样板：`test_web_admin` 的 `_template_dir()` / `_accounts_template()`）。
+
+### ★ 并行时失败长什么样
+
+红了的那一片会把**它自己的 stdout** 一起打出来（绿的片不打，否则八个进程的
+日志交织着没法读），后面跟 `FAIL:` / `ERROR:` 的完整 traceback，末尾四行的
+形状和 `unittest` 逐字一致。要单独复跑一片：
+`run_tests.py test_xxx.SomeTests`。
 - **打包**（`tools/build-common.ps1`）：核心 `.py` 加进 `$must`；
   ★ **`shop_items.json` 要新写 `Copy-ShopData`**（新增 json 不会自动进包）；
   ★ **`admin.html` 要加进 web 白名单**；`server/data/*.json` 打包只建空目录。

@@ -42,6 +42,9 @@ import shutil
 import threading
 import time
 
+#: 落位 / 待删改名那两句 `os.rename` 的重试外壳（见 `atomicfile.py` 文件头）。
+import atomicfile
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
@@ -170,6 +173,12 @@ class Store:
         #: 队列满时丢掉了几份。恢复之后补一行日志，**按状态翻转去重**，
         #: 不逐次刷屏（铁律 10）。
         self._dropped = 0
+        #: ★★ **正在收 / 正排队落位**的那几个 `.tmp-` 目录名（见 `cleanup`）。
+        #: `begin()` 放进来，`place_one()`（落位成功）和 `abandon()`（放弃）
+        #: 拿出去。配一把锁：`begin` 在请求线程上、`place_one` 在落位线程上、
+        #: `cleanup` 在清理线程上，三条线程都会碰它。
+        self._inflight = set()
+        self._inflight_lock = threading.Lock()
 
     # ------------------------------------------------------------------ 日志
     def log(self, message):
@@ -194,10 +203,19 @@ class Store:
         if os.path.isdir(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
         os.makedirs(tmp, exist_ok=True)
+        # ★ 立刻登记成「在途」—— 从这一刻起 `cleanup()` 不许碰它（见那边）。
+        with self._inflight_lock:
+            self._inflight.add(os.path.basename(tmp))
         return tmp, name
+
+    def _done(self, tmp):
+        """这个半成品的归宿定了（落位了 / 扔了），从在途名单里划掉。"""
+        with self._inflight_lock:
+            self._inflight.discard(os.path.basename(tmp or ""))
 
     def abandon(self, tmp):
         """收包失败：把半成品扔掉，磁盘上不留任何痕迹。"""
+        self._done(tmp)
         if tmp and os.path.isdir(tmp):
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -225,7 +243,12 @@ class Store:
                   encoding="utf-8", newline="\n") as fp:
             json.dump(receipt, fp, ensure_ascii=False, indent=2, sort_keys=True)
             fp.write("\n")
-        os.rename(tmp, target)
+        try:
+            atomicfile.rename(tmp, target)
+        finally:
+            # 成了就没有 `.tmp-` 了，败了由 `_run` 走 `abandon()` —— 两条路
+            # 都不该把名字继续挂在在途名单上。
+            self._done(tmp)
         return target
 
     def _run(self):
@@ -295,6 +318,19 @@ class Store:
             path = os.path.join(self.dir, name)
             if not os.path.isdir(path):
                 continue
+            # ★★ **正在收的那一份不是残骸**（2026-09-14）：清理线程「先立刻
+            #    清一次」，而 `begin()` 建好 `.tmp-` 到 `place_one()` 落位之间
+            #    有一段真实的窗口（十几 MB 的包在慢线路上要走一会儿）。
+            #    撞上就是把玩家正在传的崩溃包当场删掉，落位那一句 `os.rename`
+            #    接着失败、被 `_run` 吞成一行「保存失败（忽略）」——
+            #    **没有任何人会发现丢了一份现场**。
+            #    判据不是「建了多久」（那又是个时间窗，铁律 10），是
+            #    **Store 自己手里的事实**：`begin()` 发出去、还没收回来的那些。
+            #    进程死了这个集合跟着没，下次启动照常清 —— 那才是「残骸」。
+            with self._inflight_lock:
+                busy = name in self._inflight
+            if busy:
+                continue
             stale = name.startswith(TMP_PREFIX)     # 残骸：永远该删
             if not stale:
                 if deadline is None:
@@ -321,7 +357,7 @@ class Store:
         """先改名再删：改名是原子的，列表立刻看不见它。"""
         root = self.dir
         doomed = os.path.join(root, DEL_PREFIX + str(int(time.time() * 1000)))
-        os.rename(os.path.join(root, name), doomed)
+        atomicfile.rename(os.path.join(root, name), doomed)
         shutil.rmtree(doomed, ignore_errors=True)
 
 

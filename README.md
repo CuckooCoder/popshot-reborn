@@ -420,6 +420,13 @@ runtime\python\python.exe server\run_tests.py
 就是为这件事准备的。用系统 Python 的话 `cd server; python -m unittest test_account_store
 test_gameserver test_online` 也可以。
 
+默认按 CPU 数并行跑；`-j1` 串行，也可以只跑某几个模块或某个类：
+
+```powershell
+runtime\python\python.exe server\run_tests.py test_shop
+runtime\python\python.exe server\run_tests.py test_shop.ShelfTests
+```
+
 
 ## 调试控制通道
 

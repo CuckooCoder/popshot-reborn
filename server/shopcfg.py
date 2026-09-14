@@ -58,6 +58,9 @@ import shutil
 import threading
 import time
 
+#: 顶上去那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
+#: 只依赖标准库，不会绕回来 import 本模块。
+import atomicfile
 import shopdata
 
 #: 认得的配置格式版本。用户手改时不用管它；将来结构变了靠它做迁移。
@@ -2608,7 +2611,7 @@ def write_json(path, data):
             fp.write("\n")
             fp.flush()
             os.fsync(fp.fileno())
-        os.replace(tmp, path)
+        atomicfile.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             try:

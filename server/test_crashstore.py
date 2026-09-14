@@ -229,6 +229,44 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual(1, removed)
         self.assertEqual([], os.listdir(self.dir))
 
+    def test_a_leftover_that_is_still_being_received_is_not_swept(self):
+        """★★★ 「正在收的那一份」不是残骸（2026-09-14）。
+
+        `start_cleanup()` 的第一句就是「先立刻清一次」，而 `begin()` 建好
+        `.tmp-` 到 `place_one()` 落位之间有一段真实的窗口 —— 十几 MB 的包
+        在慢线路上要走一会儿。撞上就是把玩家**正在传**的崩溃包当场删掉，
+        而落位失败被 `_run` 吞成一行「保存失败（忽略）」，**没人会发现**。
+
+        这条用例把那个调度点拿到手里：`begin()` 之后立刻清一次。
+        （实机上是 16 路并行全量把清理线程挤到了 `begin()` 之后。）
+        """
+        store = crashstore.Store(directory=self.dir, keep_days=0)
+        tmp, name = store.begin("abc_a1b2c3d4_20260909-013642")
+        with open(os.path.join(tmp, "x.zip"), "wb") as fp:
+            fp.write(b"1234567")
+
+        removed, _ = store.cleanup()
+
+        self.assertEqual(0, removed)
+        self.assertTrue(os.path.isdir(tmp), "正在收的那一份被当残骸删了")
+        # 落位之后它就不在途了，再清一次也不该出事（目录已经改名了）。
+        self.assertEqual(os.path.join(self.dir, name),
+                         store.place_one(tmp, name, {"bytes": 7}))
+        self.assertEqual((0, 0), store.cleanup())
+        self.assertTrue(os.path.isdir(os.path.join(self.dir, name)))
+
+    def test_a_leftover_whose_owner_gave_up_is_swept_again(self):
+        """★ 反过来：`abandon()` 之后名字要从在途名单里划掉，否则这个
+        `Store` 活多久，那份残骸就永远清不掉了。"""
+        store = crashstore.Store(directory=self.dir, keep_days=0)
+        tmp, _name = store.begin("abc_a1b2c3d4_20260909-013642")
+        store.abandon(tmp)
+        # `abandon` 自己已经删干净了，再造一份同名的模拟「上一次没收完的」。
+        self.make(os.path.basename(tmp))
+        removed, _ = store.cleanup()
+        self.assertEqual(1, removed)
+        self.assertEqual([], os.listdir(self.dir))
+
     def test_missing_directory_is_not_an_error(self):
         store = crashstore.Store(directory=os.path.join(self.tmp.name, "nope"))
         self.assertEqual((0, 0), store.cleanup())

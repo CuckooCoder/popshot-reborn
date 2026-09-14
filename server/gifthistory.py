@@ -34,6 +34,8 @@ import json
 import os
 import time
 
+#: 顶上去那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
+import atomicfile
 import shopcfg
 
 #: 文件名。★ 加了新的 `server/data/*.json` 记得同时改 `.gitignore`。
@@ -69,7 +71,7 @@ def _set_aside(target, why, log):
     """
     spare = "%s.bad-%s" % (target, time.strftime("%Y%m%d-%H%M%S"))
     try:
-        os.replace(target, spare)
+        atomicfile.replace(target, spare)
     except OSError:
         spare = None
     if log:

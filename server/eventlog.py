@@ -40,6 +40,8 @@ import threading
 import time
 
 import asynclog
+#: 切名那一句 `os.replace` 的重试外壳（见 `atomicfile.py` 文件头）。
+import atomicfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_PATH = os.path.join(ROOT, "logs", "online.log")
@@ -107,7 +109,7 @@ def _rotate_unlocked(day):
     if os.path.exists(target):
         return
     try:
-        os.replace(_path, target)
+        atomicfile.replace(_path, target)
     except OSError:
         pass
 

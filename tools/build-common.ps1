@@ -384,7 +384,7 @@ function Get-ServerSourceFile([string]$Root) {
     }
     # 少了这几个，包一定是废的 —— 与其让别人在另一台电脑上踩，不如在这里炸。
     foreach ($must in @('app.py', 'config.py', 'gameserver.py', 'authserver.py',
-                        'account_store.py', 'savecrypt.py',
+                        'account_store.py', 'savecrypt.py', 'atomicfile.py',
                         'netlisten.py', 'tickets.py',
                         'eventlog.py', 'lobby.py', 'relayserver.py', 'protocol.py',
                         'simple.py', 'udpsync.py', 'bot.py', 'botsync.py',
