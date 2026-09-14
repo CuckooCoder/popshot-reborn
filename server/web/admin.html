@@ -425,8 +425,13 @@
                （`account_store.admin_list()`）。没有同名号的画一个 `-`。 -->
           <table>
             <thead><tr>
-              <th>管理员</th>
-              <th style="width:220px">昵称</th>
+              <!-- ★ 「管理员」和「昵称」**平分**右边两个固定列以外的地方
+                   （用户 2026-09-15）：昵称原来是死的 220px，表一宽它就贴着
+                   「权限」跑，左边空一大片。`calc` 里的 130 = (170 + 90) / 2
+                   —— 右边那两列总宽的一半，两列各让出一半，剩下的正好
+                   一人一半。**改下面任一个固定列宽度，这个 130 要跟着改。** -->
+              <th style="width:calc(50% - 130px)">管理员</th>
+              <th style="width:calc(50% - 130px)">昵称</th>
               <th style="width:170px">权限</th>
               <th style="width:90px"></th>
             </tr></thead>

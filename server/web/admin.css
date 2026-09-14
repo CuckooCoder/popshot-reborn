@@ -837,7 +837,16 @@ th { color: var(--cocoa-soft); font-weight: 700; background: var(--paper-2); }
 /* 管理员账号那张表 2026-09-13 多了一列「昵称」。同一天这一页改成
    「面板撑满、只有列表滚」的壳（`fit-panel` + `.player-list`），
    表格跟着撑满 —— 不再钉死 720。 */
-#adminsPanel table { max-width: none; }
+#adminsPanel table { max-width: none; table-layout: fixed; }
+/* ★ `table-layout: fixed` 是给「管理员」和「昵称」两列平分完的
+   （用户 2026-09-15，宽度写在 admin.html 的 `<th>` 上）。auto 布局下
+   两列写同一个 `calc(50% - 130px)` 也不会一样宽 —— Chrome 会把指定宽度
+   当成「建议值」，再按两列内容的长短把它们拉开（实测 548 / 430）。 */
+/* ★ 上面那个 `fixed` 的兜底：fixed 布局下列宽是死的，装不下的内容会**溢出**
+   压到右边那一列上（中文会自己折行，`WWWWWWWWWWWWWWWW` 这种顶格长的
+   纯字母名字不会 —— 用户名上限就是 16 个 ASCII，`check_username`）。
+   实测窗口窄到面板 780px 以下就压上了，让它断行，别重叠。 */
+#adminsPanel td { overflow-wrap: anywhere; }
 /* 没有同名玩家账号的那一格画 `-`：灰一点，别让它看着像一个真昵称。 */
 #adminsPanel td.nick.none { color: var(--cocoa-soft); }
 code {
