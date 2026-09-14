@@ -1,10 +1,10 @@
 {
  "format": 1,
  "packer": {"fill": 0, "key_prefix": "Pack/", "policy": "original-ext-v1", "sep": "~", "volume_cap": 16777216, "zlib_level": 9},
- "tree_hash": "dce713a853b0aeb7aada51501504d340522de50c03959c98f4eacad558bb8e6d",
+ "tree_hash": "62085a2b047d03717149ec8dafa98ea705579f18c0ba6f43f214f89205f256c7",
  "volumes": {
-  "Data~.pkn": {"group": "Data", "sha256": "1b8a75170ae8b4252221be9b30c73e27c2630f5562dc93aecc474bc09a59e59e", "size": 533504, "source": "Data", "members": [
-   ["Chinese.ini", 109306, "cfc9d265b36902135a59bbbe6757b1246dbcc33d65c280e22d21054c22bc7ce8"],
+  "Data~.pkn": {"group": "Data", "sha256": "39b131951cb712862412f7460fd513b3064f3a6251d1af6b881d7e348865ff55", "size": 535552, "source": "Data", "members": [
+   ["Chinese.ini", 114250, "2ecfe16814a0d515430fdeea80c53eb7cbd5a9e0be69dcee469f360b8ba08d4e"],
    ["Chinese.ini.r19467", 103870, "6a20b3f802a68c72bc57d438ac42467940b8b4e8e0ddeafebc1a30d0ca2bb584"],
    ["Chinese.ini.r19470", 103892, "b4d3a37902c721e112a9f70ca0dc75dc6222ea0ba0cf4e5a6642871a9d2b3dd3"],
    ["ChineseSlang.ini", 18118, "f317651baa1821bf1961dfe2faaba73ccd6c163a00ecdaa1bba94f31e09a6129"],
@@ -43,7 +43,7 @@
    ["weapon-censorship.ini", 95855, "7bbd0ddaf5ebaaadb8db91e32973a1efeb88a9f7238e2f35b020fa4c560dc4de"],
    ["weapon.ini", 221519, "00084834adea094c8bb038ad08627886e32b2224fd08238d0d26eb0d8db81616"]
   ]},
-  "Data~Quest.pkn": {"group": "Data", "sha256": "e3c6abf4ec9f84a73ce2c4ac59b6270bd822f82993074847bb6b7acc0815d699", "size": 1082368, "source": "Data/Quest", "members": [
+  "Data~Quest.pkn": {"group": "Data", "sha256": "4aae0676e1a488733bfa7f0461936b9eb5bfb5274f3b972dd04c8c08d9cb4cf5", "size": 1082368, "source": "Data/Quest", "members": [
    ["Quest/ChrProps-international.ini", 54, "9c6cbc470c405f715ca4c0eaad777635310c7715391a2723f001fb0713b9ec46"],
    ["Quest/ChrProps.ini", 854, "5e839585bf0f159e42f3d000bdbde00fad8d8ebf39ecb6e30516c1ffb6ced227"],
    ["Quest/LevelQuest/lvl01Clear.txt", 1898, "9d2004c70e2cdaf1c62e46fca3bfd65ec2f5947142f7c52ecc0c54b30b02eb6b"],
@@ -231,7 +231,7 @@
    ["Quest/Quest04/weapon-3.ini", 4443, "fca67253e655a932797b6bf073c1f4ead7a28414f6889f45f969e3d69ad1921f"],
    ["Quest/Quest04/weapon-4.ini", 4494, "d0d002d6434a8380358aff002380211839bf908cc1af7b2168d6209f0d1a06bd"],
    ["Quest/Quest05/Quest05Boss.txt", 2824, "0c04bfb23751ec72e43dab3c742329d3d7ef3f68d9573becef0d5b9e26ac310b"],
-   ["Quest/Quest05/Quest05Boss.uni", 9146, "3998cd672c16b4f0d9d3d17b4d7d46926fb9d9545866b6588e23b5a51338716d"],
+   ["Quest/Quest05/Quest05Boss.uni", 9140, "3547b47845d8e689e3b80a468a22f806c61fc4086fa3ee7226371099bb2ced2c"],
    ["Quest/Quest05/Quest05Change.txt", 546, "ff40df0d9471c28773b42a4180407c065b7ace5be596a6eee7d0c0a270953a1a"],
    ["Quest/Quest05/Quest05Change.uni", 950, "4803c9a35e0e8cf472bd3618ebf30d6746daf949c4389b93f42c4a3189240dde"],
    ["Quest/Quest05/Quest05Clear.txt", 5956, "693893ea28febd84f640fbb1228481c19dc7331429add1c2c925a379f9e5b712"],
