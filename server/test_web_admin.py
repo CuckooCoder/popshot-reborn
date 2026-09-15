@@ -1292,8 +1292,12 @@ class AdminAssetTests(_AdminCase):
         """
         _status, _h, raw = self.fetch("/admin/admin.js")
         js = raw.decode("utf-8")
-        body = re.search(r"\nfunction repaintList\(\) \{(.*?)\n\}\n", js,
-                         re.S)
+        # ★ 收尾只写 `\n\}`，**别**再补一个 `\n`：CRLF 的检出里 `}` 后面是 `\r`，
+        #   多那一个 `\n` 就谁也匹配不上，报出来的却是「找不到 repaintList()」，
+        #   和行尾看不出半点关系（2026-09-15 在别人机器上真坑过一次 —— 240 条
+        #   测试只塌这一条，因为别处的正则都停在 `\n\}` / `\n\};`，`\r` 被
+        #   `(.*?)` 吃掉了）。仓库侧的根治在 `.gitattributes`。
+        body = re.search(r"\nfunction repaintList\(\) \{(.*?)\n\}", js, re.S)
         self.assertIsNotNone(body, "admin.js 里找不到 repaintList()")
         text = body.group(1)
         self.assertGreater(text.count("RENDERERS"), 0)

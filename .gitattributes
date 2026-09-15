@@ -1,6 +1,36 @@
+# 源码一律 LF，不管克隆者的 core.autocrlf 是什么（铁律 3）。
+#
+# ★ 不写这几行的话行尾由**克隆者**说了算 —— Git for Windows 安装向导的默认
+#   选项就是 core.autocrlf=true，检出时把 LF 全改成 CRLF。2026-09-15 正是
+#   这么炸的：另一台机器上 `update-gamedata` 的 [5/5] 报「admin.js 里找不到
+#   repaintList()」，因为 test_web_admin.py 那条正则以 `\n}\n` 收尾，
+#   CRLF 下 `}` 后面是 `\r` —— 240 条测试只塌这一条，看不出和行尾有关。
+*.py   text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+*.json text eol=lf
+
+# Windows 批处理一律 CRLF（铁律 3）：LF 的 .bat 在 cmd.exe 下会被拦腰切断
+# —— 它按**字节偏移**回读文件，少一个 CR 就错位。.ps1 同办，跟着它的 .bat 走。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ★★ 以下全是「字节照原样存取」，必须留在文件**最后** —— 同一个属性，
+#    后写的行赢。挪到前面去的话，上面那几条 `*.json` / `*.css` / `*.html`
+#    会反过来盖掉它们，把不该动的字节改了。
+
 # 客户端资源树：两棵都按二进制对待，任何克隆上的 core.autocrlf 都不许改写它们的字节
 # —— Pack_develop 里的 .ini/.txt/.xml/.csv 是打包器的输入，一个字节变了卷就变了，
 # Pack_publish 里的卷则要和 pack-index.json 记的 sha256 逐字节对上。
-game_patched/Pack_develop/** -text
-game_patched/Pack_publish/** -text
-*.pkn -text
+game_patched/Pack_develop/** -text -eol
+game_patched/Pack_publish/** -text -eol
+*.pkn -text -eol
+
+# 不是我们写的树，别替人家换行尾：updater 的原版 HTML/CSS 模板、嵌入式 Python
+# 发行版、逆向产出的 dump。它们在索引里本来就是 CRLF，动了只会凭空多出一堆 diff。
+updater/ui/**          -text -eol
+runtime/python/**      -text -eol
+runtime-win7/python/** -text -eol
+re/**                  -text -eol
