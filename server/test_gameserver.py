@@ -105,8 +105,8 @@ from simple import SimpleCipher
 import account_store
 from account_store import (BASE_CHARACTER_IDS, EXPERIENCE_STEP, LEVEL_MAX,
                            PREMIUM_CHARACTER_IDS, QUEST_DIFFICULTY_MAX,
-                           QUEST_ID_TABLE, AccountStore, character_item_id,
-                           character_item_ids,
+                           QUEST_ID_TABLE, AccountStore, character_id_of_item,
+                           character_item_id, character_item_ids,
                            experience_bounds, experience_for_level,
                            level_for_experience,
                            owned_characters, quest_cleared_difficulty,
@@ -2581,10 +2581,30 @@ class CharacterUnlockTests(unittest.TestCase):
         return account
 
     def test_base_characters_are_never_shipped_as_items(self):
-        # 0/1/2 在 0x55853c 里 `cmp eax,3 / jl -> return true`，白送。
-        self.assertEqual((0, 1, 2), BASE_CHARACTER_IDS)
+        """基础角色白送 —— 它们永远不会作为物品出现在下发清单里。
+
+        ★ 这条**不依赖名单有多长**：基础角色在 `0x55853c` 里
+        `cmp eax,N / jl -> return true`，服务端发不发物品都一样。
+        名单本身由下面那条专门钉。
+        """
+        self.assertEqual(set(), set(BASE_CHARACTER_IDS) & set(PREMIUM_CHARACTER_IDS))
         self.assertEqual(set(), set(BASE_CHARACTER_IDS)
                          & set(owned_characters(self.cards(*PREMIUM_CHARACTER_IDS))))
+
+    def test_the_base_roster_is_the_four_free_characters(self):
+        """★ 基础角色是**四个**：泰尔 / 卡希尔 / 布洛克 / 爱琳。
+
+        爱琳（id 3）是 X_Mod 加的第 4 个基础角色（X1 / D2）——
+        原版里她本来就是免费角色，只是中国区没开。客户端侧对应
+        `hook/bshook.c` 的 `IRENE_SITES`，其中 `0x55853c` 的
+        `cmp eax,3` 被改成了 `cmp eax,4`。
+
+        ★★ 她**没有角色卡**：`character_id_of_item` 必须继续不认 4400001，
+        否则谁给她补一张卡就把上面那处补丁架空了。
+        """
+        self.assertEqual((0, 1, 2, 3), BASE_CHARACTER_IDS)
+        self.assertIsNone(character_id_of_item(character_item_id(3)))
+        self.assertEqual([], owned_characters(self.cards(3)))
 
     # -- 存档 -> 下发（D51：角色只有一个来源 —— 仓库里的角色卡）------------
     def test_nothing_bought_means_nothing_shipped(self):
