@@ -10,6 +10,6 @@
     <Type>RenderEffect</Type>
     <TypeIdx>1</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>Emotion/Efx/CH01_Cry00.efx</ResourcePath>
+    <ResourcePath>Emotion/Efx/CH03_Cry00.efx</ResourcePath>
   </Event>
 </ArrayOfEvent>

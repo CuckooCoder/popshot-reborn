@@ -39,7 +39,6 @@ import mtntool  # noqa: E402
 
 CHARS = os.path.join(os.path.dirname(TOOLS), "game_patched", "Pack_develop", "Models", "Characters")
 CH01 = os.path.join(CHARS, "ch01")
-CH102 = os.path.join(CHARS, "ch102")
 
 
 def _norm(v):
@@ -75,8 +74,9 @@ def reference_pose(clip):
     import anim
     dst = mtntool.parse(os.path.join(CH01, "ch01@%s.mtn" % clip))
     if clip in anim.CLIPS:
-        src_clip, dur_from = anim.CLIPS[clip]
-        dst, _ = anim.retarget(dst, mtntool.parse(os.path.join(CH102, "ch102@%s.mtn" % src_clip)), dur_from)
+        spec = anim.CLIPS[clip]
+        # 参考姿势只用来量武器摆放，`sync_legs` 那种摆臂相位对齐和它无关（Stand01 / Stand03 都不开）
+        dst, _ = anim.retarget(dst, anim.src_mtn(spec["src"], spec["clip"]), spec["dur"], spec["take"])
     _POSE_CACHE[clip] = dst
     return dst
 

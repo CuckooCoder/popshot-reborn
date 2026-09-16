@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""anim.py —— 爱琳 1 号武器（트릭스터 步枪）的持枪 / 开枪 / 换弹 / 跑动动作：从瓦尔基里（ch102）移植上半身。
+"""anim.py —— 爱琳的持枪 / 开枪 / 换弹 / 跑动 / **冲刺攻击**动作：从瓦尔基里（ch102）移植。
 
     C:\\Python314\\python.exe tools/ch03_skin/anim.py                # 重建 ch03 全部 86 个 .mtn（幂等）+ 渲对照图
     C:\\Python314\\python.exe tools/ch03_skin/anim.py --dry-run      # 只算只渲，不写
@@ -23,14 +23,21 @@
 
 ## 规则
 
-| 骨 | 旋转 | 平移 / 缩放 |
+每条动作自己选「抄哪些骨的旋转」（`CLIPS` 的第三项）：
+
+| 口径 | 抄旋转的骨 | 用在哪 |
 |---|---|---|
-| 上半身 `UPPER`（Spine1 以上 + 双臂 + 手指） | ch102 同名动作，按时长重采样到爱琳的帧 | 爱琳自己的（母本 ch01 同名动作） |
-| 其余（根骨 / 骨盆 / 双腿 / 头发 / 裙摆 / 尾巴 / 武器件骨） | 爱琳自己的 | 爱琳自己的 |
+| `take_upper` | 上半身 `UPPER`（Spine1 以上 + 双臂 + 手指） | 持枪 5 个动作 + Idle101 —— 下半身是走 / 跑 / 站，腿留爱琳自己的最稳 |
+| `take_biped` | **全部 45 根 `Bip01_*`**（含根骨 / 骨盆 / 脊柱 / 双腿） | `Dash00` 冲刺攻击 —— 那是整个身体扑出去，只换上半身会变成「瓦尔基里的上身 + 卡希尔的抱熊步」 |
+
+**平移 / 缩放一律留爱琳自己的**（母本 ch01 同名动作）—— 平移键里带着骨长，抄过来手臂会被拉长（§20）。
+`Dash00` 是腾空扑击，脚不落地，所以 D9 ④「腿长不同、脚会浮起」那条顾虑在这一条上不成立。
 
 时长：Stand01 / Reload01 两边本来就相等；Run-F01 / Run-B01 取爱琳的 0.667 s（跑步循环速度和她的
 `ChrSpeed` 是配套的，ch102 的 0.8 s 上半身重采样过来）；Attack01 取 ch102 的 0.1 s（步枪后坐，
-对应 `CoolingTime=90`；卡希尔那个 0.667 s 是双枪轮射，留着会让每一枪都做半套挥枪）。
+对应 `CoolingTime=90`；卡希尔那个 0.667 s 是双枪轮射，留着会让每一枪都做半套挥枪）；
+**Dash00 取爱琳自己的 1.0 s**（= 30 帧）—— `ChrProps.ini` 里她自己的 `Dash00-TotalFrame=31`，
+用 ch102 的 0.833 s（25 帧）会在技能末尾定格 6 帧。
 
 ## 静态骨补丁（`STATIC_PATCHES`）
 
@@ -38,6 +45,16 @@
 `Bone_wp01_firepoint`、找不到才找 `Bone_wp01_R_firepoint`（`0x506b74` / `0x506ba7`），
 左手那个 `_L_FirePoint` 根本不用。步枪的枪口在哪，`Bone_Wp01_R_FirePoint` 就得挪到哪，
 否则枪火 / 弹道线从空气里冒出来。补丁对 86 个文件一起打，树保持一致。
+
+## 事件文件（`EVN_FROM_SRC` / `EVN_EFX_REMAP`）
+
+动作换了，挂在动作上的音效 / 特效也得跟着换：
+
+- `Reload01` 整份用瓦尔基里的（她只在第 21 帧响一次拉栓声，卡希尔那份是双枪两次上膛）。
+- `Dash00` 把两条特效从 `CH01/WP00/` 改指 **`CH03/WP00/`** —— 原版**本来就发了**爱琳自己的
+  `CH03_DashAttack00.efx`（挂 `Bip01_R_Hand`，花瓣）和 `CH03_DashDust00.efx`（铁律 12）；
+  而克隆来的 CH01 版挂在 **`Bone_Wp00_11`** —— 卡希尔那只熊身上的骨，爱琳没有熊，
+  特效就从空气里冒出来。音效两条（`ch01@dash_.ogg` / `ch01@Dash.ogg`）是通用风声，留着。
 """
 from __future__ import annotations
 
@@ -60,17 +77,13 @@ CHARS = os.path.join(ROOT, "game_patched", "Pack_develop", "Models", "Characters
 CH01 = os.path.join(CHARS, "ch01")
 CH03 = os.path.join(CHARS, "ch03")
 CH102 = os.path.join(CHARS, "ch102")
+EFFECTS = os.path.join(ROOT, "game_patched", "Pack_develop", "Effects")
 TPF = mtntool.TICKS_PER_FRAME
 
-# 爱琳动作名 -> (ch102 源动作, 时长取谁)
-CLIPS = {
-    "Stand01": ("Stand01", "dst"),
-    "Attack01": ("Attack01", "src"),
-    "Reload01": ("Reload01", "dst"),
-    "Run-F01": ("Run-F01", "dst"),
-    "Run-B01": ("Run-B01", "dst"),
-    "Idle101": ("Idle101", "src"),     # 持枪发呆：ch102 2.667 s，爱琳自己的下半身 / 头发轨道按 1.667 s 循环铺满
-}
+
+def src_mtn(ch, clip):
+    """源动作文件（只读别的角色目录）。"""
+    return mtntool.parse(os.path.join(CHARS, ch, "%s@%s.mtn" % (ch, clip)))
 
 UPPER = {"Bip01_Spine1", "Bip01_Spine2", "Bip01_Neck", "Bip01_Head", "Bip01_HeadNub"}
 for side in "LR":
@@ -78,12 +91,81 @@ for side in "LR":
               "Finger1", "Finger11", "Finger1Nub", "Finger2", "Finger21", "Finger2Nub"):
         UPPER.add("Bip01_%s_%s" % (side, b))
 
+
+def take_upper(name):
+    """只抄上半身。下半身（走 / 跑 / 站）留爱琳自己的。"""
+    return name in UPPER
+
+
+def take_biped(name):
+    """整套 Biped 都抄。★ 前缀判据同时挡掉了 `Bone_Wp*` / `Bone_Robe_*` ——
+    那是瓦尔基里自己的武器件骨和长袍骨，抄过来对不上爱琳的骨架。"""
+    return name.startswith("Bip01")
+
+
+# 爱琳动作名 -> 怎么移植
+#   src / clip  源角色和源动作      dur  时长取谁（"dst" 爱琳自己的 / "src" 源的）
+#   take        抄哪些骨的旋转      sync_legs  要不要按爱琳自己的腿相位对齐源的摆臂（见 leg_sync_phase）
+CLIPS = {
+    "Stand01": dict(src="ch102", clip="Stand01", dur="dst", take=take_upper),
+    "Attack01": dict(src="ch102", clip="Attack01", dur="src", take=take_upper),
+    "Reload01": dict(src="ch102", clip="Reload01", dur="dst", take=take_upper),
+    "Run-F01": dict(src="ch102", clip="Run-F01", dur="dst", take=take_upper),
+    "Run-B01": dict(src="ch102", clip="Run-B01", dur="dst", take=take_upper),
+    # 持枪发呆：ch102 2.667 s，爱琳自己的下半身 / 头发轨道按 1.667 s 循环铺满
+    "Idle101": dict(src="ch102", clip="Idle101", dur="src", take=take_upper),
+    # ★ 冲刺攻击（`[ch03-dash]` 的 `WAnimIdx=0` ⇒ 放 `Dash00`）。卡希尔这一下是**抱着泰迪熊撞过去**
+    #   （`ch01W0000` 就是那只熊，`[ch01-dash]` 没写 `WMeshIdx` ⇒ 默认取 0 号网格），
+    #   而 `[ch03-dash]` 写的是 `WMeshIdx=-1`（不拿东西）—— 爱琳照搬那套动作就成了「抱空气」。
+    #   瓦尔基里这一下是腾空扑击、`[ch102-dash]` 同样 `WMeshIdx=-1`，正对爱琳自己的
+    #   `Dash00-DamagingObjBone=Bip01_R_Finger1`（右手打人，不是靠熊）。
+    "Dash00": dict(src="ch102", clip="Dash00", dur="dst", take=take_biped),
+    # ★ 空手跑（同样是 `WAnimIdx=0` ⇒ 房间里、格斗模式下跑动放的是 `Run-F00`）。
+    #   卡希尔这一套是**单手托着熊跑**：左右上臂摆幅 58.5°/49.0°、前臂 34.3°/19.3°，
+    #   右前臂几乎不动 —— 手里没熊就成了「拎着个看不见的东西」（用户 2026-09-16 实机）。
+    #   **源取 ch00 泰尔，不是瓦尔基里**：ch102 的 Run-F00 是她把步枪架在左臂上跑，
+    #   左右差 78.8° 是全表最不对称的一个，抄过来只会更糟；ch00 的前臂摆幅左右**恰好相等**，
+    #   而且 `DisplayHeight` 和爱琳一样是 75（§23）。
+    "Run-F00": dict(src="ch00", clip="Run-F00", dur="dst", take=take_upper, sync_legs=True),
+}
+
 # 静态骨补丁：骨名 -> 新的 4x4 局部矩阵。由 rig.py 从步枪 / 手杖的设计框架算出（BarrelPoint / _03 / FirePoint 三根一链），
 # 在 main() 里懒加载（rig 反过来要用本文件的 retarget，避免循环导入）。
 STATIC_PATCHES = {}
 
 # 事件文件：换弹动作换成瓦尔基里的（她那份只在第 21 帧响一次拉栓声，卡希尔的是双枪两次上膛）
 EVN_FROM_SRC = {"Reload01": "Reload01"}
+
+#: 事件文件里的特效改指：母本 ch01 的路径 -> 换成谁。**对全部 61 个 `.evn` 生效**，
+#: 在母本上做字符串替换后写进 ch03（幂等，母本只读）。只许改成**磁盘上真实存在**的文件，
+#: main() 会逐条核对；改完 `mkchar --audit` 第 ⑤ 条（死引用不许变多）会再兜一道。
+#:
+#: 名单是这么来的：把母本 61 个 `.evn` 引用的 24 个特效逐个去 `Effects/` 里找 CH03 版，
+#: **有就换，没有就留着**。没有 CH03 版的是 `Jab00` / `DashAttack01..05` / `Dash04` / `Dash-B04`
+#: （原版就没给爱琳画），只能继续用卡希尔的。
+#: ⚠ `CH01_MutuDust` 的 CH03 版多个 `00` 后缀，不是机械替换串能对上的。
+EVN_EFX_REMAP = {
+    # 冲刺攻击 + 格斗：CH01 版里有 8 个挂在 `Bone_Wp00_04` / `Bone_Wp00_11` ——
+    # 卡希尔那只泰迪熊身上的骨。爱琳没有熊，特效就从身侧的空气里冒出来。
+    # CH03 版挂的是 `Bip01_R_Hand` / `Bip01_R_Toe0` 这些她自己身上的骨。
+    "CH01/WP00/Efx/CH01_DashAttack00.efx": "CH03/WP00/Efx/CH03_DashAttack00.efx",
+    "CH01/WP00/Efx/CH01_DashDust00.efx": "CH03/WP00/Efx/CH03_DashDust00.efx",
+    "CH01/WP00/Efx/CH01_MutuDust.efx": "CH03/WP00/Efx/CH03_MutuDust00.efx",
+    "CH01/WP00/Efx/CH01_MutuCrunch-K00.efx": "CH03/WP00/Efx/CH03_MutuCrunch-K00.efx",
+    "CH01/WP00/Efx/CH01_MutuCrunch-P00.efx": "CH03/WP00/Efx/CH03_MutuCrunch-P00.efx",
+    "CH01/WP00/Efx/CH01_MutuJump-P00.efx": "CH03/WP00/Efx/CH03_MutuJump-P00.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-K00.efx": "CH03/WP00/Efx/CH03_MutuStand-K00.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-K01.efx": "CH03/WP00/Efx/CH03_MutuStand-K01.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-P00.efx": "CH03/WP00/Efx/CH03_MutuStand-P00.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-P01.efx": "CH03/WP00/Efx/CH03_MutuStand-P01.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-P02.efx": "CH03/WP00/Efx/CH03_MutuStand-P02.efx",
+    "CH01/WP00/Efx/CH01_MutuStand-P03.efx": "CH03/WP00/Efx/CH03_MutuStand-P03.efx",
+    # 表情特效：原版同样发了 CH03 版（`Effects/Emotion/`），顺手一起改指
+    "Emotion/Efx/CH01_Angry00.efx": "Emotion/Efx/CH03_Angry00.efx",
+    "Emotion/Efx/CH01_Cry00.efx": "Emotion/Efx/CH03_Cry00.efx",
+    "Emotion/Efx/CH01_ILoveYou00.efx": "Emotion/Efx/CH03_ILoveYou00.efx",
+    "Emotion/Efx/CH01_Shit00.efx": "Emotion/Efx/CH03_Shit00.efx",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +229,11 @@ def fit(keys, dur_ticks, period_ticks):
 # 移植
 # ---------------------------------------------------------------------------
 
-def retarget(dst, src, dur_from):
-    """dst：爱琳（母本 ch01）的同名动作；src：ch102 的源动作。返回新 Mtn（树 = dst 的树）。"""
+def retarget(dst, src, dur_from, take=take_upper):
+    """dst：爱琳（母本 ch01）的同名动作；src：ch102 的源动作；take：哪些骨抄源的旋转。
+
+    返回新 Mtn（树 = dst 的树）。
+    """
     m = mtntool.Mtn()
     m.path = dst.path
     m.set_name = dst.set_name
@@ -163,15 +248,15 @@ def retarget(dst, src, dur_from):
     moved = []
     for name in dst.track_order:
         rot, pos, scl = (k.copy() for k in dst.tracks[name])
-        if name in UPPER and name in src.tracks:
+        if take(name) and name in src.tracks:
             rot = resample_rot(src.tracks[name][0], src.duration, m.duration)
             moved.append(name)
         else:
             rot = fit(rot, dur_ticks, period)
         m.tracks[name] = (rot, fit(pos, dur_ticks, period), fit(scl, dur_ticks, period))
-    # 上半身里源有轨道、爱琳没有的骨（理论上没有，兜底）：旋转抄源，平移用树里的静态位置
+    # 选中的骨里源有轨道、爱琳没有的（理论上没有，兜底）：旋转抄源，平移用树里的静态位置
     for name in src.track_order:
-        if name in UPPER and name not in m.tracks and name in static_pos:
+        if take(name) and name not in m.tracks and name in static_pos:
             rot = resample_rot(src.tracks[name][0], src.duration, m.duration)
             pos = np.array([[0.0, *static_pos[name]]])
             scl = np.array([[0.0, 1.0, 1.0, 1.0]])
@@ -179,6 +264,58 @@ def retarget(dst, src, dur_from):
             m.track_order.append(name)
             moved.append(name)
     return m, moved
+
+
+def shift_cyclic(m, off_ticks):
+    """把一条**循环**动作的所有旋转轨道在时间上整体平移 `off_ticks`（首尾相接，取模）。
+
+    只动旋转 —— 平移 / 缩放本来就不抄（§20）。返回新的 Mtn（源只读）。
+    """
+    out = mtntool.Mtn()
+    for k in mtntool.Mtn.__slots__:
+        setattr(out, k, getattr(m, k))
+    T = m.duration * m.ticks_per_sec
+    out.tracks = {}
+    for name, (rot, pos, scl) in m.tracks.items():
+        if len(rot) > 1 and abs(off_ticks) > 1e-9:
+            r = rot.copy()
+            for i in range(len(r)):
+                r[i, 1:] = _rot_at(rot, (r[i, 0] - off_ticks) % T)
+            rot = r
+        out.tracks[name] = (rot, pos, scl)
+    return out
+
+
+def _fwd_signal(m, bone, n):
+    """一个周期里 `bone` 相对骨盆的**前后**位移（角色脸朝 -z ⇒ 取 -z），去均值归一化。"""
+    T = m.duration * m.ticks_per_sec
+    v = np.array([(lambda W: W["Bip01_Pelvis"][3, 2] - W[bone][3, 2])(mtntool.world_mats(m, T * k / n))
+                  for k in range(n)])
+    v -= v.mean()
+    return v / max(np.linalg.norm(v), 1e-9)
+
+
+def leg_sync_phase(dst, src, take, side="L"):
+    """返回让移植后「同侧手 ↔ 脚」最反相的源时间平移（落在动作自己的帧格上）。
+
+    **为什么需要**：两套跑步循环的起点不一样 —— 卡希尔的腿相位和 ch00 差约 1/8 个周期。
+    直接把 ch00 的摆臂抄过来，手会和爱琳（= 卡希尔）的腿差半拍，看着就是「不协调」。
+
+    **判据是算出来的，不是写死的常数**（铁律 10）：在动作自己的帧格上把一个周期试一遍，
+    取「同侧手前后位移 · 同侧脚前后位移」最负的那个 —— 真人跑步就是手脚反相。
+    换一份源动作、或者母本动作改了，这个值自己会重新算。
+    """
+    T = src.duration * src.ticks_per_sec
+    n = max(4, int(round(dst.duration * dst.ticks_per_sec / TPF)))
+    leg = _fwd_signal(dst, "Bip01_%s_Foot" % side, n)
+    best = (0.0, 1.0)
+    for k in range(n):
+        off = T * k / n
+        m, _ = retarget(dst, shift_cyclic(src, off), "dst", take)
+        c = float(_fwd_signal(m, "Bip01_%s_Hand" % side, n) @ leg)
+        if c < best[1]:
+            best = (off, c)
+    return best
 
 
 def drop_tracks(m, names):
@@ -249,11 +386,16 @@ def main(argv=None):
         clip = base.split("@", 1)[1][:-4]
         out_name = base.replace("Ch01", "ch03").replace("ch01", "ch03")
         dst = mtntool.parse(f)
-        moved = []
+        moved, note = [], ""
         if clip in CLIPS:
-            src_clip, dur_from = CLIPS[clip]
-            src = mtntool.parse(os.path.join(CH102, "ch102@%s.mtn" % src_clip))
-            dst, moved = retarget(dst, src, dur_from)
+            spec = CLIPS[clip]
+            src = src_mtn(spec["src"], spec["clip"])
+            note = ""
+            if spec.get("sync_legs"):
+                off, c = leg_sync_phase(dst, src, spec["take"])
+                src = shift_cyclic(src, off)
+                note = "  摆臂相位 %+.2f 帧（手·脚 %+.2f）" % (off / TPF, c)
+            dst, moved = retarget(dst, src, spec["dur"], spec["take"])
             # 卡希尔在 Reload01 / Idle101 里给手枪骨 R02 加了翻转轨道（换弹甩枪）；步枪刚性绑在 R02 上，留着会在手里乱转
             drop_tracks(dst, ["Bone_Wp01_R02", "Bone_Wp01_L02"])
         changed = patch_static(dst, STATIC_PATCHES)
@@ -263,18 +405,42 @@ def main(argv=None):
         assert [(n, p) for n, p, _ in chk.nodes] == [(n, p) for n, p, _ in mtntool.parse(f).nodes], "骨架树变了"
         out_path = os.path.join(CH03, out_name)
         built[clip] = chk
-        if clip in CLIPS or changed:
-            print("%-22s 时长 %.3fs  移植 %2d 根上半身骨  静态补丁 %s" % (out_name, chk.duration, len(moved), changed or "-"))
+        if clip in CLIPS:
+            print("%-22s 时长 %.3fs  从 %-5s 移植 %2d 根骨%s"
+                  % (out_name, chk.duration, CLIPS[clip]["src"], len(moved), note))
         if not args.dry_run:
             if _write_if_changed(out_path, blob):
                 n_written += 1
-    # 事件文件
+    # 事件文件 ①：整份换成瓦尔基里的
     for clip, src_clip in EVN_FROM_SRC.items():
         src = os.path.join(CH102, "ch102@%s.evn" % src_clip)
         dst = os.path.join(CH03, "ch03@%s.evn" % clip)
         blob = open(src, "rb").read()
         if not args.dry_run and _write_if_changed(dst, blob):
             print("ch03@%s.evn <- ch102@%s.evn" % (clip, src_clip))
+    # 事件文件 ②：在母本 ch01 那份上把特效路径改指爱琳自己的（幂等，母本只读）
+    for new in EVN_EFX_REMAP.values():
+        assert os.path.exists(os.path.join(EFFECTS, *new.split("/"))), "改指的特效不存在：%s" % new
+    unused = set(EVN_EFX_REMAP)
+    n_evn = 0
+    for path in sorted(glob.glob(os.path.join(CH01, "*.evn"))):
+        base = os.path.basename(path)
+        if base.split("@", 1)[1][:-4] in EVN_FROM_SRC:   # 整份换掉的那几个不要再改
+            continue
+        blob = open(path, "rb").read()
+        hits = [old for old in EVN_EFX_REMAP if old.encode("ascii") in blob]
+        if not hits:
+            continue
+        unused -= set(hits)
+        for old in hits:
+            blob = blob.replace(old.encode("ascii"), EVN_EFX_REMAP[old].encode("ascii"))
+        out = os.path.join(CH03, base[:2] + "03" + base[4:])   # 大小写照母本（`Ch01@Dash02.evn`）
+        n_evn += 1
+        if not args.dry_run and _write_if_changed(out, blob):
+            print("%-22s 特效改指爱琳自己的 %d 条" % (os.path.basename(out), len(hits)))
+    assert not unused, "EVN_EFX_REMAP 里这几条在母本里根本没出现，名单该清了：%s" % sorted(unused)
+    print("事件文件：%d 个 `.evn` 里的特效改指了爱琳自己的（%d 条映射全部命中）"
+          % (n_evn, len(EVN_EFX_REMAP)))
     print("写出 %d 个文件%s" % (n_written, "（dry-run）" if args.dry_run else ""))
 
     # 自检：打完补丁的树里，FirePoint 在参考姿势下必须正好落在设计的枪口点上
@@ -321,6 +487,79 @@ def render(built):
                 ImageDraw.Draw(im).text((6, 6), "ch03 %s f%d" % (clip, fr), fill=(240, 240, 240))
             sheet.paste(im, (((i % cols) * 2 + j) * size, (i // cols) * size))
     out = os.path.join(HERE, "compare_F_anim.png")
+    sheet.save(out)
+    print("->", out)
+    render_dash(built, geometry, mshtool, Image, ImageDraw)
+    render_run(built, geometry, mshtool, Image, ImageDraw)
+
+
+def render_dash(built, geometry, mshtool, Image, ImageDraw):
+    """冲刺攻击三行对照：卡希尔（抱着熊）/ 瓦尔基里（源）/ 爱琳（移植后）。"""
+    size = 230
+    n = 7
+    bbox = (np.array([-28.0, -2.0, -28.0]), np.array([28.0, 50.0, 28.0]))
+    rows = []
+    for label, mtn, parts in (
+            ("ch01@Dash00  Casil (hugging ch01W0000 = the teddy bear)",
+             mtntool.parse(os.path.join(CH01, "ch01@Dash00.mtn")),
+             geometry.part_meshes(["ch01W0000"], root=CH01) + geometry.part_meshes(
+                 ["ch0100000", "ch01H0000", "ch01B0000", "ch01G0000", "ch01L0000", "ch01S0000"], root=CH01)),
+            ("ch102@Dash00  Valkyrie (source, 0.833s)",
+             mtntool.parse(os.path.join(CH102, "ch102@Dash00.mtn")),
+             # 瓦尔基里是连体装：整套只有 0000 / H0000 / B0000 三件，没有独立的手套 / 下装 / 鞋
+             geometry.part_meshes(["ch10200000", "ch102H0000", "ch102B0000"], root=CH102)),
+            ("ch03@Dash00  Irene (retargeted, 1.0s, empty-handed like [ch03-dash] WMeshIdx=-1)",
+             built["Dash00"],
+             geometry.part_meshes(["ch0300000", "ch03H0000", "ch03B0000", "ch03G0000",
+                                   "ch03L0000", "ch03S0000"]))):
+        total = mtn.duration * mtn.ticks_per_sec
+        row = Image.new("RGB", (size * n, size + 16), (30, 30, 34))
+        for i in range(n):
+            t = total * i / (n - 1)
+            row.paste(Image.fromarray(mshtool.rasterize(geometry.posed(parts, mtn, t),
+                                                        view="side", size=size, bbox=bbox)), (i * size, 16))
+        ImageDraw.Draw(row).text((3, 3), label, fill=(255, 230, 0))
+        rows.append(row)
+    sheet = Image.new("RGB", (max(r.width for r in rows), sum(r.height for r in rows)), (30, 30, 34))
+    y = 0
+    for r in rows:
+        sheet.paste(r, (0, y))
+        y += r.height
+    out = os.path.join(HERE, "compare_G_dash.png")
+    sheet.save(out)
+    print("->", out)
+
+
+def render_run(built, geometry, mshtool, Image, ImageDraw):
+    """空手跑对照：母本卡希尔（单手托熊跑）/ ch00 泰尔（源）/ 爱琳（移植后）。侧视看摆臂。"""
+    size = 215
+    n = 8
+    bbox = (np.array([-16.0, -0.5, -16.0]), np.array([16.0, 34.0, 16.0]))
+    body = ["ch03H0000", "ch03B0000", "ch03G0000", "ch03L0000", "ch03S0000"]
+    rows = []
+    for label, mtn, parts in (
+            ("ch01@Run-F00  Casil (arm swing L/R 58.5/49.0, forearm 34.3/19.3 -- carrying the bear)",
+             mtntool.parse(os.path.join(CH01, "ch01@Run-F00.mtn")),
+             geometry.part_meshes(body)),
+            ("ch00@Run-F00  Tayr (source; arm-vs-leg anti-phase -0.81, same DisplayHeight 75)",
+             src_mtn("ch00", "Run-F00"),
+             geometry.part_meshes(["ch00H0000", "ch00B0000", "ch00G0000", "ch00L0000", "ch00S0000"],
+                                  root=os.path.join(CHARS, "ch00"))),
+            ("ch03@Run-F00  Irene (upper body retargeted, legs unchanged)",
+             built["Run-F00"], geometry.part_meshes(body))):
+        total = mtn.duration * mtn.ticks_per_sec
+        row = Image.new("RGB", (size * n, size + 16), (30, 30, 34))
+        for i in range(n):
+            row.paste(Image.fromarray(mshtool.rasterize(geometry.posed(parts, mtn, total * i / n),
+                                                        view="side", size=size, bbox=bbox)), (i * size, 16))
+        ImageDraw.Draw(row).text((3, 3), label, fill=(255, 230, 0))
+        rows.append(row)
+    sheet = Image.new("RGB", (max(r.width for r in rows), sum(r.height for r in rows)), (30, 30, 34))
+    y = 0
+    for r in rows:
+        sheet.paste(r, (0, y))
+        y += r.height
+    out = os.path.join(HERE, "compare_H_run.png")
     sheet.save(out)
     print("->", out)
 

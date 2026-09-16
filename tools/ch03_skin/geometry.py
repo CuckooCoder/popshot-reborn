@@ -605,14 +605,16 @@ def verify(b, m, mtn):
     return blob, chk, new_bones
 
 
-def part_meshes(names, override=None):
+def part_meshes(names, override=None, root=None):
+    """载入若干部件（网格 + 同名贴图）。`root` 默认是爱琳的目录，渲对照图时可指向别的角色。"""
+    root = root or CH03
     parts = []
     for n in names:
         if override and n in override:
             m, rgba = override[n]
         else:
-            m = mshtool.load(os.path.join(CH03, n + ".msh"))
-            rgba = dds_edit.load_rgba(os.path.join(CH03, m.textures[0]))[1]
+            m = mshtool.load(os.path.join(root, n + ".msh"))
+            rgba = dds_edit.load_rgba(os.path.join(root, m.textures[0]))[1]
         parts.append((m, rgba))
     return parts
 

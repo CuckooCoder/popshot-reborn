@@ -17,6 +17,11 @@
 （它本该和 `Models/Characters/ch03/` 一起发，而那个目录整个是缺的，FINDINGS §1）。
 ⇒ 她开枪没声。**不改 `weapon.ini`**（那是原版数据），补文件即可。
 
+★ **她自带的音效只有一个**（FINDINGS §24，对着原版解密树逐目录数过）：
+`Sounds/CharacterChanger/ch003.ogg`（选人界面念她名字）。
+`FX/wp/ch03/`、`FX/wplite/ch03/`、`FX/char/KR/char/ch03/`、`FX/char/KR/voice/ch03/`
+在原版里**一个都不存在** ⇒ 下面这些**全是借的**，不是「找回了她自己的」。
+
 ## 挑音源的依据
 
 不是随便找个声音顶上，是**按武器的结构角色**配的 —— 每条都有理由：
@@ -27,12 +32,30 @@
 | 씨드 폭탄 Seed Bomb | `SeedBomb` 蓄力投掷 | 泰尔的分裂手雷 | 同样是「扔出去 + 炸开成小块」的结构 |
 | └ 爆炸 | | `Weapon-Hit-Grenade` | 手雷爆炸 |
 | └ 벌레（蝴蝶碎片） | `Splinter` | `Weapon-Hit-ApplePiece` | ★ 原版 `ch00-02a` 用的就是它，**同一个「碎片」角色** |
-| 에이리얼 슈터 Aerial Shooter | `TotemLauncher` | 卡希尔的追踪火箭 | 同样是「发射出去、落地生效」的发射器 |
+| 에이리얼 슈터 Aerial Shooter | `TotemLauncher` | ★ **`FX/wp/common/weapon@watergun.ogg`** | 见下 |
 | └ 落地（`-set`） | | `Weapon-Hit-Bottle` | 她发射的是**포션（药水）**，瓶子落地的轻响 |
 | └ 回血（`-hpup`） | | **`HpCharge`** | ★ 原版就是「HP 充能」音，正对她的回血图腾 |
 | └ 命中（`-hit`） | | `Weapon-Hit2-Bottle` | 瓶子碎裂；原版 `ch01-02a`（燃烧瓶）用的同一个 |
 
+### 3 号武器换过一次（用户 2026-09-16 实机：「和卡希尔的一样」）
+
+**原先**配的是卡希尔的 `ch01@Attack03.ogg`（캐논왈츠 火箭炮）—— 理由是「同样是发射器」，
+但那是**一发炮**：1.53 s、带低频轰鸣尾巴，和她那把「把药水抛出去」的东西差得远，
+而且卡希尔就在旁边打，一听就是同一发声音。
+
+**现在**配 `FX/wp/common/weapon@watergun.ogg` —— **原版发了但一个地方都没引用的音**
+（`Data/` 全部 ini、61 个 `.evn`、全部 `.efx`、exe 里都搜不到它；`FX/wp/common/` 整个目录
+就这一个文件）。按铁律 13「先搜，再动手造」，这是现成的。
+
+客观对上的几条：**0.51 s**（对 `LoadingTime=300` / `ReloadTime=5300` 的单发慢抛正好，
+卡希尔那 1.53 s 会拖到装填里）、低频只占 11%（不是炮，是一声轻快的水声）、
+起音 0.021 s（抛出去的瞬间）、质心 2767 Hz。**「水枪」正对她发射的 포션（药水）。**
+
+`_Sound-Fire`（泡泡模式）也用同一个：原版 `[ch03-03a]` 自己的 `_Sound-Bounce` / `_Sound-Hit`
+就是直接指非 lite 的那份，这条武器上「lite 复用普通音」是原版自己的写法。
+
 ★ **这是可以改的**：不满意就改下面 `MAPPING` 里的一行再跑一遍，幂等。
+⚠ 1 / 2 号武器现在借的是**泰尔（ch00）**的音 —— 同理，哪天听着像他了，也是改这张表。
 
 ## 幂等
 
@@ -61,11 +84,12 @@ MAPPING = {
     "FX/wp/ch03/ch03@Attack02-bug.ogg":    "Weapon-Hit-ApplePiece.ogg",
     "FX/wplite/ch03/ch03@Attack02_Lite.ogg": "FX/wplite/ch00/ch00@Attack02_Lite.ogg",
     # 3 号 에이리얼 슈터 —— 发射回血图腾（포션）
-    "FX/wp/ch03/ch03@Attack03.ogg":        "ch01@Attack03.ogg",
+    # ★ 发射音是原版发了却没人引用的那个「水枪」，不是卡希尔的火箭炮（见上面那节）
+    "FX/wp/ch03/ch03@Attack03.ogg":        "FX/wp/common/weapon@watergun.ogg",
     "FX/wp/ch03/ch03@Attack03-set.ogg":    "Weapon-Hit-Bottle.ogg",
     "FX/wp/ch03/ch03@Attack03-hpup.ogg":   "HpCharge.ogg",
     "FX/wp/ch03/ch03@Attack03-hit.ogg":    "Weapon-Hit2-Bottle.ogg",
-    "FX/wplite/ch03/ch03@Attack03_Lite.ogg": "FX/wplite/ch01/ch01@Attack03_Lite.ogg",
+    "FX/wplite/ch03/ch03@Attack03_Lite.ogg": "FX/wp/common/weapon@watergun.ogg",
 }
 
 

@@ -26,6 +26,12 @@
    而且 CH03 的特效只有 102 个、命名规则也和 CH01 不一样 ⇒ **默认一个字都不改**，
    让爱琳沿用卡希尔的动作音效和尘土特效。缺音频不会崩（§4）。
 
+## 跳过（`SKIP`）
+
+**不是整套照抄** —— 卡希尔身上有一件别人都没有的东西：`ch01J0000`（橙色大锤，`J` 类，
+绑 `Bone_Wp05_01`，站姿里就拎在右手上）。16 个角色目录里只有她有 `J` 件 ⇒ 爱琳不该有。
+详见 `SKIP` 的注释和 FINDINGS §21。
+
 ## 别名
 
 `weapon.ini` 的 `[ch03-03]` / `[ch03-03a]` 点名要 `Characters/ch03/ch03D0003A`，
@@ -59,6 +65,17 @@ KNOWN_EXT = {".msh", ".dds", ".mtn", ".evn"}
 #: 额外别名：`目标文件名 -> 同目录里的源文件名`（字节原样复制，不改内容）。
 ALIASES = {
     ("ch01", "ch03"): {"ch03D0003A.msh": "ch03D0003.msh"},
+}
+
+#: 克隆时**跳过**的源文件：`(源, 目标) -> {源文件名}`。审计的「一个都不能少」同样把它们排除。
+#:
+#: ★ `ch01J0000` 是卡希尔那把橙色大锤：`J` 类部件，绑在 `Bone_Wp05_01` 上，
+#:   **站姿里就拎在右手上**（`Characters/Ch%02d/ch%02dJ%04d.msh`，VA `0x68518e`，
+#:   加载点 `0x506467`）。16 个角色目录里**只有 ch01 有 J 件** ——
+#:   ch00 / ch02 和全部 11 个商城角色一个都没有 ⇒ 删掉不是「缺了个文件」，
+#:   而是回到另外 14 个角色的常态。用户 2026-09-16 实机看到后要求删（FINDINGS §21）。
+SKIP = {
+    ("ch01", "ch03"): {"ch01J0000.msh", "ch01J0000.dds"},
 }
 
 #: 大头像图集至少要有这么多帧，否则爱琳的 0x1a/0x1b 越界，**一进大厅就崩**（§3）。
@@ -146,6 +163,12 @@ def build_plan(src, dst):
     bad = [n for n in names if os.path.splitext(n)[1].lower() not in KNOWN_EXT]
     if bad:
         raise SystemExit("源目录里有不认识的扩展名，先查清楚再跑：%s" % bad[:10])
+
+    skip = SKIP.get((src, dst), set())
+    missing_skip = skip - set(names)
+    if missing_skip:
+        raise SystemExit("SKIP 里点名的源文件不存在，名单该更新了：%s" % sorted(missing_skip))
+    names = [n for n in names if n not in skip]
 
     # 贴图改名表：源 .dds 文件名 -> 目标 .dds 文件名
     tex_map = {n: rename(n, src, dst)
@@ -245,7 +268,8 @@ def audit(src, dst):
     if not os.path.isdir(dst_dir):
         return ["目标目录不存在：%s" % dst_dir], []
 
-    src_names = sorted(os.listdir(src_dir))
+    skip = SKIP.get((src, dst), set())
+    src_names = [n for n in sorted(os.listdir(src_dir)) if n not in skip]
     dst_names = sorted(os.listdir(dst_dir))
     dst_set = {n.lower() for n in dst_names}
     n_alias = len(ALIASES.get((src, dst), {}))
@@ -261,9 +285,16 @@ def audit(src, dst):
     if missing:
         problems.append("① 克隆件缺了 %d 个：%s" % (len(missing), missing[:10]))
     extra = sorted(set(dst_names) - expect)
+    stray = {rename(n, src, dst) for n in skip} & set(dst_names)
+    if stray:
+        problems.append("① SKIP 名单里的文件又出现在目标目录里：%s —— 故意不克隆的，"
+                        "看 mkchar.py 里 SKIP 那段注释" % sorted(stray))
+        extra = [n for n in extra if n not in stray]
     if extra:
         notes.append("① 目录里另有 %d 个**新增**文件（外观改造加的部件）：%s"
                      % (len(extra), extra[:12]))
+    if skip:
+        notes.append("① 按 SKIP 跳过 %d 个源文件（不克隆）：%s" % (len(skip), sorted(skip)))
     bad = [n for n in dst_names if os.path.splitext(n)[1].lower() not in KNOWN_EXT]
     if bad:
         problems.append("① 出现不认识的扩展名：%s" % bad[:10])
@@ -453,6 +484,8 @@ def main(argv=None):
              report["mtn"], report["evn"], len(ALIASES.get((args.src, args.dst), {}))))
     print("   .msh 里改掉的贴图名：%d 处，分布在 %d 个文件"
           % (report["tex_hits"], report["msh_patched"]))
+    for name in sorted(SKIP.get((args.src, args.dst), set())):
+        print("   跳过：%s（SKIP）" % name)
     for alias, source in sorted(ALIASES.get((args.src, args.dst), {}).items()):
         print("   别名：%s  <-  %s（字节原样）" % (alias, source))
 

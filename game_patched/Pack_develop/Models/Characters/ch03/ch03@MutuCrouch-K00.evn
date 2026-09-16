@@ -28,6 +28,6 @@
     <Type>RenderEffect</Type>
     <TypeIdx>1</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>CH01/WP00/Efx/CH01_MutuCrunch-K00.efx</ResourcePath>
+    <ResourcePath>CH03/WP00/Efx/CH03_MutuCrunch-K00.efx</ResourcePath>
   </Event>
 </ArrayOfEvent>
