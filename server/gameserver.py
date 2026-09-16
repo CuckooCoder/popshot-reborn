@@ -3737,6 +3737,18 @@ class RoomStartGame:
         #: 立刻各补一发交接包。客户端那边如果表是后建的（里面本来就没有他），
         #: 那一发就什么都不匹配 = 无害的空操作。
         self.left_while_loading = []
+        #: ★★ 「这一代握手做过**进图收尾**没有」——
+        #: `broadcast_start_game` 末尾那一整段（建 `room.quest`、清位置轨迹、
+        #: 起 32 ms 循环、无条件重发 `0x0410`、交接控制格）只许做一次。
+        #:
+        #: 判据必须是**握手自己手里的事实**（一代握手 = 一局），不能拿
+        #: 「`room.quest` 还是 None」当替身：房间里随便一发战斗包都会把
+        #: `quest_state()` 的懒惰分支踩出来、把那份状态凭空建回来，
+        #: 于是下一局整段收尾被跳过 —— 循环不起步 = **bot 一动不动也不开枪**，
+        #: 怪和刷怪点也没人模拟。用户 2026-09-16 第三局实机撞到：结算回房间后
+        #: 在房里按了两下 Ctrl（`0x040c`），下一局的 bot 就成了木头
+        #: （V0.3bot §197）。
+        self.entered_game = False
 
     @property
     def state(self):
@@ -3746,6 +3758,7 @@ class RoomStartGame:
         self.host.reset()
         self.loaded.clear()
         self.left_while_loading.clear()
+        self.entered_game = False
 
     def note_left_while_loading(self, seat_index):
         """加载途中有人走了。返回 True = 真记下了（这时确实在加载）。
@@ -4073,6 +4086,72 @@ BOT_RESPAWN_POINT = None
 #: 心跳当场把它拽回去（用户 2026-08-28 报的「只是原地跳一下」）。
 BOT_PEER_HIT = None
 
+#: ★★ 同上，`bot.bot_limit_reason` 挂这儿：**这会儿房里的 bot 受限没有**
+#: （成就防刷，V0.3.3 / D127）。签名 `(room) -> 一句原因 | None`。
+#:
+#: ★ 为什么是钩子，而不是在结算那一段里 lazy `import bot`：`bot.py` **被
+#: import 的那一刻**就把上面这四个钩子装上了。在结算路径上 lazy import 的话，
+#: `test_battle`（它不 import bot）会在跑到第一个结算用例时**中途**把 bot
+#: 的驱动装进本模块，之后所有用例的行为跟着变 —— 并行分片下还成了
+#: 「跑到哪个用例才变」的时序依赖。
+#:
+#: 没装 ⇒ 这个进程里根本没有 bot ⇒ 一律回 `None`，降级语义天然是对的
+#: （没有 bot 就没什么可刷）。
+BOT_LIMIT_REASON = None
+
+
+def bot_limit_reason_now(room, when=""):
+    """这会儿房里的 bot 受限没有。不受限 / 没有 bot / 没装 bot 模块 ⇒ ``None``。"""
+    if BOT_LIMIT_REASON is None or room is None:
+        return None
+    reason = BOT_LIMIT_REASON(room)
+    return (when + reason) if reason else None
+
+
+def room_system_chat(room, text):
+    """房间里的一行系统提示，发给**房里每一个人**。
+
+    ★★ 和 `Conn.room_system_chat()` 的分工：那一个是「**我**跟房里说」，走
+    `Conn.broadcast()`，第一句就是 `room = self.lobby_room(); if room is None:
+    return 0`。而「新一局开张」这件事的发起人**可能已经不在房里了**
+    —— `after_someone_left()` 是在 `LOBBY.leave(self)` **之后**调的
+    （`leave_room`），它那条「等的人走了，放行」会一路走到
+    `broadcast_start_game()` 的收尾块。用 `Conn` 那个的话，那一局的提示
+    只会发给刚走掉的那个人，房里一个都收不到。
+
+    ⇒ 凡是「房间级的事实」都从 `room` 出发发包，别从 `self` 出发。
+    收尾块里现成的 `reset_sync_trails(room, …)` / `handover_controller_slots`
+    也都是这个写法。
+    """
+    if room is None or not text:
+        return
+    packet = build_game(OP_CHAT, build_receive_chat(text))
+    for other in room.members(exclude=None):
+        if getattr(other, "send_broken", False):
+            continue            # 发送流已废（等它的读线程收尾拆连接）
+        try:
+            other.send(packet)
+        except OSError as error:
+            other.log(f"   系统提示发送失败（{error!r}），忽略")
+
+
+def new_room_quest(room, seats, announce=False):
+    """建这一局的 `RoomQuest`，**当场**记下 bot 受不受限（D127）。
+
+    ★ 两个建点（正常开局 / `quest_state()` 的懒惰兜底）都走这里 ——
+    开局那一刻的实况只有这儿知道，漏一个建点就有一整类局判不出来：
+    「上一局定住的 bot 这一局照样定着，而这一局没人再敲过任何命令」。
+
+    `announce=True` 时脏局还会跟房里说一行（正常开局那一路用）。
+    """
+    quest = RoomQuest(seats=seats)
+    reason = bot_limit_reason_now(room)
+    if reason:
+        quest.bot_limit_reason = "开局时 " + reason
+        if announce:
+            room_system_chat(room, f"⚠ {reason}，本局不计成就。")
+    return quest
+
 
 def pvp_score_limit(player_count, team_mode):
     """这一局要拿几分（几个人头）才算赢。抄自 `0x55be71`（§167）。
@@ -4244,6 +4323,17 @@ class RoomQuest:
         #: 本局已经结算过了。★ 房间级，不是连接级 —— 六个人会各发一发
         #: `0x040f gcpEndQuest`，只有第一发能触发结算。
         self.settled = False
+        #: ★★ 这一局**出现过**的 bot 限制（成就防刷，V0.3.3 / D127）。
+        #: `None` = 没出现过 ⇒ 这一局照常计成就。
+        #:
+        #: ★ 它是**闩**：只写第一次，之后限制解除了也不撤。口径是
+        #: 「这一局里出现过没有」，不是「结算那一刻还在不在」
+        #: （用户 2026-09-15）—— 否则「定住 bot 打五十下、结算前一秒
+        #: 敲一下 /hold 解开」照样拿得到卡。
+        #: 建的那一刻由 `new_room_quest()` 填开局实况，局中由
+        #: `bot.handle_command()` 补；`begin_map_change()` 不清它（换图
+        #: 和战绩一样，一整轮算一份）。
+        self.bot_limit_reason = None
         #: 已放行的地图名（只给日志和调试通道看）。
         self.maps_entered = []
         #: 本局开打的时刻（`time.monotonic()`）。对战的时间上限从这里算（§167）。
@@ -4679,10 +4769,13 @@ class RoomQuest:
                 if now >= deadline]
 
     def record_kill(self, killer_seat, victim_seat, *,
-                    teams=None, team_mode=False):
+                    teams=None, team_mode=False, scenery=False):
         """按客户端 `Character::Die` 的口径给凶手加分 / **扣分**（§224）。
 
         返回这一发让凶手的分数**变了多少**（`+1` / `-1` / `0`）。
+
+        `scenery=True` = 这一发打掉的是**场景里的可破坏物**（箱子 / 油桶），
+        不是怪 —— 一个计数器都不动（`victim_is_scenery()` 给的判据）。
 
         `killer_seat` 来自 `0x0408` 的第二个字节（`[char+0x158]`）：
         **开火者的座位号**（`0x4fedee` 写的），怪物 / 环境是 0xff，
@@ -4720,6 +4813,11 @@ class RoomQuest:
             # ★ 受害者不是座位 = **打死了一只怪**（闯关那一路）。客户端
             #   这一支一分不加（对战分数只算人），但「杀了几只怪」是闯关
             #   那几张卡片的判据，所以在这儿记一笔再走（V0.3商店）。
+            # ★★ 但「非座位」里还混着**可破坏物**（箱子 / 油桶）——
+            #    打碎箱子不是击杀（用户 2026-09-16，bug调查/22）。
+            #    判据由调用方给：模式和地图在它手里，不在 `RoomQuest` 手里。
+            if scenery:
+                return 0
             self.mob_kills[killer] += 1
             self.note_weapon_kill(killer)
             return 0
@@ -6325,6 +6423,22 @@ def current_map_name(room):
     return mapdata.qualify(name, difficulty)
 
 
+def handle_is_breakable(room, handle):
+    """这个世界句柄是不是这张图上的一件**可破坏物**（箱子 / 油桶，§139）。
+
+    分不清就返回 `None` —— **这张图没有地形数据**。调用方必须自己决定
+    这时候当什么算，别把 `None` 直接当 `False` 用（`mapdata` 里有 174 张图，
+    但客户端报上来的图名大小写不一定对得上，例如 `Quest06_stage`）。
+
+    判据来自 `.map` 里原样抽出来的破坏物表，不是猜的：
+    `mapdata.MapTerrain.breakable_by_handle()` 是全项目唯一那一份实现。
+    """
+    terrain = mapdata.load(current_map_name(room))
+    if terrain is None:
+        return None
+    return terrain.breakable_by_handle(handle) is not None
+
+
 def room_in_battle(room):
     """这一局是不是**真开打了**（全员加载完、一起进 stage 7）。
 
@@ -7093,9 +7207,17 @@ class Conn:
         if room is None:
             return self.solo_quest
         if room.quest is None:
-            # 正常开局走 `broadcast_start_game`（那里带着在座座位建），
-            # 这条懒惰分支只有「协议试探 / 控制通道手搓包」会走到。
-            room.quest = RoomQuest(seats=self.battle_seats())
+            # 正常开局走 `broadcast_start_game`（那里带着在座座位建）。
+            # ⚠ 这条懒惰分支**不只**「协议试探 / 控制通道手搓包」会走到 ——
+            #   真人在房间界面按 Ctrl 发的 `0x040c` 也踩得到（2026-09-16 实机）。
+            #   所以战斗处理器进来之前都得先过 `room_in_battle()` 那道门；
+            #   建出来的这一份座位表是猜的，别指望它对。
+            #   ★ 就算真被建出来了也不许再影响下一局：那一局的收尾闩在
+            #   `RoomStartGame.entered_game` 上，不看这里（V0.3bot §197）。
+            # ★ 走 `new_room_quest()` 是为了连这条路也记上 bot 受不受限
+            #   （D127）；`announce=False` —— 这不是真的「开局」，
+            #   房里没人在等一行提示。
+            room.quest = new_room_quest(room, self.battle_seats())
         return room.quest
 
     def battle_members(self):
@@ -8128,6 +8250,28 @@ class Conn:
         occupant = room.seats[index]
         return occupant is not None and occupant.is_bot
 
+    def victim_is_scenery(self, seat, handle):
+        """这一发 `0x0408` 打掉的是**场景里的可破坏物**，而不是人 / 怪吗。
+
+        「打碎箱子不算击杀」（用户 2026-09-16，bug调查/22）：随雨在对战里
+        零杀人赢了 6 局，只拿到 1 张蹭分卡 —— 另外 5 局他打碎的箱子被当成
+        「杀怪」记进了击杀数，`击杀数 == 0` 那条判据当场不成立。
+
+        * 坐在座位上的（含 bot）永远不是场景物。
+        * **对战里没有怪**（用户拍板）⇒ 非座位的受害者一律是场景物，
+          连地图都不用查。这也正是客户端的口径：凶手座位查不到角色
+          （`0x404ff6`）就一分不动，对战分数只算人。
+        * 闯关要分清：句柄在这张图的破坏物表里才是箱子，其余是怪 ——
+          「闯关打怪算击杀」是 V0.3商店特意加的，不能连怪一起砍掉。
+          ★ 拿不到这张图的地形数据时**按怪算**（保住主路），代价是那几张
+          图上的箱子仍然会漏进击杀数。
+        """
+        if 0 <= int(seat) < ROOM_SEAT_COUNT:
+            return False
+        if not self.quest_mode():
+            return True
+        return handle_is_breakable(self.lobby_room(), handle) is True
+
     def on_report_hp_zero(self, payload):
         """0x0408「我 HP 归零了」-> 回 0x0406 死亡广播，角色这才真的倒下。
 
@@ -8242,8 +8386,11 @@ class Conn:
         # ★ 自杀 / 杀队友要**扣**一分 —— 客户端 `Character::Die` 就是这么算的，
         #   服务端不扣就会「HUD 写着 5、服务端已经数到 6」（§224）。
         teams, team_mode = self.battle_teams()
-        delta = quest.record_kill(info["arg"], seat,
-                                  teams=teams, team_mode=team_mode)
+        delta = quest.record_kill(
+            info["arg"], seat, teams=teams, team_mode=team_mode,
+            # ★ 打碎的箱子不是击杀（bug调查/22）。判据在这儿算 ——
+            #   模式和地图在连接手里，`RoomQuest` 手里没有。
+            scenery=self.victim_is_scenery(seat, info["handle"]))
         if delta:
             change = "+1" if delta > 0 else "-1（自杀 / 杀队友要扣分，§224）"
             self.log(f"   对战计分: 座位 {info['arg']} 杀敌数 {change} -> "
@@ -8757,6 +8904,17 @@ class Conn:
         except (ValueError, struct.error) as error:
             self.log(f"   0x040c rawUseItem 解析失败: {error}；不回包")
             return
+        # ★★ Ctrl 在**房间界面里照样发这一发** —— 键位是全局的，客户端不管
+        #    你在不在关卡里。不挡的话 `quest_state()` 的懒惰分支会在两局之间
+        #    把 `room.quest` 凭空建回来（座位表还是猜的），和「加载期有人退房」
+        #    是同一个坑（见 `room_in_battle` 的注释）。回包本来就是没有的
+        #    （房间里手上一件道具都没有），所以挡掉不改变线上的一个字节。
+        #    实机后果见 V0.3bot §197：下一局的 bot 一动不动也不开枪。
+        room = self.lobby_room()
+        if room is not None and not room_in_battle(room):
+            self.log(f"   座位 {self.my_seat} 在房间里按了「用道具」"
+                     f"（这会儿不在一局里）；一个包都不回")
+            return
         quest = self.quest_state()
         seat_id = self.my_seat
         item_id = quest.use_item(seat_id, slot_index)
@@ -8814,11 +8972,20 @@ class Conn:
             if item_id == TEAM_REFLECT_ITEM_ID:
                 # 全队版：客户端 `UseItemEffect` 把它换成 10303 再对同队
                 # 每个座位来一遍（§194 那段注释里写的就是这条）。
+                # ★ `room.seats` 的空位是 `None`，不是空座位对象 —— 少一道
+                #   判空就是 `AttributeError: 'NoneType' has no attribute
+                #   'conn'`，整发 0x040c 被外层吞掉，护盾根本没记上
+                #   （用户 2026-09-16 21:20 实机：2 人房，剩下 4 个空位，
+                #   V0.3bot §198）。下面 HP 回复剂那一段一开始就是这么写的，
+                #   这里漏了。
                 room = self.lobby_room()
-                mine = room.seats[seat_id].team if room is not None else None
+                mine = (room.seats[seat_id].team
+                        if room is not None and 0 <= seat_id < ROOM_SEAT_COUNT
+                        and room.seats[seat_id] is not None else None)
                 if room is not None and mine:
                     seats = [i for i, s in enumerate(room.seats)
-                             if s.conn is not None and s.team == mine]
+                             if s is not None and s.conn is not None
+                             and s.team == mine]
             for seat in seats:
                 quest.reflect_until[seat] = until
             self.log(f"   反射护盾 座位 {seats} 撑 {REFLECT_SECONDS:g} 秒"
@@ -9154,6 +9321,22 @@ class Conn:
         card_rules, card_cfg_warnings = shopcfg.cards()
         for warning in card_cfg_warnings:
             self.log(f"   ⚠ cards.json: {warning}")
+        # ★★ **这一局算不算成就**（成就防刷，V0.3.3 / D127）。房间级的一句话，
+        #    所以在座位循环**之前**判一次、记一行 —— 放进循环的话 bot 座位
+        #    也会各收一份（`settlement_seats()` 把 bot 也算进来）。
+        #
+        #    两个来源取或：**本局的闩**（开局那一刻 / 局中敲命令时记下的）
+        #    ＋ **结算这一刻的实况兜底**。后者防的是「将来有人绕开那两处
+        #    改了 bot 状态」—— 判据是实况，绕不过去。
+        card_room = self.lobby_room()
+        card_block = (quest.bot_limit_reason
+                      or bot_limit_reason_now(card_room, "结算时 "))
+        if card_block:
+            self.log(f"   成就判定: 本局不计成就 —— {card_block}"
+                     f"（本局战绩不进累计、不发称号卡片；"
+                     f"经验 / 金币 / 合成材料照发）")
+        else:
+            self.log(f"   成就判定: 本局计入成就 —— {_bot_freedom_line(card_room)}")
         for seat, conn in sorted(seats.items()):
             score = scores[seat]
             # `0x0411` 的 success 跟着尾部数组走，两个包才不会自相矛盾。
@@ -9204,16 +9387,23 @@ class Conn:
                 quest, seat, won=seat_won, quest_mode=quest_mode, score=score)
             conn.log("   本局战绩 座位%d: %s" % (seat, _stats_line(gained_stats)))
             before_stats = account_store.battle_stats(conn.account)
-            after_stats = cards.merge_stats(before_stats, stat_mode,
-                                            gained_stats)
-            give_cards, card_bases, card_warnings = cards.due_grants(
-                card_rules, mode=stat_mode,
-                stage=quest_info[0] if quest_info else None,
-                difficulty=quest_info[1] if quest_info else None,
-                match=gained_stats, total=after_stats,
-                bases=account_store.card_bases(conn.account))
-            for warning in card_warnings:
-                conn.log(f"   ⚠ cards.json: {warning}")
+            if card_block:
+                # ★★ 本局不计成就（D127）：**累计一格都不动** —— 只拦发卡的话，
+                #    「先在受限的房间里把累计攒满、再去干净房间打一局领卡」
+                #    这条路还开着（累计类条件占了一半，D111）。
+                after_stats = before_stats
+                give_cards, card_bases = {}, {}
+            else:
+                after_stats = cards.merge_stats(before_stats, stat_mode,
+                                                gained_stats)
+                give_cards, card_bases, card_warnings = cards.due_grants(
+                    card_rules, mode=stat_mode,
+                    stage=quest_info[0] if quest_info else None,
+                    difficulty=quest_info[1] if quest_info else None,
+                    match=gained_stats, total=after_stats,
+                    bases=account_store.card_bases(conn.account))
+                for warning in card_warnings:
+                    conn.log(f"   ⚠ cards.json: {warning}")
             # ★★ **调试模式才打的那一大段**（用户 2026-09-14 点的题）：
             #    每个人、每张卡、每条条件各自算了什么、得几、成不成立，
             #    外加这个账号的**累计**战绩。出问题时不用再去拼包看时间线。
@@ -9226,6 +9416,13 @@ class Conn:
             if VERBOSE and conn.account_name:
                 conn.vlog("   累计战绩 座位%d: %s"
                           % (seat, _totals_line(after_stats)))
+            if VERBOSE and conn.account_name and card_block:
+                # ★ 不计成就时**不去跑 `cards.explain()`** —— 那是把整张规则表
+                #   真算一遍再拼几十行字符串，而结论已经定了。
+                conn.vlog("   ── 称号卡片判定 座位%d：本局不计成就（%s），"
+                          "%d 条规则全部跳过"
+                          % (seat, card_block, len(card_rules)))
+            elif VERBOSE and conn.account_name:
                 conn.vlog("   ── 称号卡片判定 座位%d（这一局：%s）"
                           % (seat, _match_scope_line(stat_mode, quest_info)))
                 for line in cards.explain(
@@ -9245,9 +9442,15 @@ class Conn:
                     conn.account, skipped, granted = conn.accounts.apply_battle(
                         conn.account_name,
                         experience=gained_exp, money=gained_money,
-                        materials=dropped, stats_mode=stat_mode,
-                        stats_gained=gained_stats, cards=give_cards,
-                        card_bases=card_bases)
+                        materials=dropped,
+                        # ★ 不计成就那一局只掐掉这两样（D127）：存档层那句
+                        #   `if stats_mode and stats_gained:` 自己接得住，
+                        #   `apply_battle` 一个字都不用改。
+                        #   ★★ 上面三个（经验 / 金币 / 材料）**一个字不动** ——
+                        #      用户拍板：受限只影响成就。
+                        stats_mode=None if card_block else stat_mode,
+                        stats_gained=None if card_block else gained_stats,
+                        cards=give_cards, card_bases=card_bases)
                 except KeyError:
                     skipped = []
                     conn.log(f"   存档里没有账号 {conn.account_name!r}；本局所得未入账")
@@ -9332,6 +9535,15 @@ class Conn:
                 continue
             conn.settled = True
             conn.quest_success = cleared
+        # ★★ 结算界面上也说一句「这一局没算成就」（用户 2026-09-15 第三轮）。
+        #
+        #    ★ 排在结算三连发**之后**：结算界面是第一发 `0x0411` 弹出来的
+        #      （`0x4913fc`），先发的话这行字落在还没弹出来的界面后面。
+        #    ★ 只在不计成就时说 —— 正常结算一个字都不发（用户点名）。
+        #    ★ 走房间级那一个，不是 `self.room_system_chat()`：结算的发起人
+        #      可能是控制通道、也可能是替全场结算的别人（D127 ⑨）。
+        if card_block:
+            room_system_chat(card_room, "⚠ 本局开启过 bot 限制，不结算成就。")
         reward_count = sum(len(payloads) for payloads in rewards.values())
         self.log(f"← 已结算本局：每人各收到 {reward_count} 份"
                  f" gspRewardReceived(0x041c，合成材料) + {len(results)} 份"
@@ -9632,14 +9844,23 @@ class Conn:
                     room, bot_replies, "全房间都不用加载，直接进 stage 7")
 
         # 真进了关卡（所有人都加载完、一起进 stage 7）之后的收尾。
+        # ★ 闩在**握手**上（`entered_game`），不是「`room.quest` 还是 None」：
+        #   那个只是收尾的副产品，房间里任何一发战斗包都能把它顶掉，
+        #   顶掉了这一整段就再也不跑（见 `RoomStartGame.entered_game`）。
         if (room.battle.state == StartGameHandshake.IN_GAME
-                and room.quest is None):
+                and not room.battle.entered_game):
+            # 闩要**第一件事**就落：下面那条「全房间都不用加载」的递归回到这里
+            # 时，收尾已经做完了，再做一遍就是把刚建好的状态又清一次。
+            room.battle.entered_game = True
             # 这一局的战斗状态重新起一份（上一局的掉落物句柄/死亡表全作废）。
             # ★ 控制者表要按**这一刻在座的座位**算，和客户端
             # `GameContext::StartGame` 同一个口径（§180）——
             # 客户端就是在进 stage 7 的路上建它的。
-            room.quest = RoomQuest(seats=[i for i, seat in enumerate(room.seats)
-                                          if seat is not None])
+            # ★ `new_room_quest()` 顺手记下**开局这一刻** bot 受不受限，
+            #   脏局还跟房里说一行（成就防刷，D127）。
+            room.quest = new_room_quest(
+                room, [i for i, seat in enumerate(room.seats)
+                       if seat is not None], announce=True)
             # ★ 位置轨迹跟着新局作废 —— 上一局的坐标（可能还是另一张图上的）
             #   放到这一局是个随机点，bot 会照着它站过去（V0.3 M3）。
             reset_sync_trails(room, "新一局开始", new_match=True)
@@ -11979,6 +12200,25 @@ def _match_scope_line(stat_mode, quest_info):
     name = shopcfg.QUEST_ZH.get(stage)
     text += " 关卡 %s" % ("%s · %s" % (stage, name) if name else stage)
     return text + " / %s" % shopcfg.DIFFICULTY_ZH.get(difficulty, difficulty)
+
+
+def _bot_freedom_line(room):
+    """「本局计入成就」那一行的**正面**理由（成就防刷，D127）。
+
+    ★ 用户 2026-09-15 点名要的：「每局 log 里需要写清楚计算或不计算的原因，
+    方便日后排查」—— 所以计入的那一局也得说清是凭什么计的，
+    不能只在不计的时候才写一句。
+
+    ★ 只读 `room` 自己那几格，**不问 bot 模块**：一个钩子够用了，
+    而且这一行在没装 bot 模块的进程里也得打得出来。
+    """
+    if room is None:
+        return "不在房间里（单人 / 协议试探）"
+    seats = room.bot_seats()
+    if not seats:
+        return "房里没有 bot"
+    return ("%d 个 bot 全程自由，难度 %s"
+            % (len(seats), getattr(room, "bot_difficulty", "?")))
 
 
 def _item_label(item_id):

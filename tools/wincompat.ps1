@@ -21,7 +21,39 @@
     | `Get-Content -Raw`     | PowerShell 3.0 | 参数不存在 |
     | `Get-Content -Tail`    | PowerShell 3.0 | 参数不存在 |
     | `$数组.属性`（成员枚举）| PowerShell 3.0 | 返回 $null（日志里 pid 列表变空） |
+    | `$null.Count` / 标量的 `.Count` | PowerShell 3.0 | 返回 $null ⇒ `-eq 0` 和 `-gt 0` **双双为 False**，见下 |
+    | `foreach ($x in $null)` | PowerShell 3.0 起才**不**进循环 | 2.0 上空转**一圈**（$x 为 $null），凭空多打一行空白 |
     | `HashAlgorithm.Dispose()` | .NET 4.0 | .NET 3.5 上是显式接口实现，PowerShell 调不到 |
+
+    ## ★★ 本文件返回集合的函数，调用方一律要写 `@(...)`
+
+    PowerShell 的函数 return 是**走管道**的，数组到了调用方会被拆开：
+    空数组 -> `$null`，一个元素 -> **标量**。而 2.0 上 `$null` 和标量都没有
+    `.Count`（3.0 才补上），于是 `.Count` 取出来是 `$null`，
+    `$null -eq 0` 和 `$null -gt 0` **同时**是 False —— 两个方向的判据全废：
+
+        $busy = Test-PortsFree $specs
+        if ($busy.Count -eq 0) { return }        # 端口全空 -> 不 return -> 误报「被占用」
+        if ($busy.Count -gt 0) { ...报错... }    # 占了 1 个 -> 不报 -> 漏报
+
+    前者就是用户 2026-09-16 反馈的「Win7 上一启动就说端口被占用，
+    但一条占用明细都没有」——那条空白行正是 `foreach ($x in $null)` 空转一圈。
+
+    **在函数体里写 `return @($x)` 挡不住**：拆开发生在 return 的那一刻
+    （实测 `function f { $a=@('only'); return @($a) }` 到调用方是 String）。
+    唯一管用的是调用方自己包：`$busy = @(Test-PortsFree $specs)`。
+    同作用域内的 `$x = @(...)` 赋值不受影响，那个一直是对的。
+
+    ## ★ 只靠 POPSHOT_FORCE_LEGACY 验不出上面这类坑
+
+    那个开关模拟的是「**没有 NetTCPIP 模块**」，跑的仍然是本机的
+    PowerShell 5.1 引擎 —— `.Count` 和 `foreach $null` 照新语义走，
+    上面那个误报在开关开着的时候**复现不出来**。
+    要验语义，得真换引擎（这台开发机上可用，需要 .NET 3.5）：
+
+        powershell -Version 2 -NoProfile -ExecutionPolicy Bypass -File tools\launch.ps1
+
+    两个一起上才是完整的 Win7：`set POPSHOT_FORCE_LEGACY=1` + `-Version 2`。
 
     ## 判据用「能力」不用「版本号」
 
@@ -50,9 +82,15 @@ if ($PSVersionTable -and $PSVersionTable.PSVersion) {
 }
 
 # ★ POPSHOT_FORCE_LEGACY=1 -> 在新系统上强行走老路。
-#   手上没有 Win7 机器时，这是唯一能真跑一遍兼容分支的办法 —— 没有它，
-#   netstat 那条路就只能靠「看着像对」发出去，而这次出问题的正是这种东西。
 #   用法：`set POPSHOT_FORCE_LEGACY=1` 之后照常双击 start.bat / stop.bat。
+#
+#   ★★ 它模拟的只是「**没有这几个 cmdlet**」，跑的仍然是本机的 PowerShell 5.1
+#   引擎 —— 它**验不出语言版本的语义差**（`.Count`、`foreach $null`，见文件头）。
+#   2026-09-16 的误报就是这么漏出去的：开着这个开关怎么跑都是好的，
+#   到了真 Win7 上一启动就说「端口被占用」。
+#   要验语义必须**换引擎**（这台机器上可用，需要 .NET 3.5）：
+#       powershell -Version 2 -NoProfile -ExecutionPolicy Bypass -File tools\launch.ps1
+#   两个一起上才是完整的 Win7：能力位（本开关）+ 引擎语义（-Version 2）。
 if ($env:POPSHOT_FORCE_LEGACY -and $env:POPSHOT_FORCE_LEGACY -ne '0') {
     $script:HasNetTcpCmdlet = $false
     $script:HasNetUdpCmdlet = $false
@@ -224,6 +262,9 @@ function Test-PortsFree {
         检查一组端口是否**全部空着**。返回值是「占用说明」的数组，
         空数组 = 全空。
 
+        ★★ 调用方必须写 `$busy = @(Test-PortsFree ...)`，别直接取 `.Count`
+           —— 理由见文件头「返回集合的函数」那一节。
+
         入参形如：
             @( @{ Port = 27799; Proto = 'TCP'; Label = '游戏服' },
                @{ Port = 27799; Proto = 'UDP'; Label = '位置同步' } )
@@ -272,9 +313,84 @@ function Get-ListenerPid {
 }
 
 # ---------------------------------------------------------------------------
+#  起后台进程：窗口隐藏 + stdout/stderr 进文件 + 和调用方的窗口互不相干
+# ---------------------------------------------------------------------------
+function Start-HiddenRedirected {
+    <#
+        ★ 为什么不让调用方直接写 Start-Process：PowerShell 2.0 上 `-WindowStyle`
+          和 `-RedirectStandard*` **分属两个互斥的参数集** —— 前者要 ShellExecute，
+          后者要 CreateProcess，写在一起就是
+          「无法使用指定的命名参数解析参数集」（ParameterBindingException），
+          用户 2026-09-16 反馈的第二个错就是它。3.0 起两者才允许共存。
+
+        2.0 的退路：**把重定向交给 cmd**，自己只用 `-WindowStyle Hidden`（单独用合法）：
+
+            cmd /c ""python.exe" "app.py" --flag 1>"out" 2>"err""
+
+        ★★ 外面那层引号**不能省**。PowerShell 的 `-ArgumentList` 是**原样空格拼接、
+           不补引号**的；cmd 收到后按自己那条老规矩「掐掉第一个和最后一个引号」——
+           少包一层，被掐掉的就是 python 路径两边那一对，路径当场从中间断开
+           （实测：不产出任何文件，连 .err 都没有）。多包这一层，被掐掉的正好是
+           它自己，里面那串原样留下。玩家的目录名有空格又有中文，这层引号是刚需。
+
+        ★ 不要图省事改用 `-NoNewWindow`：参数集上它确实过得去，但那样子进程会
+          **共用调用方的控制台** —— start.bat 那个窗口一关就把服务端一起带走。
+          包一层 cmd 起来的进程自带 conhost（✅ 实测进程树里能看到），和父窗口无关。
+
+        ★ 停进程的语义不变：监听端口的是里层那个 python，stop.bat 照旧按端口找它；
+          里层一死外层 cmd 自己就退（✅ 实测不残留）。
+
+        ★ 判据用 `$PsMajor`（**语言版本**），不是 `POPSHOT_FORCE_LEGACY`（能力位）
+          —— 这是两件事，后者验不出这条，见文件头。要自测走 `-Version 2`。
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string[]]$ArgumentList = @(),
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$StdOut,
+        [Parameter(Mandatory = $true)][string]$StdErr
+    )
+
+    # ★★ 不带参数的进程（bsloader 就是）**不能**把空的 -ArgumentList 递上去：
+    #    Start-Process 那个参数带 ValidateNotNullOrEmpty，收到空数组会当场
+    #    「Cannot validate argument on parameter 'ArgumentList'」
+    #    （ParameterBindingValidationException）——
+    #    用户 2026-09-16 在 **Win10** 上撞到的就是它，和 PS 2.0 无关，
+    #    是这个封装自己引进来的。用 splat 按需塞，缺省就整个不出现。
+    #    ★ 上一轮拿 `-NoGame` 验证**恰好跳过了 bsloader**，所以没暴露；
+    #      「同一个函数所以同一条路」是错的判断 —— 传参形态不同就是另一条路。
+    $spArgs = @{
+        FilePath               = $FilePath
+        WorkingDirectory       = $WorkingDirectory
+        RedirectStandardOutput = $StdOut
+        RedirectStandardError  = $StdErr
+        WindowStyle            = 'Hidden'
+    }
+    if (@($ArgumentList).Count -gt 0) { $spArgs['ArgumentList'] = $ArgumentList }
+
+    if ($script:PsMajor -ge 3) {
+        Start-Process @spArgs | Out-Null
+        return
+    }
+
+    # `@()` 包一下再 join：调用方传单个参数时 PowerShell 2.0 会把它拆成标量，
+    # 标量没有 -join 要的枚举语义（和 .Count 是同一个坑，见文件头）。
+    # 不带参数时整段留空，别拼出多余空格。
+    $argText = ''
+    if (@($ArgumentList).Count -gt 0) { $argText = ' ' + (@($ArgumentList) -join ' ') }
+    $inner = '"' + '"' + $FilePath + '"' + $argText + `
+             ' 1>"' + $StdOut + '" 2>"' + $StdErr + '"' + '"'
+    Start-Process -FilePath $env:ComSpec -WorkingDirectory $WorkingDirectory `
+        -ArgumentList '/c', $inner -WindowStyle Hidden | Out-Null
+}
+
+# ---------------------------------------------------------------------------
 #  本机的局域网 IPv4 地址（服务端包启动后要告诉玩家往 server.config 里填什么）
 # ---------------------------------------------------------------------------
 function Get-LocalIPv4List {
+    # ★ 调用方写 `$addrs = @(Get-LocalIPv4List)`：只有一个网卡地址时（最常见）
+    #   返回值会被拆成标量，PowerShell 2.0 上标量没有 .Count。
+    #   serverctl.ps1 那边已经是对的，新写的调用别忘了。
     $addrs = @()
     if ($script:HasNetIpCmdlet) {
         try {
@@ -366,6 +482,8 @@ function Move-LogAside {
 
 function Get-FileTailLines {
     # 文件末尾 N 行（替 `Get-Content -Tail N`）。文件不在就返回空数组。
+    # ★ 调用方写 `$tail = @(Get-FileTailLines ...)`：日志只剩一行时会被拆成
+    #   标量，PowerShell 2.0 上 `$tail.Count -gt 0` 就恒为假了。
     param(
         [Parameter(Mandatory = $true)][string]$Path,
         [int]$Count = 20

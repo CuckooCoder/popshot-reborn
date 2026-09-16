@@ -171,6 +171,46 @@ BOT_DIFFICULTY_DEFAULT = 3
 BOT_DIFFICULTY_MIN = min(BOT_DIFFICULTY_PROFILES)
 BOT_DIFFICULTY_MAX = max(BOT_DIFFICULTY_PROFILES)
 
+# ---------------------------------------------------------------------------
+# ★★★ 「bot 还自不自由」—— 成就防刷的判据单源（V0.3.3，D127）
+# ---------------------------------------------------------------------------
+#: 计成就要求的最低难度档。1 档（瞄准失误 95%）的 bot 基本上是个靶子。
+#: ★ 房里**一个 bot 都没有**时这条不适用 —— 没东西可刷（用户 2026-09-15）。
+BOT_DIFFICULTY_MIN_FOR_CARDS = 2
+
+#: 「限制 bot 自由活动」的那几个开关：字段名 -> (**自由时**的值, 一句人话)。
+#:
+#: ★★ 判据只有这一份。这些字段全在 `BotConn.__init__` 里，而且
+#: `reset_battle_frame()` **故意不清它们**（那是房主给的房间指令，不是
+#: 一张图之内的机器状态）—— 所以「上一局定住的 bot，这一局照样定着」。
+#: ★ 以后再加限制命令，往这里加一行就够：成就判定 / 日志 / 提示三处
+#:   都只读这张表，不用再想「还有哪儿要改」。
+#:
+#: ⚠ **人话那一句要短**：它会拼进房间聊天框那一行提示，而聊天框一次只看得见
+#: 4 行、折出来的行同样吃额度（§20）。整行 50 个半角宽封顶，
+#: `test_cardfair` 拿**每一条**去量（不是只量一条）。所以这里只点名是哪条命令，
+#: 「它具体干了什么」交给 `/help` 和文档。
+BOT_FREEDOM_FIELDS = {
+    "holding":     (False, "被 /hold 定住了"),
+    "weapon_slot": (None,  "被 /w 锁了武器槽"),
+    "melee":       (True,  "被 /dash 关掉近身"),
+    "no_explode":  (False, "开着 /noboom"),
+    "slow_bullet": (False, "开着 /slow"),
+}
+
+#: ★★ 每条命令**有没有可能**把 bot 变成靶子。这两张表合起来必须盖住整张
+#: `COMMANDS`（`test_cardfair` 钉着）—— 新加一条命令不归类**当场红**，
+#: 归类的时候自然就会想起「它要不要接进成就判定」。
+#:
+#: ⚠ 它**不是**运行时判据：真正说了算的永远是 `bot_limit_reason()` 扫到的
+#: 实况。所以 `/w` `/d` 整条都归在 LIMITING 里（`/w 0` `/d 3` 是同一条命令
+#: 的解除方向），而实况扫描分得清这一次到底限没限。
+#:
+#: ★ 抄的是铁律 13 那套路子（`server.config` 的键必须归类成客户端侧 /
+#: 服务端侧）：漏一条的症状是「**静默地不生效**」，不是报错，只能靠测试拦。
+LIMITING_COMMANDS = frozenset(("hold", "dash", "noboom", "slow", "w", "d"))
+HARMLESS_COMMANDS = frozenset(("a", "c", "t", "team", "r", "h", "help", "?"))
+
 
 # ---------------------------------------------------------------------------
 # ★★★ 这一格的时刻（D106）—— 一格之内只许有一个「现在」
@@ -1609,6 +1649,121 @@ COMMANDS = {
 #: 改座位 / 准备状态的命令 —— 游戏中一律拒绝。`/d`、`/w` 与三种帮助名
 #: 不在里面，战斗中照样能用。`team` 也不在里面：它只是一行提示，什么都不改。
 MUTATING_COMMANDS = ("a", "c", "t", "r")
+
+
+# ----------------------------------------------------------------------------
+# ★★★ 成就防刷：bot 受限的那一局不计成就（V0.3.3，D127）
+# ----------------------------------------------------------------------------
+def bot_limit_reason(room):
+    """房里的 bot **这会儿**受限没有。不受限返回 ``None``，受限返回一句原因。
+
+    ★ 三条判据，顺序就是下面这三段：
+
+    1. **房里一个 bot 都没有 ⇒ 不受限**。没东西可刷，连难度那条都不适用
+       （用户 2026-09-15：「下一局如果 bot 全踢掉，也恢复正常计算成就」）。
+    2. 难度低于 `BOT_DIFFICULTY_MIN_FOR_CARDS`。难度是**房间级**的一格。
+    3. 逐个 bot 过 `BOT_FREEDOM_FIELDS`。**任何一个 bot 受限就算受限** ——
+       房里另外那个自由的 bot 不能替它作保。
+
+    ★ 读的是**实况**，不是「谁敲过什么命令」：命令能敲反（`/hold` 是开关）、
+    能只改一个 bot、还能在角色缺那个槽时**失败**（`_apply_gun` 报错、
+    `machine.weapon_slot` 原封不动 —— 那个 bot 仍然是真自由的）。
+    照命令记账的话这三种都要各判一次，照实况扫就一种。
+    """
+    if room is None:
+        return None
+    seats = room.bot_seats()
+    if not seats:
+        return None
+    level = int(getattr(room, "bot_difficulty", BOT_DIFFICULTY_DEFAULT))
+    if level < BOT_DIFFICULTY_MIN_FOR_CARDS:
+        return f"bot 难度只有 {BOT_DIFFICULTY_LABELS.get(level, level)}"
+    for index in seats:
+        machine = room.seats[index].conn
+        for field, (free_value, why) in BOT_FREEDOM_FIELDS.items():
+            if getattr(machine, field, free_value) != free_value:
+                return f"{index} 号位 bot {why}"
+    return None
+
+
+#: 「限制解除了」那一句 = **基句 + 一个结尾**。
+#:
+#: ★ 说的是**下一局**起恢复，不是「现在就恢复」—— 局中解除的话这一局的闩
+#: 不撤（D127 ①），说「恢复了」会把人骗一次。
+#:
+#: ★★ 结尾分两种（用户 2026-09-15 第三轮）：**局中**解除要点明
+#: 「本局不生效」；**在房间里**解除时压根没有「本局」可言，那个括号只会
+#: 让人多想。
+BOT_LIMIT_CLEARED_NOTICE = "⚠ bot 限制已解除，下一局起计成就"
+BOT_LIMIT_CLEARED_IN_ROUND = "（本局不生效）。"
+BOT_LIMIT_CLEARED_IN_ROOM = "。"
+
+
+def cleared_notice(room):
+    """按房间当前状态拼出「限制已解除」那一句。
+
+    ★ 判据是**这一局到底上没上闩**（`RoomQuest.bot_limit_reason`），
+    不是「房间状态是不是游戏中」—— 这句话要回答的就是「刚解除的这一下，
+    对手头这一局管不管用」，而那件事的事实只有那个闩知道。
+    回房间时 `room.quest` 被置 None ⇒ 房间里解除天然走不带括号那一支。
+    """
+    quest = getattr(room, "quest", None)
+    in_round = quest is not None and getattr(quest, "bot_limit_reason", None)
+    return BOT_LIMIT_CLEARED_NOTICE + (
+        BOT_LIMIT_CLEARED_IN_ROUND if in_round else BOT_LIMIT_CLEARED_IN_ROOM)
+
+
+def _scan_bot_limit(conn, room, before=None, announce=True):
+    """扫一遍实况：受限就给本局上闩，并在**状态翻转**时跟房里说一句。
+
+    返回这一次扫到的原因，交给下一次当 `before`。
+
+    ★★ **两个方向都要说**（用户 2026-09-15 第二轮）：受限时说一句、
+    解除时也说一句。只说前一半的话，房主敲完 `/d 2` 屏幕上什么都不动 ——
+    他分不清是「解除成功了」还是「命令根本没生效」。用户那次就是把
+    `/d 2` 敲成了 `/b 2`（不认识的命令被当普通聊天广播掉，也不报错），
+    正因为没有回执，一直以为是成就判定算错了。
+
+    ★ 命令**之前**那一扫要 `announce=False`：那时候的「受限」是上一条命令
+    （或者上一局）留下的，早就说过了；照说的话敲一条 `/d 3` 都会刷一行。
+
+    ★ 提示按**状态翻转**去重（铁律 10），判据是这一次命令**前后**的实况，
+    **不存标志位** —— 存的话「踢掉受限的那个 bot」不走命令层，
+    标志位会永久卡在「说过了」，之后再限制就不吭声了。
+
+    ⚠ **整段吞异常**：它挂在 `handle_command()` 的 `finally` 上，也就是跑在
+    那个「一条命令写错不该让房主掉线」的 `except` **外面**。这里抛出去会把
+    聊天线程带崩（`on_game_packet` 之上没有兜底），而它做的又只是记一笔账 ——
+    座位在两句之间被别人摘掉这种竞态，不值得拿一条连接去换。
+    """
+    try:
+        reason = bot_limit_reason(room)
+        note_bot_limit(room, reason, "局中 ")
+        if announce and reason and not before:
+            conn.room_system_chat(f"⚠ {reason}，本局不计成就。")
+        elif announce and before and not reason:
+            # ★ 受限原因**换了一种**（比如放开 /hold 但难度还是 1）时两边
+            #   都非空，一句都不说 —— 状态没翻转，本来就没什么新消息。
+            conn.room_system_chat(cleared_notice(room))
+        return reason
+    except Exception as error:             # noqa: BLE001 —— 见上
+        conn.log(f"   ⚠ 成就判定扫描出错（本局照常计成就）: {error!r}")
+        return None
+
+
+def note_bot_limit(room, reason, when):
+    """把「这一局出现过限制」记进本局（`RoomQuest.bot_limit_reason`）。
+
+    ★ **只写第一次**：口径是「这一局里出现过没有」，不是「结算那一刻还在
+    不在」（用户 2026-09-15）—— 所以先定住、打完再 `/hold` 解开，这一局
+    照样不算，而第一次记下的那句原因也正好说得清是什么时候的事。
+    """
+    if not reason or room is None:
+        return
+    quest = getattr(room, "quest", None)
+    if quest is None or getattr(quest, "bot_limit_reason", None) is not None:
+        return
+    quest.bot_limit_reason = when + reason
 
 
 # ----------------------------------------------------------------------------
@@ -10492,6 +10647,9 @@ gameserver.BOT_ROOM_LOADED = report_bots_loaded
 gameserver.BOT_RESPAWN_POINT = pick_respawn_point
 #: 同上：真人打出来的每一发同步包都过一次，打到 bot 身上的替它结算击退（§92）。
 gameserver.BOT_PEER_HIT = note_peer_hit
+#: 同上：这会儿房里的 bot 受限没有（成就防刷，D127）。没装这个钩子 ⇒ 这个
+#: 进程里根本没有 bot ⇒ 一律「不受限」，降级语义天然是对的。
+gameserver.BOT_LIMIT_REASON = bot_limit_reason
 
 
 def handle_command(conn, text):
@@ -10521,14 +10679,27 @@ def handle_command(conn, text):
         conn.send_system_chat("游戏进行中改不了 bot，等这一局打完再说。")
         return True
 
+    # ★★ 成就防刷（D127）：**命令前后各扫一遍实况**，任一次受限就给本局上闩。
+    #
+    #    「之前」那一扫不是多余的 —— `/hold` 是个开关，「解除」那一次敲完
+    #    状态是干净的。只扫之后的话，「先定住、打完再解开」会被判成干净局。
+    #
+    #    ★ 放在这一处、不放进每条命令里：一处就把整张 `COMMANDS` 收进来，
+    #      以后加新命令不需要记得补调用；也不用为每条命令判「这次是开还是关」
+    #      —— 前后两次实况一比，方向自己就出来了。
+    before = _scan_bot_limit(conn, room, announce=False)
     try:
-        warning = COMMANDS[name](conn, room, args)
-    except Exception as error:             # noqa: BLE001 —— 见下
-        # ★ bot 命令是**聊天线程**上跑的：抛出去会把房主自己的连接带崩
-        #   （`on_game_packet` 之上没有兜底）。一条命令写错不该让人掉线。
-        conn.log(f"   ⚠ bot 命令 /{name} {args} 出错: {error!r}")
-        conn.send_system_chat(f"命令 /{name} 出错了，看服务端日志。")
+        try:
+            warning = COMMANDS[name](conn, room, args)
+        except Exception as error:         # noqa: BLE001 —— 见下
+            # ★ bot 命令是**聊天线程**上跑的：抛出去会把房主自己的连接带崩
+            #   （`on_game_packet` 之上没有兜底）。一条命令写错不该让人掉线。
+            conn.log(f"   ⚠ bot 命令 /{name} {args} 出错: {error!r}")
+            conn.send_system_chat(f"命令 /{name} 出错了，看服务端日志。")
+            return True
+        if warning:
+            conn.send_system_chat(warning)
         return True
-    if warning:
-        conn.send_system_chat(warning)
-    return True
+    finally:
+        # ★ 出错那一支也要走到：命令可能已经改了一半的状态。
+        _scan_bot_limit(conn, room, before)

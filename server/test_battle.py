@@ -1599,6 +1599,41 @@ class ItemUseTests(ItemSlotBase):
         self.assertEqual(1, len(self.quest.item_slots[0]))
 
 
+class TeamItemWithEmptySeatsTests(BattleRoom):
+    """★ 全队版道具（反射护盾 10314 / HP 回复剂 10313）撞上**空座位**。
+
+    `lobby.Room.seats` 的空位是 `None`，不是「一个没人的座位对象」。
+    少一道判空，两人房里剩下的 4 个空位就让 `0x040c` 的处理器抛
+    `AttributeError: 'NoneType' object has no attribute 'conn'` ——
+    外层「单包隔离」把它吞掉，效果广播出去了、护盾却一个字都没记上
+    （用户 2026-09-16 21:20 实机，闯关房 1 人 + 1 bot，V0.3bot §198）。
+
+    闯关房（`session_type=2`）的每个座位都算 A 队 ⇒ 走的正是全队那一支。
+    """
+
+    def use(self, item_id, conn=None, seat_id=0):
+        """把一件道具塞进槽里再按下去 —— 绕开「刷 -> 捡」，直指处理器。"""
+        self.quest.item_slots[seat_id] = [int(item_id)]
+        gameserver.Conn.on_game_packet(conn or self.alice, OP_USE_ITEM,
+                                       w_i32(0))
+
+    def test_the_room_really_has_empty_seats(self):
+        # 这一组的前提：没有空位就测不到那道判空。
+        self.assertIn(None, self.room.seats)
+
+    def test_the_team_reflect_shield_is_recorded_for_the_whole_team(self):
+        self.use(gameserver.TEAM_REFLECT_ITEM_ID)
+        self.assertEqual([0, 1], sorted(self.quest.reflect_until))
+
+    def test_the_team_hp_charge_is_recorded_for_the_whole_team(self):
+        self.use(gameserver.TEAM_HP_CHARGE_ITEM_ID)
+        self.assertEqual([0, 1], sorted(self.quest.hp_charges))
+
+    def test_the_single_seat_shield_only_covers_the_user(self):
+        self.use(gameserver.REFLECT_ITEM_ID, conn=self.bob, seat_id=1)
+        self.assertEqual([1], sorted(self.quest.reflect_until))
+
+
 # ----------------------------------------------------------------------------
 # 道具效果**结束**：`0x040d`（§200）
 #
@@ -3065,6 +3100,14 @@ class BattleStatsTests(BattleRoom):
         self.assertEqual(0, self.quest.enemy_kills[0])
         self.assertEqual(1, self.quest.weapon_stats[(0, 110001)]["kills"])
 
+    def test_breaking_scenery_is_not_a_kill(self):
+        """`scenery=True` = 打碎的是箱子，一个计数器都不许动（bug调查/22）。"""
+        self.quest.last_roh[0] = 110001
+        self.assertEqual(0, self.quest.record_kill(0, 0xFF, scenery=True))
+        self.assertEqual(0, self.quest.mob_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual({}, self.quest.weapon_stats)
+
     def test_a_kill_is_credited_to_the_weapon_last_fired(self):
         """口径照抄客户端 `GetLastBulletROHIdx()`（武器称号比的就是它）。"""
         self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1000020))
@@ -3286,6 +3329,124 @@ class BattleStatsTests(BattleRoom):
         self.assertIsNone(gameserver.peer_target_seat(123456))
 
 
+class SceneryIsNotAKillMixin(object):
+    """打碎箱子算不算击杀 —— 走真的 `0x0408`，判据由连接自己算（bug调查/22）。"""
+
+    def report_non_seat_death(self, handle, killer_seat=0, deaths=0):
+        """一发「受害者不是座位」的 `0x0408` —— 箱子和怪走的是同一发。"""
+        gameserver.Conn.on_game_packet(
+            self.alice, OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=handle, seat=0xFF, arg=killer_seat,
+                            deaths=deaths))
+
+    def assert_not_counted(self):
+        self.assertEqual(0, self.quest.mob_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual({}, self.quest.weapon_stats)
+        stats = cards.match_stats(self.quest, 0, won=True, score=0,
+                                  quest_mode=self.session_type == 2)
+        self.assertEqual(0, stats.get("kills", 0),
+                         "「击杀数 == 0」是蹭分卡的判据，箱子不许挤进来")
+
+
+class ScenerySurvivesPvpTests(SceneryIsNotAKillMixin, BattleRoom):
+    """★★ 回归钉子（用户 2026-09-16，bug调查/22）：**对战里打碎箱子不算击杀**。
+
+    随雨那天在对战里**零杀人赢了 6 局，只拿到 1 张蹭分卡**：另外 5 局他打碎的
+    箱子走了和杀怪同一条上报（受害者座位 = 0xff），被记进「击杀数」，
+    `击杀数 == 0` 当场不成立。★ 对战里没有怪（用户拍板）⇒ 非座位的受害者
+    一律是场景物，连地图都不用查。
+    """
+
+    session_type = 1
+    arguments = (1, 3, 0)
+
+    def test_breaking_scenery_in_a_pvp_match_is_not_a_kill(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(0x134)
+        self.assert_not_counted()
+
+    def test_a_zero_kill_win_still_earns_the_leech_card(self):
+        """★★ 用户可见的那一头：打碎箱子之后，零杀人胜局照样发**蹭分卡片**。
+
+        规则用**出厂那一条**（`shopdefaults.CARD_RULES[60005]`），不是用例里
+        现编的 —— 现编只能证明判定函数会算，证明不了线上那张卡的条件长什么样。
+        """
+        import shopcfg
+        import shopdefaults
+        mode, conditions = shopdefaults.CARD_RULES[60005]
+        rules = [{"card": 60005, "listed": True, "mode": mode,
+                  "conditions": [dict(item) for item in conditions]}]
+        self.quest.last_roh[0] = 110001
+        for handle in (0x134, 0x135, 0x139):
+            self.report_non_seat_death(handle)
+        give, _bases, warnings = cards.due_grants(
+            rules, mode="pvp", stage=None, difficulty=None,
+            match=cards.match_stats(self.quest, 0, won=True, quest_mode=False,
+                                    score=0),
+            total={}, bases={})
+        self.assertEqual([], warnings)
+        self.assertEqual({60005: shopcfg.CARD_GRANT_COUNT}, give)
+
+    def test_a_pvp_match_does_not_need_map_data_to_tell(self):
+        """★ 对战那一支**不查地图**：图名给成不存在的也照样不算击杀。
+
+        `mapdata` 里 174 张图，但客户端报上来的图名大小写不一定对得上
+        （线上 `Quest06_stage` 就查不到）。对战这一路不许依赖它。
+        """
+        self.room.map_name = "NoSuchMap"
+        self.assertIsNone(gameserver.handle_is_breakable(self.room, 0x134))
+        self.report_non_seat_death(0x134)
+        self.assert_not_counted()
+
+    def test_killing_a_player_still_counts(self):
+        """别把人一起砍掉 —— 座位上的受害者永远不是场景物。"""
+        gameserver.Conn.on_game_packet(
+            self.bob, OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=1 * 100000 + 100001, seat=1, arg=0))
+        self.assertEqual(1, self.quest.enemy_kills[0])
+        self.assertEqual(0, self.quest.mob_kills[0])
+
+
+class SceneryInQuestTests(SceneryIsNotAKillMixin, BattleRoom):
+    """闯关那一路：**打怪照旧算击杀**，打碎箱子不算（用户 2026-09-16）。
+
+    这儿分得清，是因为 `.map` 里抽出来的破坏物表按世界句柄给了判据
+    （§139）—— 不是按句柄大小猜的。
+    """
+
+    session_type = 2
+    arguments = (2, 4)          # 关卡 2 · 难度 4 ⇒ 地图 `Quest02_2#Extreme`
+    #: 那张图上真有的一件破坏物的世界句柄（`mapdata` 里查出来的）。
+    CRATE = 0x137
+
+    def setUp(self):
+        super(SceneryInQuestTests, self).setUp()
+        self.room.map_name = "Quest02_2"
+        terrain = mapdata.load(gameserver.current_map_name(self.room))
+        self.assertIsNotNone(terrain, "这张图的地形数据没了，用例白跑")
+        self.assertIsNotNone(terrain.breakable_by_handle(self.CRATE),
+                             "句柄 0x%x 不再是这张图上的破坏物" % self.CRATE)
+
+    def test_killing_a_monster_still_counts(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(self.CRATE + 0x1000)   # 表里没有 ⇒ 是怪
+        self.assertEqual(1, self.quest.mob_kills[0])
+        self.assertEqual(1, self.quest.weapon_stats[(0, 110001)]["kills"])
+
+    def test_breaking_a_crate_is_not_a_kill(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(self.CRATE)
+        self.assert_not_counted()
+
+    def test_without_map_data_a_non_seat_victim_counts_as_a_monster(self):
+        """★ 闯关拿不到地形数据时**按怪算** —— 保住「打怪算击杀」那条主路。"""
+        self.room.map_name = "NoSuchMap"
+        self.assertIsNone(gameserver.handle_is_breakable(self.room, self.CRATE))
+        self.report_non_seat_death(self.CRATE)
+        self.assertEqual(1, self.quest.mob_kills[0])
+
+
 class SurvivalFinishTests(BattleRoom):
     """生存模式（arguments[1] == 0）：每人固定三条命。"""
 
@@ -3369,6 +3530,57 @@ class RoomLifecycleTests(BattleRoom):
         handle = struct.unpack_from(
             "<I", bodies(self.alice, OP_CREATED_ITEM)[0], 0)[0]
         self.assertEqual(ITEM_HANDLE_BASE, handle)
+
+    # -- 「进图收尾」这一段必须每局都跑（bot 的帧全指着它）--------------------
+    def back_to_the_room(self):
+        """打完一局、结算也看完，人回到房间界面。"""
+        gameserver.Conn.on_game_packet(self.alice, OP_END_QUEST, b"")
+        for conn in (self.alice, self.bob):
+            gameserver.Conn.leave_game_result(conn)
+        self.clear()
+
+    def loop_running(self):
+        loop = gameserver.room_loop(self.room, create=False)
+        return loop is not None and loop.running()
+
+    def test_pressing_ctrl_in_the_room_does_not_freeze_the_next_round(self):
+        """★★ 回归（用户 2026-09-16 第三局：bot 一动不动、也不开枪）。
+
+        Ctrl 的键位是全局的 —— 人在**房间界面**按一下，客户端照样发
+        `0x040c`。以前那一发会把 `quest_state()` 的懒惰分支踩出来，
+        把 `room.quest` 凭空建回来；下一局的「进图收尾」是拿
+        「`room.quest` 还是 None」当判据的，于是整段被跳过：
+        32 ms 循环不起步（bot 的帧全靠它走）、`0x0410` 不重发、
+        bot 座位那几格控制权不交接（V0.3bot §197）。
+        """
+        self.back_to_the_room()
+        gameserver.Conn.on_game_packet(self.alice, OP_USE_ITEM, w_i32(0))
+        self.assertIsNone(self.room.quest,
+                          "房间里按 Ctrl 不该建出一份战斗状态")
+        self.assertEqual([], opcodes(self.alice), "房间里按 Ctrl 一个包都不回")
+        self.start_battle()
+        self.assertTrue(self.loop_running(),
+                        "32 ms 循环没起步 = bot 一帧都不会动")
+
+    def test_a_leftover_quest_does_not_skip_the_new_rounds_setup(self):
+        """★ 收尾闩在**握手**上，不在 `room.quest` 上。
+
+        别的包再把那份状态顶回来（`quest_state()` 的懒惰分支到处都是），
+        新一局照样要重建战斗状态、照样要起循环。
+        """
+        self.back_to_the_room()
+        stale = gameserver.new_room_quest(self.room, [0])
+        self.room.quest = stale
+        self.start_battle()
+        self.assertTrue(self.loop_running(),
+                        "32 ms 循环没起步 = bot 一帧都不会动")
+        self.assertIsNot(stale, self.room.quest, "新一局必须重建战斗状态")
+
+    def test_the_settlement_puts_the_latch_back(self):
+        """闩跟着握手一起复位，不然第二局反而不做收尾了。"""
+        self.assertTrue(self.room.battle.entered_game)
+        self.back_to_the_room()
+        self.assertFalse(self.room.battle.entered_game)
 
 
 # ----------------------------------------------------------------------------
