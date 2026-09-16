@@ -6390,8 +6390,16 @@ static void __cdecl proj_add_log(void *proj)
 /* ★ 只跟踪「`Add` 认出来是子弹」的那些对象 —— `ProjectileMgr` 那张 map 里
    还躺着角色和一堆地图物件（实测 vft 有十来种），全打就淹了。
    判据：`+0x304` 是个像样的武器 id、`+0x308` 是个像样的指针。
-   表是环形的，满了覆盖最老的一格。 */
-#define PROJ_TRACK_N 64
+   表是环形的，满了覆盖最老的一格。
+
+   ★★ 2026-09-17 从 64 加到 512：查「爱琳 2 号武器分裂出的蝴蝶炸完不消失」时
+   发现**这张表本身在骗人** —— 那一局登记了 180 颗弹体，64 格早被挤了三轮，
+   于是「某颗弹体的 `PROJ.` 行断了」既可能是它被销毁、也可能只是被挤出表，
+   **两种情况在日志里长得一模一样**，判不了。512 格够一整局（实测一局 ~180 颗）。
+   ⚠ 光加大还不够：被挤掉时如果那一格还在 tick，就打一行 `PROJ~`，
+   **让「表不够用」这件事自己说出来**，而不是留给下一个人再踩一次（铁律 10 的精神：
+   判据要么成立要么报警，不能静默失真）。 */
+#define PROJ_TRACK_N 512
 static struct { void *obj; int handle, ticks; } g_proj_track[PROJ_TRACK_N];
 static int g_proj_track_next = 0;
 
@@ -6405,6 +6413,12 @@ static void proj_track_add(void *proj, int handle)
 {
     int i = g_proj_track_next;
     g_proj_track_next = (g_proj_track_next + 1) % PROJ_TRACK_N;
+    /* ★ 挤掉一格之前先喊一声：被挤掉的那颗从此不再出现在日志里，
+       看日志的人会把它误当成「被销毁了」。表够不够用不能靠感觉。 */
+    if (g_proj_track[i].obj && g_proj_track[i].ticks > 0)
+        bslog("PROJ~   追踪表满，句柄 %d 被挤出（已 tick %d 次）"
+              "—— 它之后的轨迹不再有日志，**别当成它被销毁了**",
+              g_proj_track[i].handle, g_proj_track[i].ticks);
     g_proj_track[i].obj = proj;
     g_proj_track[i].handle = handle;
     g_proj_track[i].ticks = 0;
@@ -6425,13 +6439,16 @@ static void __cdecl proj_tick_log(void *proj)
         g_proj_track[i].ticks++;
         /* ★ 走 bsvlog 不走 bslog：这是**每帧 × 每弹体**的，占不起 flush +
            DebugView 那一档（用户 2026-09-01 的掉帧）。 */
+        /* ★ 寿命(+31c) 和碰撞型(+32c) 也逐帧打：登记时打过一次不够用 ——
+           查「炸完不消失」要看的正是「它到底还在不在倒计时」。 */
         bsvlog("PROJ.   弹体 %08X 句柄 %d owner %d 第%d帧 位置(+34,38)"
                " (%.2f, %.2f) 渲染(+2c,30) (%.2f, %.2f) 速度 (%.2f, %.2f)"
-               " 状态 %d 线 %08X",
+               " 状态 %d 寿命(+31c) %d 碰撞型(+32c) %d 追踪目标(+328) %d 线 %08X",
                (unsigned)(UINT_PTR)p, g_proj_track[i].handle,
                proj_owner_of(g_proj_track[i].handle), g_proj_track[i].ticks,
                PF(0x34), PF(0x38), PF(0x2C), PF(0x30),
-               PF(0x120), PF(0x124), PI(0x54), PU(0x30C));
+               PF(0x120), PF(0x124), PI(0x54), PI(0x31C), PI(0x32C), PI(0x328),
+               PU(0x30C));
         /* ★ 弹道线 / 拖尾**每帧的内容**：光看「指针非 0」证明不了它被画了
            —— 要看它有没有跟着弹体动。真人和 bot 并排比这几行就够了。 */
         if (PU(0x30C))
@@ -6700,10 +6717,15 @@ static int try_patch_proj_diag(void)
         if (!g_proj_fire_tramp) return 0;
     }
     InterlockedExchange(&g_proj_diag_patched, 1);
+    /* ★ 这句以前写的是「按整数位置翻转打轨迹」—— 早就改成每 tick 都打了，
+       文字没跟上。查弹体问题的人照着它去读日志会判错（「没有新行」被当成
+       「弹体不动」，其实那一版是「弹体没了」），所以订正。 */
     bslog("PATCH   ★弹体诊断已装 @ %08X / %08X / %08X：收到 rpFire 打一行"
-          "解析出来的参数，每颗弹体登记时打一份全字段快照，之后按整数位置"
-          "翻转打轨迹（BSHOOK_PROJ_DIAG=0 可关）",
-          (unsigned)PROJ_FIRE_VA, (unsigned)PROJ_ADD_VA, (unsigned)PROJ_TICK_VA);
+          "解析出来的参数，每颗弹体登记时打一份全字段快照，之后**每 tick 打一行**"
+          "轨迹（追踪表 %d 格，挤掉还在 tick 的会打 PROJ~ 警告）"
+          "（BSHOOK_PROJ_DIAG=0 可关）",
+          (unsigned)PROJ_FIRE_VA, (unsigned)PROJ_ADD_VA, (unsigned)PROJ_TICK_VA,
+          PROJ_TRACK_N);
     return 1;
 }
 
