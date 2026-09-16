@@ -3737,6 +3737,18 @@ class RoomStartGame:
         #: 立刻各补一发交接包。客户端那边如果表是后建的（里面本来就没有他），
         #: 那一发就什么都不匹配 = 无害的空操作。
         self.left_while_loading = []
+        #: ★★ 「这一代握手做过**进图收尾**没有」——
+        #: `broadcast_start_game` 末尾那一整段（建 `room.quest`、清位置轨迹、
+        #: 起 32 ms 循环、无条件重发 `0x0410`、交接控制格）只许做一次。
+        #:
+        #: 判据必须是**握手自己手里的事实**（一代握手 = 一局），不能拿
+        #: 「`room.quest` 还是 None」当替身：房间里随便一发战斗包都会把
+        #: `quest_state()` 的懒惰分支踩出来、把那份状态凭空建回来，
+        #: 于是下一局整段收尾被跳过 —— 循环不起步 = **bot 一动不动也不开枪**，
+        #: 怪和刷怪点也没人模拟。用户 2026-09-16 第三局实机撞到：结算回房间后
+        #: 在房里按了两下 Ctrl（`0x040c`），下一局的 bot 就成了木头
+        #: （V0.3bot §197）。
+        self.entered_game = False
 
     @property
     def state(self):
@@ -3746,6 +3758,7 @@ class RoomStartGame:
         self.host.reset()
         self.loaded.clear()
         self.left_while_loading.clear()
+        self.entered_game = False
 
     def note_left_while_loading(self, seat_index):
         """加载途中有人走了。返回 True = 真记下了（这时确实在加载）。
@@ -7194,8 +7207,13 @@ class Conn:
         if room is None:
             return self.solo_quest
         if room.quest is None:
-            # 正常开局走 `broadcast_start_game`（那里带着在座座位建），
-            # 这条懒惰分支只有「协议试探 / 控制通道手搓包」会走到。
+            # 正常开局走 `broadcast_start_game`（那里带着在座座位建）。
+            # ⚠ 这条懒惰分支**不只**「协议试探 / 控制通道手搓包」会走到 ——
+            #   真人在房间界面按 Ctrl 发的 `0x040c` 也踩得到（2026-09-16 实机）。
+            #   所以战斗处理器进来之前都得先过 `room_in_battle()` 那道门；
+            #   建出来的这一份座位表是猜的，别指望它对。
+            #   ★ 就算真被建出来了也不许再影响下一局：那一局的收尾闩在
+            #   `RoomStartGame.entered_game` 上，不看这里（V0.3bot §197）。
             # ★ 走 `new_room_quest()` 是为了连这条路也记上 bot 受不受限
             #   （D127）；`announce=False` —— 这不是真的「开局」，
             #   房里没人在等一行提示。
@@ -8886,6 +8904,17 @@ class Conn:
         except (ValueError, struct.error) as error:
             self.log(f"   0x040c rawUseItem 解析失败: {error}；不回包")
             return
+        # ★★ Ctrl 在**房间界面里照样发这一发** —— 键位是全局的，客户端不管
+        #    你在不在关卡里。不挡的话 `quest_state()` 的懒惰分支会在两局之间
+        #    把 `room.quest` 凭空建回来（座位表还是猜的），和「加载期有人退房」
+        #    是同一个坑（见 `room_in_battle` 的注释）。回包本来就是没有的
+        #    （房间里手上一件道具都没有），所以挡掉不改变线上的一个字节。
+        #    实机后果见 V0.3bot §197：下一局的 bot 一动不动也不开枪。
+        room = self.lobby_room()
+        if room is not None and not room_in_battle(room):
+            self.log(f"   座位 {self.my_seat} 在房间里按了「用道具」"
+                     f"（这会儿不在一局里）；一个包都不回")
+            return
         quest = self.quest_state()
         seat_id = self.my_seat
         item_id = quest.use_item(seat_id, slot_index)
@@ -8943,11 +8972,20 @@ class Conn:
             if item_id == TEAM_REFLECT_ITEM_ID:
                 # 全队版：客户端 `UseItemEffect` 把它换成 10303 再对同队
                 # 每个座位来一遍（§194 那段注释里写的就是这条）。
+                # ★ `room.seats` 的空位是 `None`，不是空座位对象 —— 少一道
+                #   判空就是 `AttributeError: 'NoneType' has no attribute
+                #   'conn'`，整发 0x040c 被外层吞掉，护盾根本没记上
+                #   （用户 2026-09-16 21:20 实机：2 人房，剩下 4 个空位，
+                #   V0.3bot §198）。下面 HP 回复剂那一段一开始就是这么写的，
+                #   这里漏了。
                 room = self.lobby_room()
-                mine = room.seats[seat_id].team if room is not None else None
+                mine = (room.seats[seat_id].team
+                        if room is not None and 0 <= seat_id < ROOM_SEAT_COUNT
+                        and room.seats[seat_id] is not None else None)
                 if room is not None and mine:
                     seats = [i for i, s in enumerate(room.seats)
-                             if s.conn is not None and s.team == mine]
+                             if s is not None and s.conn is not None
+                             and s.team == mine]
             for seat in seats:
                 quest.reflect_until[seat] = until
             self.log(f"   反射护盾 座位 {seats} 撑 {REFLECT_SECONDS:g} 秒"
@@ -9806,8 +9844,14 @@ class Conn:
                     room, bot_replies, "全房间都不用加载，直接进 stage 7")
 
         # 真进了关卡（所有人都加载完、一起进 stage 7）之后的收尾。
+        # ★ 闩在**握手**上（`entered_game`），不是「`room.quest` 还是 None」：
+        #   那个只是收尾的副产品，房间里任何一发战斗包都能把它顶掉，
+        #   顶掉了这一整段就再也不跑（见 `RoomStartGame.entered_game`）。
         if (room.battle.state == StartGameHandshake.IN_GAME
-                and room.quest is None):
+                and not room.battle.entered_game):
+            # 闩要**第一件事**就落：下面那条「全房间都不用加载」的递归回到这里
+            # 时，收尾已经做完了，再做一遍就是把刚建好的状态又清一次。
+            room.battle.entered_game = True
             # 这一局的战斗状态重新起一份（上一局的掉落物句柄/死亡表全作废）。
             # ★ 控制者表要按**这一刻在座的座位**算，和客户端
             # `GameContext::StartGame` 同一个口径（§180）——

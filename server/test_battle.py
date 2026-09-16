@@ -1599,6 +1599,41 @@ class ItemUseTests(ItemSlotBase):
         self.assertEqual(1, len(self.quest.item_slots[0]))
 
 
+class TeamItemWithEmptySeatsTests(BattleRoom):
+    """★ 全队版道具（反射护盾 10314 / HP 回复剂 10313）撞上**空座位**。
+
+    `lobby.Room.seats` 的空位是 `None`，不是「一个没人的座位对象」。
+    少一道判空，两人房里剩下的 4 个空位就让 `0x040c` 的处理器抛
+    `AttributeError: 'NoneType' object has no attribute 'conn'` ——
+    外层「单包隔离」把它吞掉，效果广播出去了、护盾却一个字都没记上
+    （用户 2026-09-16 21:20 实机，闯关房 1 人 + 1 bot，V0.3bot §198）。
+
+    闯关房（`session_type=2`）的每个座位都算 A 队 ⇒ 走的正是全队那一支。
+    """
+
+    def use(self, item_id, conn=None, seat_id=0):
+        """把一件道具塞进槽里再按下去 —— 绕开「刷 -> 捡」，直指处理器。"""
+        self.quest.item_slots[seat_id] = [int(item_id)]
+        gameserver.Conn.on_game_packet(conn or self.alice, OP_USE_ITEM,
+                                       w_i32(0))
+
+    def test_the_room_really_has_empty_seats(self):
+        # 这一组的前提：没有空位就测不到那道判空。
+        self.assertIn(None, self.room.seats)
+
+    def test_the_team_reflect_shield_is_recorded_for_the_whole_team(self):
+        self.use(gameserver.TEAM_REFLECT_ITEM_ID)
+        self.assertEqual([0, 1], sorted(self.quest.reflect_until))
+
+    def test_the_team_hp_charge_is_recorded_for_the_whole_team(self):
+        self.use(gameserver.TEAM_HP_CHARGE_ITEM_ID)
+        self.assertEqual([0, 1], sorted(self.quest.hp_charges))
+
+    def test_the_single_seat_shield_only_covers_the_user(self):
+        self.use(gameserver.REFLECT_ITEM_ID, conn=self.bob, seat_id=1)
+        self.assertEqual([1], sorted(self.quest.reflect_until))
+
+
 # ----------------------------------------------------------------------------
 # 道具效果**结束**：`0x040d`（§200）
 #
@@ -3495,6 +3530,57 @@ class RoomLifecycleTests(BattleRoom):
         handle = struct.unpack_from(
             "<I", bodies(self.alice, OP_CREATED_ITEM)[0], 0)[0]
         self.assertEqual(ITEM_HANDLE_BASE, handle)
+
+    # -- 「进图收尾」这一段必须每局都跑（bot 的帧全指着它）--------------------
+    def back_to_the_room(self):
+        """打完一局、结算也看完，人回到房间界面。"""
+        gameserver.Conn.on_game_packet(self.alice, OP_END_QUEST, b"")
+        for conn in (self.alice, self.bob):
+            gameserver.Conn.leave_game_result(conn)
+        self.clear()
+
+    def loop_running(self):
+        loop = gameserver.room_loop(self.room, create=False)
+        return loop is not None and loop.running()
+
+    def test_pressing_ctrl_in_the_room_does_not_freeze_the_next_round(self):
+        """★★ 回归（用户 2026-09-16 第三局：bot 一动不动、也不开枪）。
+
+        Ctrl 的键位是全局的 —— 人在**房间界面**按一下，客户端照样发
+        `0x040c`。以前那一发会把 `quest_state()` 的懒惰分支踩出来，
+        把 `room.quest` 凭空建回来；下一局的「进图收尾」是拿
+        「`room.quest` 还是 None」当判据的，于是整段被跳过：
+        32 ms 循环不起步（bot 的帧全靠它走）、`0x0410` 不重发、
+        bot 座位那几格控制权不交接（V0.3bot §197）。
+        """
+        self.back_to_the_room()
+        gameserver.Conn.on_game_packet(self.alice, OP_USE_ITEM, w_i32(0))
+        self.assertIsNone(self.room.quest,
+                          "房间里按 Ctrl 不该建出一份战斗状态")
+        self.assertEqual([], opcodes(self.alice), "房间里按 Ctrl 一个包都不回")
+        self.start_battle()
+        self.assertTrue(self.loop_running(),
+                        "32 ms 循环没起步 = bot 一帧都不会动")
+
+    def test_a_leftover_quest_does_not_skip_the_new_rounds_setup(self):
+        """★ 收尾闩在**握手**上，不在 `room.quest` 上。
+
+        别的包再把那份状态顶回来（`quest_state()` 的懒惰分支到处都是），
+        新一局照样要重建战斗状态、照样要起循环。
+        """
+        self.back_to_the_room()
+        stale = gameserver.new_room_quest(self.room, [0])
+        self.room.quest = stale
+        self.start_battle()
+        self.assertTrue(self.loop_running(),
+                        "32 ms 循环没起步 = bot 一帧都不会动")
+        self.assertIsNot(stale, self.room.quest, "新一局必须重建战斗状态")
+
+    def test_the_settlement_puts_the_latch_back(self):
+        """闩跟着握手一起复位，不然第二局反而不做收尾了。"""
+        self.assertTrue(self.room.battle.entered_game)
+        self.back_to_the_room()
+        self.assertFalse(self.room.battle.entered_game)
 
 
 # ----------------------------------------------------------------------------
