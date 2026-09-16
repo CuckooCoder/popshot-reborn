@@ -4,7 +4,7 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@jab.ogg</ResourcePath>
+    <ResourcePath>ch100@jab.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>RenderEffect</Type>

@@ -4,7 +4,7 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Martial03.ogg</ResourcePath>
+    <ResourcePath>ch100@Martial03.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>

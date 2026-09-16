@@ -46,7 +46,7 @@
 左手那个 `_L_FirePoint` 根本不用。步枪的枪口在哪，`Bone_Wp01_R_FirePoint` 就得挪到哪，
 否则枪火 / 弹道线从空气里冒出来。补丁对 86 个文件一起打，树保持一致。
 
-## 事件文件（`EVN_FROM_SRC` / `EVN_EFX_REMAP`）
+## 事件文件（`EVN_FROM_SRC` / `EVN_RES_REMAP`）
 
 动作换了，挂在动作上的音效 / 特效也得跟着换：
 
@@ -55,6 +55,11 @@
   `CH03_DashAttack00.efx`（挂 `Bip01_R_Hand`，花瓣）和 `CH03_DashDust00.efx`（铁律 12）；
   而克隆来的 CH01 版挂在 **`Bone_Wp00_11`** —— 卡希尔那只熊身上的骨，爱琳没有熊，
   特效就从空气里冒出来。音效两条（`ch01@dash_.ogg` / `ch01@Dash.ogg`）是通用风声，留着。
+- 音效同走 `EVN_RES_REMAP`（`PlaySound` 的路径相对 `Sounds/`）。目前只改了 3 号武器的换弹。
+
+⚠ **爱琳一个自带音都没有**（§24）：她的 `.evn` 里 83 处音频引用有 **80 处是卡希尔的** ——
+连受击闷哼、格斗吆喝（`ch01@Voice01..03`）、跑步脚步声都是。这里只挑用户实机点名的换掉，
+**没做全面替换** —— 换成谁是口味问题，得用户拍板（PROGRESS「下一步」里记着）。
 """
 from __future__ import annotations
 
@@ -78,6 +83,7 @@ CH01 = os.path.join(CHARS, "ch01")
 CH03 = os.path.join(CHARS, "ch03")
 CH102 = os.path.join(CHARS, "ch102")
 EFFECTS = os.path.join(ROOT, "game_patched", "Pack_develop", "Effects")
+SOUNDS = os.path.join(ROOT, "game_patched", "Pack_develop", "Sounds")
 TPF = mtntool.TICKS_PER_FRAME
 
 
@@ -136,15 +142,17 @@ STATIC_PATCHES = {}
 # 事件文件：换弹动作换成瓦尔基里的（她那份只在第 21 帧响一次拉栓声，卡希尔的是双枪两次上膛）
 EVN_FROM_SRC = {"Reload01": "Reload01"}
 
-#: 事件文件里的特效改指：母本 ch01 的路径 -> 换成谁。**对全部 61 个 `.evn` 生效**，
-#: 在母本上做字符串替换后写进 ch03（幂等，母本只读）。只许改成**磁盘上真实存在**的文件，
-#: main() 会逐条核对；改完 `mkchar --audit` 第 ⑤ 条（死引用不许变多）会再兜一道。
+#: 事件文件里的资源改指：母本 ch01 的 `<ResourcePath>` -> 换成谁。**对全部 61 个 `.evn` 生效**，
+#: 在母本上按 `<ResourcePath>整段</ResourcePath>` 替换后写进 ch03（幂等，母本只读）。
+#: 两类都走这里：`RenderEffect` 的路径相对 `Effects/`，`PlaySound` 的相对 `Sounds/`。
+#: 只许改成**磁盘上真实存在**的文件，main() 会逐条核对；
+#: 改完 `mkchar --audit` 第 ⑤ 条（死引用不许变多）会再兜一道。
 #:
-#: 名单是这么来的：把母本 61 个 `.evn` 引用的 24 个特效逐个去 `Effects/` 里找 CH03 版，
+#: 特效那批是这么来的：把母本 61 个 `.evn` 引用的 24 个特效逐个去 `Effects/` 里找 CH03 版，
 #: **有就换，没有就留着**。没有 CH03 版的是 `Jab00` / `DashAttack01..05` / `Dash04` / `Dash-B04`
 #: （原版就没给爱琳画），只能继续用卡希尔的。
 #: ⚠ `CH01_MutuDust` 的 CH03 版多个 `00` 后缀，不是机械替换串能对上的。
-EVN_EFX_REMAP = {
+EVN_RES_REMAP = {
     # 冲刺攻击 + 格斗：CH01 版里有 8 个挂在 `Bone_Wp00_04` / `Bone_Wp00_11` ——
     # 卡希尔那只泰迪熊身上的骨。爱琳没有熊，特效就从身侧的空气里冒出来。
     # CH03 版挂的是 `Bip01_R_Hand` / `Bip01_R_Toe0` 这些她自己身上的骨。
@@ -165,7 +173,56 @@ EVN_EFX_REMAP = {
     "Emotion/Efx/CH01_Cry00.efx": "Emotion/Efx/CH03_Cry00.efx",
     "Emotion/Efx/CH01_ILoveYou00.efx": "Emotion/Efx/CH03_ILoveYou00.efx",
     "Emotion/Efx/CH01_Shit00.efx": "Emotion/Efx/CH03_Shit00.efx",
+    # ★ 音效。爱琳**一个自带的武器 / 体感音都没有**（§24），这里只能挑「不像卡希尔」的顶上。
+    #   3 号武器换弹（`Reload03`，用户 2026-09-16 实机：「换弹匣的音效还是卡希尔的」）：
+    #   母本用 `ch01@Reload03.ogg` —— 0.58 s、质心 4342 Hz、49% 能量在 4 kHz 以上，
+    #   是宝箱炮的金属搭扣声，和她那把抛药水的对不上，而且卡希尔就在旁边打。
+    #   换成 `Water-Load.ogg`：**原版发了却一个地方都没引用的音**（ini / evn / efx / exe 全搜过），
+    #   而且和 1 / 2 号那条线一致 —— 3 号的发射音用的也是没人用的 `weapon@watergun.ogg`。
+    #   0.82 s、质心 2016 Hz、高频只占 15%，是一声低而柔的「灌进去」，正对 포션（药水）。
+    #   ⚠ `Water-Fire` / `Water-Spawn` **有人用**（weapon.ini / exe），别顺手拿；只有 Load 和 Hit 是闲着的。
+    "ch01@Reload03.ogg": "Water-Load.ogg",
+    # ★★ 嗓音 / 体感音整体换给 **ch100 앨리어스（艾丽亚丝）**（用户 2026-09-16 拍板「按结构角色逐条挑」）。
+    #    为什么是她，判据是**选人语音的基频**（`Sounds/CharacterChanger/ChNNN.ogg` 是各角色念自己的名字，
+    #    10 个角色测出来 146~459 Hz 各不相同 ⇒ 确实是本人的声线，不是旁白）：
+    #        爱琳自己 ch003 = **324 Hz**（134 个有声帧，全表最稳的一条）
+    #        卡希尔 459（全表最高，难怪一听就出戏）／泰尔 329／프로코 286
+    #        **앨리어스 269**／진 242（男）／발키리 216
+    #    ⇒ 在「有整套嗓音 + 体感音、且**不是基础角色**」的三个（ch100 / ch101 / ch102）里，
+    #      앨리어스离爱琳的 324 最近，而且是女角。基础角色 ch00/ch02 音更近但**天天同屏**，
+    #      换过去等于把「像卡希尔」换成「像泰尔」，白改（§24）。
+    #    ⇒ 一个人一套声线：受击 / 吆喝 / 脚步 / 蹲行 / 拳脚全取她，别东拼西凑。
+    "ch01@Damage.ogg": "ch100@Damage.ogg",                      # 大伤 + 格斗被打的闷哼 ×4
+    "ch01@Voice01.ogg": "ch100@Voice01.ogg",                    # 格斗发力吆喝 ×2
+    "ch01@Voice02.ogg": "ch100@Voice02.ogg",                    # 同上 ×2
+    "ch01@Voice03.ogg": "ch100@Voice03.ogg",                    # 被打飞时的叫声
+    "ch01@MutuDamaged.ogg": "ch100@MutuDamaged.ogg",            # 格斗受击
+    "ch01@MutuDamagedFly.ogg": "ch100@MutuDamagedFly.ogg",      # 格斗被打飞
+    "ch01@Mutu-GuardDamaged.ogg": "ch100@Mutu-GuardDamaged.ogg",  # 格挡住的闷响
+    "ch01@Run-L.ogg": "ch100@Run-L.ogg",                        # 跑步脚步（左）×3
+    "ch01@Run-R.ogg": "ch100@Run-R.ogg",                        # 跑步脚步（右）×3
+    "ch01@Crouch-L.ogg": "ch100@Crouch-L.ogg",                  # 蹲行（左）
+    "ch01@Crouch-R.ogg": "ch100@Crouch-R.ogg",                  # 蹲行（右）
+    "ch01@jab.ogg": "ch100@jab.ogg",                            # 普通近身一击
+    "ch01@MutuStand-P02.ogg": "ch100@MutuStand-P02.ogg",        # 格斗拳脚命中（母本复用在 5 个动作上）
+    "ch01@MutuStand-K00-1.ogg": "ch100@MutuStand-K00-1.ogg",    # 强踢
+    "ch01@Dash.ogg": "ch100@dash.ogg",                          # 冲刺（★ 盘上是小写 dash，evn 里写的是大写）
+    "ch01@dash_.ogg": "ch100@dash_.ogg",                        # 冲刺起手
+    "ch01@Martial03.ogg": "ch100@Martial03.ogg",                # 3 号武器冲刺的武打音
 }
+
+#: 母本里**没有对等件可换**的音，故意留着卡希尔的 —— 全游戏只有 ch01 有这些文件。
+#: 记在这里是为了让下一个会话别再查一遍（都是打击 / 风声层，不是嗓音）：
+#:   `MutuStand-P01-2/3/4`（蹲攻的叠加打击层）、`MutuJump-P01`（跳攻）、`Martial04`（Dash02 武打音）、
+#:   `Dash03_01/02/03_frame_*`（3 号武器冲刺的三段风声）
+#: 另有三个**永远不会响**的：`dash05` / `Dash04_01` / `Dash-B04_01` —— 那是 4 / 5 号武器的冲刺，
+#: 爱琳的 `weapon.ini` 只定义了 01/02/03。
+UNMATCHED = (
+    "ch01@MutuStand-P01-2.ogg", "ch01@MutuStand-P01-3.ogg", "ch01@MutuStand-P01-4.ogg",
+    "ch01@MutuStand-P03.ogg", "ch01@MutuJump-P01.ogg", "ch01@Martial04.ogg",
+    "ch01@Dash03_01_frame_07.ogg", "ch01@Dash03_02_frame_11.ogg", "ch01@Dash03_03_frame_16.ogg",
+    "ch01@dash05.ogg", "ch01@Dash04_01_frame_01.ogg", "ch01@Dash-B04_01_frame_01.ogg",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +401,24 @@ def patch_static(m, patches):
     return changed
 
 
+def audit_leftover_ch01():
+    """扫 ch03 落盘后的 `.evn`，列出还指着卡希尔、**而且文件真的存在**的音。
+
+    死引用不算（`FX/char/KR/voice/ch01_Casil/…` 那批原版就没发过，本来就不响，§4）。
+    返回排序后的文件名列表，给 main() 和 `UNMATCHED` 对账。
+    """
+    import re
+    left = set()
+    for p in glob.glob(os.path.join(CH03, "*.evn")):
+        text = open(p, "rb").read().decode("cp949", "replace")
+        for res in re.findall(r"<ResourcePath>([^<]+)</ResourcePath>", text):
+            if not re.search(r"(?i)ch01", res):
+                continue
+            if os.path.exists(os.path.join(SOUNDS, res.replace("/", os.sep))):
+                left.add(res)
+    return sorted(left)
+
+
 def _write_if_changed(path, blob):
     if os.path.exists(path) and open(path, "rb").read() == blob:
         return False
@@ -418,29 +493,38 @@ def main(argv=None):
         blob = open(src, "rb").read()
         if not args.dry_run and _write_if_changed(dst, blob):
             print("ch03@%s.evn <- ch102@%s.evn" % (clip, src_clip))
-    # 事件文件 ②：在母本 ch01 那份上把特效路径改指爱琳自己的（幂等，母本只读）
-    for new in EVN_EFX_REMAP.values():
-        assert os.path.exists(os.path.join(EFFECTS, *new.split("/"))), "改指的特效不存在：%s" % new
-    unused = set(EVN_EFX_REMAP)
+    # 事件文件 ②：在母本 ch01 那份上把资源路径改指（幂等，母本只读）
+    for new in EVN_RES_REMAP.values():
+        assert any(os.path.exists(os.path.join(root, *new.split("/"))) for root in (EFFECTS, SOUNDS)), \
+            "改指的资源在 Effects/ 和 Sounds/ 里都找不到：%s" % new
+    tag = "<ResourcePath>%s</ResourcePath>"
+    unused = set(EVN_RES_REMAP)
     n_evn = 0
     for path in sorted(glob.glob(os.path.join(CH01, "*.evn"))):
         base = os.path.basename(path)
         if base.split("@", 1)[1][:-4] in EVN_FROM_SRC:   # 整份换掉的那几个不要再改
             continue
         blob = open(path, "rb").read()
-        hits = [old for old in EVN_EFX_REMAP if old.encode("ascii") in blob]
+        # ★ 整段 `<ResourcePath>…</ResourcePath>` 匹配，不是裸串 —— 免得 `ch01@Dash.ogg`
+        #   把 `ch01@Dash_voice_01.ogg` 之类的前缀顺手改掉
+        hits = [old for old in EVN_RES_REMAP if (tag % old).encode("ascii") in blob]
         if not hits:
             continue
         unused -= set(hits)
         for old in hits:
-            blob = blob.replace(old.encode("ascii"), EVN_EFX_REMAP[old].encode("ascii"))
+            blob = blob.replace((tag % old).encode("ascii"), (tag % EVN_RES_REMAP[old]).encode("ascii"))
         out = os.path.join(CH03, base[:2] + "03" + base[4:])   # 大小写照母本（`Ch01@Dash02.evn`）
         n_evn += 1
         if not args.dry_run and _write_if_changed(out, blob):
-            print("%-22s 特效改指爱琳自己的 %d 条" % (os.path.basename(out), len(hits)))
-    assert not unused, "EVN_EFX_REMAP 里这几条在母本里根本没出现，名单该清了：%s" % sorted(unused)
-    print("事件文件：%d 个 `.evn` 里的特效改指了爱琳自己的（%d 条映射全部命中）"
-          % (n_evn, len(EVN_EFX_REMAP)))
+            print("%-22s 资源改指 %d 条：%s" % (os.path.basename(out), len(hits),
+                                               ", ".join(EVN_RES_REMAP[h] for h in hits)))
+    assert not unused, "EVN_RES_REMAP 里这几条在母本里根本没出现，名单该清了：%s" % sorted(unused)
+    print("事件文件：%d 个 `.evn` 改了指向（%d 条映射全部命中）" % (n_evn, len(EVN_RES_REMAP)))
+    left = audit_leftover_ch01()
+    assert left == sorted(UNMATCHED), (
+        "ch03 的 .evn 里剩下的卡希尔音和 UNMATCHED 对不上，名单该更新了：\n  多出来 %s\n  少了 %s"
+        % (sorted(set(left) - set(UNMATCHED)), sorted(set(UNMATCHED) - set(left))))
+    print("           剩 %d 个卡希尔的音没换（全游戏只有 ch01 有对等件，见 UNMATCHED）" % len(left))
     print("写出 %d 个文件%s" % (n_written, "（dry-run）" if args.dry_run else ""))
 
     # 自检：打完补丁的树里，FirePoint 在参考姿势下必须正好落在设计的枪口点上

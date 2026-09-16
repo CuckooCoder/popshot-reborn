@@ -4,7 +4,7 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>2</StartTick>
-    <ResourcePath>ch01@MutuStand-P02.ogg</ResourcePath>
+    <ResourcePath>ch100@MutuStand-P02.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>RenderEffect</Type>

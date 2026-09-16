@@ -4,6 +4,6 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Mutu-GuardDamaged.ogg</ResourcePath>
+    <ResourcePath>ch100@Mutu-GuardDamaged.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

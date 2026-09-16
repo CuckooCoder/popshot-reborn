@@ -4,12 +4,12 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@MutuDamaged.ogg</ResourcePath>
+    <ResourcePath>ch100@MutuDamaged.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Damage.ogg</ResourcePath>
+    <ResourcePath>ch100@Damage.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

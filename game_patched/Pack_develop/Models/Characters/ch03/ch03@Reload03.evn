@@ -4,6 +4,6 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>19</StartTick>
-    <ResourcePath>ch01@Reload03.ogg</ResourcePath>
+    <ResourcePath>Water-Load.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

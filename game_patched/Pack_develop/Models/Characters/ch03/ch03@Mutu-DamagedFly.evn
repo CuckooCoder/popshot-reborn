@@ -4,13 +4,13 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@MutuDamagedFly.ogg</ResourcePath>
+    <ResourcePath>ch100@MutuDamagedFly.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Damage.ogg</ResourcePath>
+    <ResourcePath>ch100@Damage.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
@@ -22,6 +22,6 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Voice03.ogg</ResourcePath>
+    <ResourcePath>ch100@Voice03.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

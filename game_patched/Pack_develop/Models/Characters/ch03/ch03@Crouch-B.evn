@@ -4,12 +4,12 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>2</StartTick>
-    <ResourcePath>ch01@Crouch-L.ogg</ResourcePath>
+    <ResourcePath>ch100@Crouch-L.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>11</StartTick>
-    <ResourcePath>ch01@Crouch-R.ogg</ResourcePath>
+    <ResourcePath>ch100@Crouch-R.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

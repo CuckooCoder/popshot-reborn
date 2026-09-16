@@ -4,13 +4,13 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@dash_.ogg</ResourcePath>
+    <ResourcePath>ch100@dash_.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>5</StartTick>
-    <ResourcePath>ch01@Dash.ogg</ResourcePath>
+    <ResourcePath>ch100@dash.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>

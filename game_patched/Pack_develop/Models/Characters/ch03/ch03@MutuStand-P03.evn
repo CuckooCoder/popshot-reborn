@@ -10,7 +10,7 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Voice01.ogg</ResourcePath>
+    <ResourcePath>ch100@Voice01.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>RenderEffect</Type>

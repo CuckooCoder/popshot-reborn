@@ -4,13 +4,13 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>10</StartTick>
-    <ResourcePath>ch01@MutuStand-P02.ogg</ResourcePath>
+    <ResourcePath>ch100@MutuStand-P02.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>10</StartTick>
-    <ResourcePath>ch01@Voice01.ogg</ResourcePath>
+    <ResourcePath>ch100@Voice01.ogg</ResourcePath>
   </Event>
   <Event>
     <Type>RenderEffect</Type>

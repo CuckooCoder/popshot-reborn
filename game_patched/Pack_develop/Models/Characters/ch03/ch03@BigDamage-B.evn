@@ -4,6 +4,6 @@
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
     <StartTick>1</StartTick>
-    <ResourcePath>ch01@Damage.ogg</ResourcePath>
+    <ResourcePath>ch100@Damage.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>
