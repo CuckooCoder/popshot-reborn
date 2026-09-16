@@ -905,7 +905,11 @@ class ItemDescTests(unittest.TestCase):
                          shopcfg.item_desc_zh(shopdata.get(560004)))
         # ★ 「45」是**伤害点数**不是开枪次数（`0x50b404 sub eax,ecx` 扣的是
         #   翻倍后的伤害值），文案里必须写清楚，用户 2026-09-09 就问岔过一次。
-        self.assertEqual("开局起伤害翻倍，累计造成 45 点伤害后失效",
+        # ★ 「或击倒 1 人」是第二个结束条件（`0x500951 → 0x506e8c` 里
+        #   `0x50b31c(击杀者, 0)`），2026-09-16 补上 —— 别当成啰嗦删掉。
+        #   同一天查穿了**没有时间限制**（有人反馈「18 秒就没了」是误判：
+        #   40 条实机 `0x0415` 距开局 2.2~112 秒、中位 5.4 秒）。
+        self.assertEqual("开局起伤害翻倍，累计造成 45 点伤害或击倒 1 人后失效",
                          shopcfg.item_desc_zh(shopdata.get(560005)))
         self.assertEqual("捡到「心」时 15% 概率让全队各回 5 点生命",
                          shopcfg.item_desc_zh(shopdata.get(560006)))
