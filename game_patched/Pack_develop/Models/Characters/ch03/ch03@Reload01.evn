@@ -3,13 +3,7 @@
   <Event>
     <Type>PlaySound</Type>
     <TypeIdx>0</TypeIdx>
-    <StartTick>11</StartTick>
-    <ResourcePath>ch01@Reload.ogg</ResourcePath>
-  </Event>
-  <Event>
-    <Type>PlaySound</Type>
-    <TypeIdx>0</TypeIdx>
-    <StartTick>25</StartTick>
-    <ResourcePath>ch01@Reload.ogg</ResourcePath>
+    <StartTick>21</StartTick>
+    <ResourcePath>ch102@Reload.ogg</ResourcePath>
   </Event>
 </ArrayOfEvent>

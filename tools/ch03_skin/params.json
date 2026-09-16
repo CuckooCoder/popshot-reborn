@@ -1,0 +1,87 @@
+{
+  "_doc": "爱琳（ch03）默认贴图重着色参数。规则语法见 recolor.py 开头。配色依据：refs/irene-concept.png + BigChrIcons.png 帧 27。",
+
+  "textures": {
+    "ch0300000":      ["hair_cool"],
+    "ch03H0000*":     ["iris"],
+    "ch03B0000":      ["dress_pink", "trim_magenta", "ribbon_magenta"],
+    "ch03L0000":      ["bloomer_cream"],
+    "ch03G0000":      ["sleeve_petal", "glove_petal", "glove_stripe"],
+    "ch03S0000":      ["boot_pink", "sole_magenta", "boot_trim_leaf"]
+  },
+
+  "rules": {
+    "hair_cool": {
+      "_": "头发本来就是白的，只把阴影往冷灰/淡紫推一点，贴近原画的银白",
+      "mask": {},
+      "op": {"hue": 232, "sat_by_val": [0.02, 0.16], "val_range": [0.55, 1.0]}
+    },
+
+    "iris": {
+      "_": "金瞳 -> 浅灰绿。只抓高饱和的金色；睫毛/眉毛（暗）和皮肤（低饱和）不碰。128×128 里两行耳朵（y 40~64 / 104~128）的内耳阴影也是橙色，用 rect_out 排除",
+      "mask": {"h": [26, 58], "h_soft": 5, "s": [0.6, 1.0], "s_soft": 0.1, "v": [0.5, 1.0], "v_soft": 0.06,
+               "rect_out": [[0, 40, 128, 64], [0, 104, 128, 128]]},
+      "op": {"hue_by_val": [140, 155], "sat_by_val": [0.16, 0.42], "val_by_val": [0.9, 0.45], "val_range": [0.55, 1.0]}
+    },
+
+    "dress_pink": {
+      "_": "白布 -> 淡粉偏白，阴影处更粉（花瓣感）。blur=1 抹平抖动纹；只在裙/身骨骼画到的纹素上做，手臂和脖子的皮肤不碰",
+      "mask": {"blur": 1, "zone": {"bones": ["Skirt", "Spine", "Pelvis", "Breast"], "grow": 1},
+               "s": [0.0, 0.16], "s_soft": 0.08, "v": [0.55, 1.0], "v_soft": 0.1},
+      "op": {"hue": 338, "sat_by_val": [0.10, 0.34], "val_range": [0.65, 1.0]}
+    },
+    "trim_magenta": {
+      "_": "棕色腰带/滚边 -> 深洋红 #C2117A 一带。同样只在裙/身分区里做，手臂上的阴影线不碰",
+      "mask": {"zone": {"bones": ["Skirt", "Spine", "Pelvis", "Breast"], "grow": 1},
+               "h": [10, 48], "h_soft": 5, "s": [0.3, 1.0], "s_soft": 0.08, "v": [0.25, 0.8], "v_soft": 0.06},
+      "op": {"hue": 328, "sat_by_val": [0.8, 0.9], "val_by_val": [0.78, 0.5], "val_range": [0.3, 0.8]}
+    },
+    "ribbon_magenta": {
+      "_": "领口黑蝴蝶结 -> 深洋红",
+      "mask": {"s": [0.0, 0.5], "v": [0.0, 0.32], "v_soft": 0.08},
+      "op": {"hue": 328, "sat": 0.85, "val_by_val": [0.62, 0.35]}
+    },
+
+    "bloomer_cream": {
+      "_": "灯笼裤白布 -> 淡粉米色。只在骨盆分区里做",
+      "mask": {"blur": 1, "zone": {"bones": ["Pelvis", "Spine"], "grow": 1},
+               "s": [0.0, 0.15], "s_soft": 0.08, "v": [0.6, 1.0], "v_soft": 0.1},
+      "op": {"hue": 345, "sat_by_val": [0.08, 0.25], "val_range": [0.75, 1.0]}
+    },
+
+    "sleeve_petal": {
+      "_": "前臂分区（卡希尔的米色护腕）整个 -> 品红花瓣袖（亮处玫红，暗处深洋红）。★ 这张图里皮肤和布的色相只差 5 度还抖动过，颜色分不开，靠骨骼分区一刀切：Forearm 全收，只留下深色条纹给下一条规则",
+      "mask": {"blur": 1, "zone": {"bones": ["Forearm"], "grow": 1},
+               "s": [0.0, 0.45], "s_soft": 0.06, "v": [0.5, 1.0], "v_soft": 0.1},
+      "op": {"hue_by_val": [335, 322], "sat_by_val": [0.62, 0.9], "val_by_val": [0.93, 0.62], "val_range": [0.75, 1.0]}
+    },
+    "glove_petal": {
+      "_": "手背那块白/米白布 -> 同样的品红；手掌皮肤（饱和度更高）和手指分区不碰",
+      "mask": {"blur": 1, "zone": {"bones": ["Hand"], "grow": 1},
+               "s": [0.0, 0.16], "s_soft": 0.06, "v": [0.6, 1.0], "v_soft": 0.1},
+      "op": {"hue_by_val": [335, 322], "sat_by_val": [0.62, 0.9], "val_by_val": [0.93, 0.62], "val_range": [0.75, 1.0]}
+    },
+    "glove_stripe": {
+      "_": "护腕上的褐色条纹和手背椭圆的描边 -> 淡粉（花瓣脉络）。饱和度 >= 0.5 才算条纹，皮肤 <= 0.45",
+      "mask": {"zone": {"bones": ["Forearm", "Hand"], "grow": 1},
+               "h": [10, 48], "h_soft": 5, "s": [0.5, 1.0], "s_soft": 0.05, "v": [0.3, 1.0], "v_soft": 0.06},
+      "op": {"hue": 340, "sat_by_val": [0.25, 0.5], "val_by_val": [0.97, 0.75]}
+    },
+
+    "boot_pink": {
+      "_": "靴筒白布 -> 淡粉（和裙子同调）",
+      "mask": {"blur": 1, "s": [0.0, 0.16], "s_soft": 0.08, "v": [0.55, 1.0], "v_soft": 0.1},
+      "op": {"hue": 338, "sat_by_val": [0.10, 0.40], "val_range": [0.7, 1.0]}
+    },
+    "sole_magenta": {
+      "_": "深棕鞋底 -> 深洋红",
+      "mask": {"h": [10, 48], "h_soft": 5, "s": [0.3, 1.0], "s_soft": 0.08, "v": [0.05, 0.55], "v_soft": 0.06},
+      "op": {"hue": 328, "sat_by_val": [0.85, 0.9], "val_by_val": [0.6, 0.28], "val_range": [0.1, 0.55]}
+    },
+    "boot_trim_leaf": {
+      "_": "靴口/鞋面的浅棕滚边 -> 黄绿叶片 #C8E06A",
+      "mask": {"h": [10, 48], "h_soft": 5, "s": [0.3, 1.0], "s_soft": 0.08, "v": [0.6, 1.0], "v_soft": 0.06},
+      "op": {"hue": 78, "sat_by_val": [0.5, 0.7], "val_by_val": [0.9, 0.7]}
+    }
+  }
+}

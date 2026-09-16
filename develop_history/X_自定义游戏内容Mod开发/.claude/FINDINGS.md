@@ -96,6 +96,10 @@ Def9 Speed7.5、Jab00、Dash00~05、三个碰撞圆）；`Data/Chinese.ini` 有 
 缺的只有 3D 件 —— 因为 3D 件本来就都住在缺失的 `Models/Characters/ch03/` 里。
 **手持武器网格** `chNNW%04d.msh`（由 `WAnimIdx`/`WMeshIdx` 选）同理，三把全是克隆的。
 
+⚠ 别把目录里的 `D` 件当成「这个角色实机发射的东西」：`[ch01-03]` 캐논왈츠 用的是 2D 精灵 `Anim,CH01_WP3`（火箭弹），
+`ch01D0003.msh` 那个宝箱在 `weapon.ini` 里**没有任何引用**，只是 `ch03D0003A` 抄头 / 骨骼 offset 用的模板。
+全表里 `Model,` 引用的 `D` 件只有 `D0002`（各角色的投掷物）、ch00/ch01 的 `D0x12/D0x22/D0x32` 系列，以及爱琳的 `D0003A`（2026-09-16 核对）。
+
 ## §5 ★★★ 韩版 `ShopItem.ini` 里有爱琳整套 25 件衣柜，中文版没抄（🔍静态）
 
 `Data/ShopItem.ini`（韩版原文件）有 `[Item-4010001]` … `[Item-4110037]` 共 25 件，
@@ -312,4 +316,39 @@ Bip01_Spine / Spine1 / Spine2 / Neck / Head / Pelvis
 - **弹体 `D*` 的骨 `Bone_C01W02_01` / `Bone_C01W03_01` 不在角色骨架里**：offset 是单位阵、原点在物体中心，是弹体对象自己的帧
   （`Models/Items/` 的 Coin / Heart / Candy 也都原点居中）。名字从卡希尔继承，原版 ch01 37 个武器网格全这样 —— **别改名**。
 - 骨骼名只能用母本文件里已有的**子集**、offset 逐字节抄；少几根没关系（W0002 原件本来就只有 1 根）。
-- 动作是卡希尔的：`Attack01` 双手举枪 ⇒ 트릭스터做成**左右各一把**；`Attack02` 投掷、`Attack03` 发射，姿势见 `compare_E_inhand.png`。
+- ~~动作是卡希尔的：`Attack01` 双手举枪 ⇒ 트릭스터做成左右各一把~~ **2026-09-16 已推翻**：图标只有一把枪，
+  持枪动作改从瓦尔基里移植（§20、D9），步枪只绑 `Bone_Wp01_R02`；`Attack02` 投掷、`Attack03` 发射仍是卡希尔的。
+
+## §19 ★★★★ 武器动作名和枪口点都是**按名字**拼出来的，静态骨也可能被个别动作的轨道顶掉（🔍静态 + ✅离线）
+
+- 动作名模板（`0x6858e0` 一带）：`Stand%02d` / `Attack%02d` / `Attack%02da` / `Reload%02d` / `Run-F%02d` /
+  `Run-B%02d` / `Dash%02d` / `Dash-B%02d`，N = `weapon.ini` 的 `WAnimIdx`；Jump / Crouch / Damage 不分武器。
+  ⇒ **持第 N 把武器的站姿是 `StandN`，不是 `Stand00`**（上一轮对照图全渲的 Stand00，看的不是实机姿势）。
+- 枪口点 `0x506b74`：`sprintf("Bone_wp%02d_firepoint")` 在骨架树里找（不分大小写），找不到再找
+  `Bone_wp%02d_R_firepoint` → `[obj+0x3d4]`；BarrelPoint 同款（`Bone_Wp%02d_BarrelPoint` → `_R_BarrelPoint`）→ `[obj+0x3d8]`。
+  ⇒ **只用一个枪口点**；ch01/ch03 骨架里只有 `_R_` 版本，`Bone_Wp01_L_FirePoint` 没有任何代码引用。
+- `Bone_Rweapon01` / `Bone_Lweapon01` / `Bip01_R_Clavicle` 也在 `0x4fbaa2..` 被按名字查出来存起来，树里必须有。
+- 武器骨链是**手骨的静态子骨**：`Bip01_R_Hand > Dummy01 > Bone_Rweapon01 > Bone_Wp01_R01 > R02 > R_BarrelPoint > R03 > R_FirePoint`；
+  `Bone_Wp02_*` 和 `Bone_Wp03_*`（经 `Dummy03`）也都挂在 `Bone_Rweapon01` 下。瓦尔基里（ch102）的步枪反而挂在
+  **左前臂**：`Bip01_L_Forearm > Dummy01 > Bone_Wp01_BarrelPoint > 01 > 02 > FirePoint`。
+- ⚠ 「静态骨」只是树里没轨道的默认；母本个别动作会给它们轨道：`Attack03` / `Idle103` 让 `Bone_Wp03_BarrelPoint` 后坐
+  （宝箱炮的炮管），`Reload01` / `Idle101` 让 `Bone_Wp01_R02` 翻转（换弹甩枪），`Bone_Rweapon01` 在 Attack02 / 表情动作里有轨道。
+  **改静态骨位置必须把这些轨道一起删**（`anim.py` 的 `patch_static` 会做），否则那个动作一播就被顶回去。
+- 枪口点补丁做法：`rig.py` 在参考姿势的世界坐标里定枪口，算出 `*_BarrelPoint / *_03 / *_FirePoint` 三根的新局部矩阵
+  （x 轴沿枪身），打进全部 86 个 `.mtn`（树保持一致）；自检：补丁后参考姿势下 FirePoint 世界坐标 = 设计枪口，误差 0.000。
+
+## §20 ★★★★★ 跨角色移植动作 = **抄旋转、不抄文件**（✅离线复现，⏳等实机）
+
+- ch102 骨架 169 节点 vs ch03 229。直接拷她的 `.mtn`：① 爱琳网格引用的头发 / 裙摆 / 胸 / 尾巴骨在她树里不存在
+  ⇒ 按名字查骨返 NULL 喂进矩阵乘直接崩（V0.3商店 §50）；② 平移键带着她的骨长（DisplayHeight 90 vs 75），手臂会被拉长。
+- 两边共同部分都是 3ds Max Biped 标准命名（`Bip01_*`），局部旋转约定一致 ⇒ **上半身 31 根骨只抄旋转**
+  （按时长重采样到 120 tick 一帧、四元数邻键符号对齐后 nlerp），平移 / 缩放 / 下半身 / 头发裙摆全留爱琳自己的
+  ⇒ 姿势过来了、身材不变。渲出来右手在胸前、左手托枪前段，和她的 Stand01 / Reload01 / Run-F01 一致。
+- 时长：Stand01 / Reload01 两边本来相等；Run-F01 / Run-B01 取爱琳 0.667 s（跑步循环和 `ChrSpeed` 配套，ch102 的 0.8 s 重采样）；
+  Attack01 取 ch102 的 **0.1 s**（步枪后坐，对应 `CoolingTime=90`；卡希尔 0.667 s 是双枪轮射）；Idle101 取 ch102 的 2.667 s，
+  爱琳自己的轨道按原 1.667 s 循环铺满。
+- **Attack0N 只含上半身轨道**（无 Bip01 / Pelvis / Spine / 腿，两个角色都这样）⇒ 引擎把它叠在当前下半身动作上。
+- `mtntool.write()`：16 个角色目录 1343 个 `.mtn` 逐字节 round-trip；`mkchar.py --audit` 第 ④ 条改成
+  「逐字节相同 **或** 骨架树逐节点一致」。
+- 瓦尔基里自己的枪相对她双手：轴线在双手上方 ≈10、偏左 6~12（枪架在左前臂上，右手扶枪身右侧，指尖刚碰到枪身），
+  按 75/90 缩放 ⇒ 爱琳的枪身轴线过 (9.5, 68.5, z)、枪口 z=-55.3（`rig.RIFLE`）。

@@ -88,10 +88,78 @@ def _wstr(b, o):
     return b[o + 4: o + 4 + 2 * n].decode("utf-16le"), o + 4 + 2 * n
 
 
-def parse(path):
-    b = open(path, "rb").read()
-    m = Mtn()
+def _pack_wstr(s):
+    return struct.pack("<I", len(s)) + s.encode("utf-16le")
+
+
+def write(m):
+    """parse() 的逆：Mtn -> bytes（✅ 见 `roundtrip` 命令：ch00~ch110 全部 .mtn 逐字节一致）。
+
+    骨架树按 D3DXFRAME 的序列化规则重新写（1 = 第一个子节点，2 = 下一个兄弟，3 = 收尾）；
+    子节点顺序 = 它们在 `m.nodes` 里出现的顺序（parse 是先序读入的，所以顺序天然保住了）。
+    轨道按 `track_order` 写。矩阵 / 关键帧是 f32 原样升成 f64 存的，写回 f32 不丢一位。
+    """
+    out = bytearray()
+    out += struct.pack("<I", 3)
+    out += _pack_wstr(m.set_name)
+    out += struct.pack("<dd", m.ticks_per_sec, m.duration)
+    out += struct.pack("<II", len(m.nodes), 0)
+    children = {}
+    for i, (_, parent, _) in enumerate(m.nodes):
+        children.setdefault(parent, []).append(i)
+    sys.setrecursionlimit(max(sys.getrecursionlimit(), 4000))
+
+    def emit(i):
+        name, parent, mat = m.nodes[i]
+        out.extend(_pack_wstr(name))
+        out.extend(np.asarray(mat, dtype="<f4").reshape(16).tobytes())
+        ch = children.get(i)
+        if ch:
+            out.extend(struct.pack("<I", 1))
+            emit(ch[0])
+        sibs = children[parent]
+        k = sibs.index(i)
+        if k + 1 < len(sibs):
+            out.extend(struct.pack("<I", 2))
+            emit(sibs[k + 1])
+        out.extend(struct.pack("<I", 3))
+
+    emit(children[-1][0])
+    out += struct.pack("<I", len(m.track_order))
+    for name in m.track_order:
+        rot, posk, scl = m.tracks[name]
+        out += _pack_wstr(name)
+        for keys, width in ((rot, 5), (posk, 4), (scl, 4)):
+            keys = np.asarray(keys, dtype="<f4").reshape(-1, width)
+            out += struct.pack("<I", len(keys)) + keys.tobytes()
+    out += m.tail
+    return bytes(out)
+
+
+def save(m, path):
+    blob = write(m)
+    chk = parse_bytes(blob, path)
+    if write(chk) != blob:
+        raise SystemExit("%s：写出后再解析不一致，拒绝落盘" % path)
+    with open(path, "wb") as f:
+        f.write(blob)
+    return blob
+
+
+def parse_bytes(b, path=""):
+    m = _parse(b)
     m.path = path
+    return m
+
+
+def parse(path):
+    m = _parse(open(path, "rb").read())
+    m.path = path
+    return m
+
+
+def _parse(b):
+    m = Mtn()
     if _u32(b, 0) != 3:
         raise ValueError("版本不是 3")
     m.set_name, off = _wstr(b, 4)
@@ -279,10 +347,25 @@ def main(argv=None):
     p = sub.add_parser("tree"); p.add_argument("mtn")
     p = sub.add_parser("check"); p.add_argument("dir")
     p = sub.add_parser("stats"); p.add_argument("dir")
+    p = sub.add_parser("roundtrip"); p.add_argument("dirs", nargs="+")
     args = ap.parse_args(argv)
     if args.cmd == "tree":
         cmd_tree(args.mtn)
         return 0
+    if args.cmd == "roundtrip":
+        bad = 0
+        for d in args.dirs:
+            files = sorted(glob.glob(os.path.join(d, "*.mtn")))
+            ok = 0
+            for f in files:
+                raw = open(f, "rb").read()
+                if write(parse_bytes(raw, f)) == raw:
+                    ok += 1
+                else:
+                    bad += 1
+                    print("  x 不一致：%s" % f)
+            print("%s：%d / %d 逐字节一致" % (d, ok, len(files)))
+        return 1 if bad else 0
     if args.cmd == "check":
         return cmd_check(args.dir)
     if args.cmd == "stats":

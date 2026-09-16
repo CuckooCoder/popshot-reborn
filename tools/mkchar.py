@@ -300,8 +300,10 @@ def audit(src, dst):
                          "`Effects/ArmorSpakle/` 下没有 %s 版本，改了就断链"
                          % (len(stale), dst.upper()))
 
-    # 4 .mtn 逐字节相同
+    # 4 .mtn：逐字节相同，或者（tools/ch03_skin/anim.py 改写过的）骨架树和源一致 —— 骨是按名字查的，
+    #   树一致就不会有「网格引用的骨在骨架里不存在」那种崩法（V0.3商店 §50）
     diff = []
+    rewritten = []
     for name in src_names:
         if not name.lower().endswith(".mtn"):
             continue
@@ -313,9 +315,22 @@ def audit(src, dst):
             diff.append(tgt)
             continue
         if a != b:
-            diff.append(tgt)
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                import mtntool
+                sa = [(n, p) for n, p, _ in mtntool.parse_bytes(a).nodes]
+                sb = [(n, p) for n, p, _ in mtntool.parse_bytes(b).nodes]
+            except Exception as exc:  # noqa: BLE001
+                diff.append("%s（解析失败：%s）" % (tgt, exc))
+                continue
+            if sa != sb:
+                diff.append("%s（骨架树不同）" % tgt)
+            else:
+                rewritten.append(tgt)
     if diff:
-        problems.append("④ 这些 .mtn 和源不是逐字节相同：%s" % diff[:10])
+        problems.append("④ 这些 .mtn 和源既不逐字节相同、骨架树也对不上：%s" % diff[:10])
+    if rewritten:
+        notes.append("④ %d 个 .mtn 被改写过（动作移植 / 静态骨补丁），骨架树和源逐节点一致" % len(rewritten))
 
     # 5 .evn 死引用不能变多
     def dead_refs(d, names):
