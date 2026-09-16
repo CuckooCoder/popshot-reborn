@@ -4756,10 +4756,13 @@ class RoomQuest:
                 if now >= deadline]
 
     def record_kill(self, killer_seat, victim_seat, *,
-                    teams=None, team_mode=False):
+                    teams=None, team_mode=False, scenery=False):
         """按客户端 `Character::Die` 的口径给凶手加分 / **扣分**（§224）。
 
         返回这一发让凶手的分数**变了多少**（`+1` / `-1` / `0`）。
+
+        `scenery=True` = 这一发打掉的是**场景里的可破坏物**（箱子 / 油桶），
+        不是怪 —— 一个计数器都不动（`victim_is_scenery()` 给的判据）。
 
         `killer_seat` 来自 `0x0408` 的第二个字节（`[char+0x158]`）：
         **开火者的座位号**（`0x4fedee` 写的），怪物 / 环境是 0xff，
@@ -4797,6 +4800,11 @@ class RoomQuest:
             # ★ 受害者不是座位 = **打死了一只怪**（闯关那一路）。客户端
             #   这一支一分不加（对战分数只算人），但「杀了几只怪」是闯关
             #   那几张卡片的判据，所以在这儿记一笔再走（V0.3商店）。
+            # ★★ 但「非座位」里还混着**可破坏物**（箱子 / 油桶）——
+            #    打碎箱子不是击杀（用户 2026-09-16，bug调查/22）。
+            #    判据由调用方给：模式和地图在它手里，不在 `RoomQuest` 手里。
+            if scenery:
+                return 0
             self.mob_kills[killer] += 1
             self.note_weapon_kill(killer)
             return 0
@@ -6400,6 +6408,22 @@ def current_map_name(room):
     if difficulty is None:
         return name
     return mapdata.qualify(name, difficulty)
+
+
+def handle_is_breakable(room, handle):
+    """这个世界句柄是不是这张图上的一件**可破坏物**（箱子 / 油桶，§139）。
+
+    分不清就返回 `None` —— **这张图没有地形数据**。调用方必须自己决定
+    这时候当什么算，别把 `None` 直接当 `False` 用（`mapdata` 里有 174 张图，
+    但客户端报上来的图名大小写不一定对得上，例如 `Quest06_stage`）。
+
+    判据来自 `.map` 里原样抽出来的破坏物表，不是猜的：
+    `mapdata.MapTerrain.breakable_by_handle()` 是全项目唯一那一份实现。
+    """
+    terrain = mapdata.load(current_map_name(room))
+    if terrain is None:
+        return None
+    return terrain.breakable_by_handle(handle) is not None
 
 
 def room_in_battle(room):
@@ -8208,6 +8232,28 @@ class Conn:
         occupant = room.seats[index]
         return occupant is not None and occupant.is_bot
 
+    def victim_is_scenery(self, seat, handle):
+        """这一发 `0x0408` 打掉的是**场景里的可破坏物**，而不是人 / 怪吗。
+
+        「打碎箱子不算击杀」（用户 2026-09-16，bug调查/22）：随雨在对战里
+        零杀人赢了 6 局，只拿到 1 张蹭分卡 —— 另外 5 局他打碎的箱子被当成
+        「杀怪」记进了击杀数，`击杀数 == 0` 那条判据当场不成立。
+
+        * 坐在座位上的（含 bot）永远不是场景物。
+        * **对战里没有怪**（用户拍板）⇒ 非座位的受害者一律是场景物，
+          连地图都不用查。这也正是客户端的口径：凶手座位查不到角色
+          （`0x404ff6`）就一分不动，对战分数只算人。
+        * 闯关要分清：句柄在这张图的破坏物表里才是箱子，其余是怪 ——
+          「闯关打怪算击杀」是 V0.3商店特意加的，不能连怪一起砍掉。
+          ★ 拿不到这张图的地形数据时**按怪算**（保住主路），代价是那几张
+          图上的箱子仍然会漏进击杀数。
+        """
+        if 0 <= int(seat) < ROOM_SEAT_COUNT:
+            return False
+        if not self.quest_mode():
+            return True
+        return handle_is_breakable(self.lobby_room(), handle) is True
+
     def on_report_hp_zero(self, payload):
         """0x0408「我 HP 归零了」-> 回 0x0406 死亡广播，角色这才真的倒下。
 
@@ -8322,8 +8368,11 @@ class Conn:
         # ★ 自杀 / 杀队友要**扣**一分 —— 客户端 `Character::Die` 就是这么算的，
         #   服务端不扣就会「HUD 写着 5、服务端已经数到 6」（§224）。
         teams, team_mode = self.battle_teams()
-        delta = quest.record_kill(info["arg"], seat,
-                                  teams=teams, team_mode=team_mode)
+        delta = quest.record_kill(
+            info["arg"], seat, teams=teams, team_mode=team_mode,
+            # ★ 打碎的箱子不是击杀（bug调查/22）。判据在这儿算 ——
+            #   模式和地图在连接手里，`RoomQuest` 手里没有。
+            scenery=self.victim_is_scenery(seat, info["handle"]))
         if delta:
             change = "+1" if delta > 0 else "-1（自杀 / 杀队友要扣分，§224）"
             self.log(f"   对战计分: 座位 {info['arg']} 杀敌数 {change} -> "

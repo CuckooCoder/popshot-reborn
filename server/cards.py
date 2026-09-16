@@ -155,6 +155,10 @@ def match_stats(quest, seat, *, won, quest_mode, score):
     不需要两个指标。
     ⚠ **别再单独写一份 `mob_kills`**：那一格已经加进 `kills` 了，
     两边都写以后谁给 `kills` 加一次读时求和就会重复计数。
+    ⚠⚠ 「对战里怪恒 0」这句**在下游钉着，不是这儿的假设**（bug调查/22）：
+    对战图上打碎箱子会走和杀怪同一条上报（受害者不是座位），`mob_kills`
+    因此并不天生是 0。真正拦住它的是 `gameserver.victim_is_scenery()` ——
+    箱子一个计数器都不动。改那边之前先回来读这一段。
     """
     deaths = _cell(quest.deaths, seat)
     out = {

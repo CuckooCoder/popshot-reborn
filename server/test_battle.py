@@ -3065,6 +3065,14 @@ class BattleStatsTests(BattleRoom):
         self.assertEqual(0, self.quest.enemy_kills[0])
         self.assertEqual(1, self.quest.weapon_stats[(0, 110001)]["kills"])
 
+    def test_breaking_scenery_is_not_a_kill(self):
+        """`scenery=True` = 打碎的是箱子，一个计数器都不许动（bug调查/22）。"""
+        self.quest.last_roh[0] = 110001
+        self.assertEqual(0, self.quest.record_kill(0, 0xFF, scenery=True))
+        self.assertEqual(0, self.quest.mob_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual({}, self.quest.weapon_stats)
+
     def test_a_kill_is_credited_to_the_weapon_last_fired(self):
         """口径照抄客户端 `GetLastBulletROHIdx()`（武器称号比的就是它）。"""
         self.feed(0, gameserver.PEER_OP_FIRE, self.fire_body(1000020))
@@ -3284,6 +3292,124 @@ class BattleStatsTests(BattleRoom):
             self.assertEqual(seat, gameserver.peer_target_seat(handle))
         self.assertIsNone(gameserver.peer_target_seat(0))
         self.assertIsNone(gameserver.peer_target_seat(123456))
+
+
+class SceneryIsNotAKillMixin(object):
+    """打碎箱子算不算击杀 —— 走真的 `0x0408`，判据由连接自己算（bug调查/22）。"""
+
+    def report_non_seat_death(self, handle, killer_seat=0, deaths=0):
+        """一发「受害者不是座位」的 `0x0408` —— 箱子和怪走的是同一发。"""
+        gameserver.Conn.on_game_packet(
+            self.alice, OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=handle, seat=0xFF, arg=killer_seat,
+                            deaths=deaths))
+
+    def assert_not_counted(self):
+        self.assertEqual(0, self.quest.mob_kills[0])
+        self.assertEqual(0, self.quest.enemy_kills[0])
+        self.assertEqual({}, self.quest.weapon_stats)
+        stats = cards.match_stats(self.quest, 0, won=True, score=0,
+                                  quest_mode=self.session_type == 2)
+        self.assertEqual(0, stats.get("kills", 0),
+                         "「击杀数 == 0」是蹭分卡的判据，箱子不许挤进来")
+
+
+class ScenerySurvivesPvpTests(SceneryIsNotAKillMixin, BattleRoom):
+    """★★ 回归钉子（用户 2026-09-16，bug调查/22）：**对战里打碎箱子不算击杀**。
+
+    随雨那天在对战里**零杀人赢了 6 局，只拿到 1 张蹭分卡**：另外 5 局他打碎的
+    箱子走了和杀怪同一条上报（受害者座位 = 0xff），被记进「击杀数」，
+    `击杀数 == 0` 当场不成立。★ 对战里没有怪（用户拍板）⇒ 非座位的受害者
+    一律是场景物，连地图都不用查。
+    """
+
+    session_type = 1
+    arguments = (1, 3, 0)
+
+    def test_breaking_scenery_in_a_pvp_match_is_not_a_kill(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(0x134)
+        self.assert_not_counted()
+
+    def test_a_zero_kill_win_still_earns_the_leech_card(self):
+        """★★ 用户可见的那一头：打碎箱子之后，零杀人胜局照样发**蹭分卡片**。
+
+        规则用**出厂那一条**（`shopdefaults.CARD_RULES[60005]`），不是用例里
+        现编的 —— 现编只能证明判定函数会算，证明不了线上那张卡的条件长什么样。
+        """
+        import shopcfg
+        import shopdefaults
+        mode, conditions = shopdefaults.CARD_RULES[60005]
+        rules = [{"card": 60005, "listed": True, "mode": mode,
+                  "conditions": [dict(item) for item in conditions]}]
+        self.quest.last_roh[0] = 110001
+        for handle in (0x134, 0x135, 0x139):
+            self.report_non_seat_death(handle)
+        give, _bases, warnings = cards.due_grants(
+            rules, mode="pvp", stage=None, difficulty=None,
+            match=cards.match_stats(self.quest, 0, won=True, quest_mode=False,
+                                    score=0),
+            total={}, bases={})
+        self.assertEqual([], warnings)
+        self.assertEqual({60005: shopcfg.CARD_GRANT_COUNT}, give)
+
+    def test_a_pvp_match_does_not_need_map_data_to_tell(self):
+        """★ 对战那一支**不查地图**：图名给成不存在的也照样不算击杀。
+
+        `mapdata` 里 174 张图，但客户端报上来的图名大小写不一定对得上
+        （线上 `Quest06_stage` 就查不到）。对战这一路不许依赖它。
+        """
+        self.room.map_name = "NoSuchMap"
+        self.assertIsNone(gameserver.handle_is_breakable(self.room, 0x134))
+        self.report_non_seat_death(0x134)
+        self.assert_not_counted()
+
+    def test_killing_a_player_still_counts(self):
+        """别把人一起砍掉 —— 座位上的受害者永远不是场景物。"""
+        gameserver.Conn.on_game_packet(
+            self.bob, OP_REPORT_HP_ZERO,
+            hp_zero_payload(handle=1 * 100000 + 100001, seat=1, arg=0))
+        self.assertEqual(1, self.quest.enemy_kills[0])
+        self.assertEqual(0, self.quest.mob_kills[0])
+
+
+class SceneryInQuestTests(SceneryIsNotAKillMixin, BattleRoom):
+    """闯关那一路：**打怪照旧算击杀**，打碎箱子不算（用户 2026-09-16）。
+
+    这儿分得清，是因为 `.map` 里抽出来的破坏物表按世界句柄给了判据
+    （§139）—— 不是按句柄大小猜的。
+    """
+
+    session_type = 2
+    arguments = (2, 4)          # 关卡 2 · 难度 4 ⇒ 地图 `Quest02_2#Extreme`
+    #: 那张图上真有的一件破坏物的世界句柄（`mapdata` 里查出来的）。
+    CRATE = 0x137
+
+    def setUp(self):
+        super(SceneryInQuestTests, self).setUp()
+        self.room.map_name = "Quest02_2"
+        terrain = mapdata.load(gameserver.current_map_name(self.room))
+        self.assertIsNotNone(terrain, "这张图的地形数据没了，用例白跑")
+        self.assertIsNotNone(terrain.breakable_by_handle(self.CRATE),
+                             "句柄 0x%x 不再是这张图上的破坏物" % self.CRATE)
+
+    def test_killing_a_monster_still_counts(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(self.CRATE + 0x1000)   # 表里没有 ⇒ 是怪
+        self.assertEqual(1, self.quest.mob_kills[0])
+        self.assertEqual(1, self.quest.weapon_stats[(0, 110001)]["kills"])
+
+    def test_breaking_a_crate_is_not_a_kill(self):
+        self.quest.last_roh[0] = 110001
+        self.report_non_seat_death(self.CRATE)
+        self.assert_not_counted()
+
+    def test_without_map_data_a_non_seat_victim_counts_as_a_monster(self):
+        """★ 闯关拿不到地形数据时**按怪算** —— 保住「打怪算击杀」那条主路。"""
+        self.room.map_name = "NoSuchMap"
+        self.assertIsNone(gameserver.handle_is_breakable(self.room, self.CRATE))
+        self.report_non_seat_death(self.CRATE)
+        self.assertEqual(1, self.quest.mob_kills[0])
 
 
 class SurvivalFinishTests(BattleRoom):
