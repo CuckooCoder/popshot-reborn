@@ -79,7 +79,15 @@ function Assert-PortsFree([object[]]$specs, [string]$who) {
           位置通道却完全没有回执，玩家只会看到「别人卡」却查不出任何原因。
           宁可开局就说清楚是哪个端口、被谁占着。
     #>
-    $busy = Test-PortsFree $specs
+    # ★★ `@()` 必须包在**调用方**这一侧，不能只在 Test-PortsFree 里面包。
+    #    PowerShell 2.0（Win7 出厂状态）上 `$null` 和标量都**没有 .Count**
+    #    （3.0 才给它们补上），而函数 return 又会把数组顺着管道拆开：
+    #    返回空数组 -> 调用方拿到 `$null`，返回一个元素 -> 拿到标量字符串。
+    #    于是 `$null.Count` 是 `$null`、`$null -eq 0` 是 **False** ——
+    #    端口明明全空着，却一路走到下面报「端口被占用」然后 exit 1，
+    #    Win7 机器根本进不去游戏（用户 2026-09-16 反馈的就是这个）。
+    #    在函数体里写 `return @($busy)` **没用**：拆开发生在 return 的那一刻。
+    $busy = @(Test-PortsFree $specs)
     if ($busy.Count -eq 0) { return }
     Say ''
     Say "!! 端口被占用，无法启动$who：" 'Red'
@@ -381,11 +389,12 @@ if ($running -and $lastMode -eq $Mode) {
     #   重定向只留一对 `*-boot.*`，兜住 daylog 装好**之前**那一小段
     #   （解释器的 SyntaxWarning、import 当场就炸的 traceback）。它每次启动
     #   覆盖，因为它只对「这一次启动」有意义。
-    Start-Process -FilePath $Python -WorkingDirectory $Root `
+    #   ★ 走 wincompat 的 Start-HiddenRedirected，不直接写 Start-Process：
+    #     PowerShell 2.0 上 -WindowStyle 和 -RedirectStandard* 不在同一个参数集里。
+    Start-HiddenRedirected -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList $appArgs `
-        -RedirectStandardOutput (Join-Path $LogDir 'server-boot.out') `
-        -RedirectStandardError  (Join-Path $LogDir 'server-boot.err') `
-        -WindowStyle Hidden | Out-Null
+        -StdOut (Join-Path $LogDir 'server-boot.out') `
+        -StdErr (Join-Path $LogDir 'server-boot.err')
 
     # 等端口真的起来再往下走，别用固定 Sleep 赌。
     $ok = $false
@@ -398,7 +407,10 @@ if ($running -and $lastMode -eq $Mode) {
         # 业务上的「端口被占」一类是服务端自己 log 出来的，落在 server.out。
         Say '[启动失败] 服务端端口没起来，下面是日志的末尾：' 'Red'
         foreach ($name in @('server-boot.err', 'server.err', 'server.out')) {
-            $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+            # `@()` 包在调用方，理由同 Assert-PortsFree：日志**只剩一行**时
+            # PowerShell 2.0 会把返回值拆成标量，标量没有 .Count -> 这一行
+            # 就不显示了 —— 偏偏启动失败时那一行往往就是全部线索。
+            $tail = @(Get-FileTailLines (Join-Path $LogDir $name) 20)
             if ($tail.Count -gt 0) {
                 Say "  --- logs\$name ---" 'Yellow'
                 $tail
@@ -448,11 +460,10 @@ if ($relayPid -and $lastSignature -eq $relaySignature) {
     $relayScript = Join-Path $Root 'server\relay.py'
     # 和服务端同一个理由（见上面那段）：relay.out / relay.err 由中继自己开、
     # 自己按天切；重定向只留 `relay-boot.*` 兜住 daylog 装好之前那一小段。
-    Start-Process -FilePath $Python -WorkingDirectory $Root `
+    Start-HiddenRedirected -FilePath $Python -WorkingDirectory $Root `
         -ArgumentList @("`"$relayScript`"") `
-        -RedirectStandardOutput (Join-Path $LogDir 'relay-boot.out') `
-        -RedirectStandardError  (Join-Path $LogDir 'relay-boot.err') `
-        -WindowStyle Hidden | Out-Null
+        -StdOut (Join-Path $LogDir 'relay-boot.out') `
+        -StdErr (Join-Path $LogDir 'relay-boot.err')
     $ok = $false
     for ($i = 0; $i -lt 40; $i++) {
         Start-Sleep -Milliseconds 250
@@ -468,7 +479,7 @@ if ($relayPid -and $lastSignature -eq $relaySignature) {
     } else {
         Say '!! 中继没起来，「远程服务器」会连不上；「本机服务器」不受影响。' 'Red'
         foreach ($name in @('relay-boot.err', 'relay.err', 'relay.out')) {
-            $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+            $tail = @(Get-FileTailLines (Join-Path $LogDir $name) 20)   # @() 同上
             if ($tail.Count -gt 0) {
                 Say "  --- logs\$name ---" 'Yellow'
                 $tail
@@ -607,10 +618,9 @@ if ($DebugLog) { $env:BSHOOK_VERBOSE_LOG = '1' } else { $env:BSHOOK_VERBOSE_LOG 
 
 Move-LogAside (Join-Path $LogDir 'bsloader.out') | Out-Null
 Move-LogAside (Join-Path $LogDir 'bsloader.err') | Out-Null
-Start-Process -FilePath $loader -WorkingDirectory $Root `
-    -RedirectStandardOutput (Join-Path $LogDir 'bsloader.out') `
-    -RedirectStandardError  (Join-Path $LogDir 'bsloader.err') `
-    -WindowStyle Hidden | Out-Null
+Start-HiddenRedirected -FilePath $loader -WorkingDirectory $Root `
+    -StdOut (Join-Path $LogDir 'bsloader.out') `
+    -StdErr (Join-Path $LogDir 'bsloader.err')
 
 Say '[客户端] bsloader 已启动，游戏登录窗口稍后出来，请耐心等待十几秒......' 'Green'
 

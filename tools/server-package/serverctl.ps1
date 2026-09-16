@@ -202,7 +202,11 @@ if (-not (Test-Path -LiteralPath $LogDir)) { New-Item -ItemType Directory -Path 
 #   通道却完全没有回执 —— 服务端照样起来、玩家照样能玩，只是位置数据全部
 #   投进了黑洞，最后只能看到「别人卡」却查不出任何原因。宁可现在就说清楚。
 Reset-ListenerCache
-$busy = Test-PortsFree $PortSpecs
+# ★ `@()` 包在调用方这一侧：PowerShell 2.0 上函数 return 会把数组拆开，
+#   只有**一个**端口被占时 $busy 是标量字符串，而标量在 2.0 上没有 .Count
+#   -> `$busy.Count -gt 0` 恒为 False，这道硬失败就白设了（漏报）。
+#   详见 launch.ps1 的 Assert-PortsFree，那边是同一个坑的另一个方向。
+$busy = @(Test-PortsFree $PortSpecs)
 if ($busy.Count -gt 0) {
     Say ''
     Say '!! 端口被占用，服务端无法启动：' 'Red'
@@ -234,11 +238,12 @@ if ($DebugLog) { $appArgs += '--verbose' }
 #     * 不再重定向到同名文件 —— 那会和服务端抢同一个句柄。
 #   重定向只留一对 `*-boot.*`，兜住 daylog 装好**之前**那一小段
 #   （解释器的 SyntaxWarning、import 当场就炸的 traceback）。
-Start-Process -FilePath $Python -WorkingDirectory $Root `
+#   ★ 走 wincompat 的 Start-HiddenRedirected：PowerShell 2.0 上 -WindowStyle 和
+#     -RedirectStandard* 分属互斥的参数集，写在一起会 ParameterBindingException。
+Start-HiddenRedirected -FilePath $Python -WorkingDirectory $Root `
     -ArgumentList $appArgs `
-    -RedirectStandardOutput (Join-Path $LogDir 'server-boot.out') `
-    -RedirectStandardError  (Join-Path $LogDir 'server-boot.err') `
-    -WindowStyle Hidden | Out-Null
+    -StdOut (Join-Path $LogDir 'server-boot.out') `
+    -StdErr (Join-Path $LogDir 'server-boot.err')
 
 $ok = $false
 for ($i = 0; $i -lt 60; $i++) {
@@ -252,7 +257,7 @@ if (-not $ok) {
     # 业务上的「端口被占」一类是服务端自己 log 出来的，落在 server.out。
     Say '[启动失败] 端口没起全，下面是日志的末尾：' 'Red'
     foreach ($name in @('server-boot.err', 'server.err', 'server.out')) {
-        $tail = Get-FileTailLines (Join-Path $LogDir $name) 20
+        $tail = @(Get-FileTailLines (Join-Path $LogDir $name) 20)   # @() 理由同上
         if ($tail.Count -gt 0) {
             Say "  --- logs\$name ---" 'Yellow'
             $tail

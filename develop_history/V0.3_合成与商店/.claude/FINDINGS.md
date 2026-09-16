@@ -5003,3 +5003,126 @@ WingStartSpeed=0.0
 ⚠ 写 `part_flag == 512` 的话**恰好把套装漏掉** —— 而用户报的就是穿套装时
 「感觉和平时不一样」。`shopcfg._effect_lines` 按位测，`test_shopcfg.WingPropsTests`
 专门要求清单里至少有一件是多槽位的，否则「按位」这条等于没验。
+
+---
+
+## §123 ★★★★ PowerShell 2.0 上 `$null` 和标量**没有 `.Count`** —— 端口检查在 Win7 上误报「端口被占用」（✅ 换引擎实测，2026-09-16）
+
+**现象**：V0.3.3 包发给玩家，对方老机器上一启动就红字
+「`!! 端口被占用，无法启动本机服务端：`」然后 `exit 1`，**一条占用明细都没有**，
+标题和「处理办法」之间只有一行空白。那台机器端口其实全空着。
+
+**结论**：和端口、和 netstat 解析**都没关系**，是 `Assert-PortsFree` 的判据在
+PowerShell 2.0（Win7 SP1 出厂状态）上翻了。三件事叠在一起：
+
+1. PowerShell 的函数 `return` **走管道**，数组到调用方会被拆开 ——
+   空数组 → `$null`，**一个**元素 → **标量**；
+2. 2.0 上 `$null` 和标量都**没有 `.Count`**（3.0 才给它们补上），取出来是 `$null`；
+3. `$null -eq 0` 和 `$null -gt 0` **同时**是 `False` —— 两个方向的判据一起废。
+
+⇒ `if ($busy.Count -eq 0) { return }` 在端口全空时**不 return**，一路走到报错；
+⇒ `if ($busy.Count -gt 0) { 报错 }` 在只占 1 个端口时**不报**（serverctl 那侧是这个方向）。
+
+那行**空白**是第 4 件事的指纹：2.0 上 `foreach ($x in $null)` 会空转**一圈**
+（3.0 起才不进循环），于是 `foreach ($line in $busy) { Say "     $line" }` 打了一行空格。
+**以后见到「报了错却没有明细，中间多一行空白」，直接怀疑这条。**
+
+实测（`powershell -Version 2` 跑真的 `wincompat.ps1`，端口 65001 空闲 / 47611 在监听）：
+
+| | 空端口 `.Count -eq 0` | 占用端口 `.Count -gt 0` | `foreach` 空转 |
+|---|---|---|---|
+| PS 2.0 修复前 | **False**（误报 + exit 1） | **False**（漏报） | **1 圈** |
+| PS 2.0 修复后 | True | True，明细正确 | 0 圈 |
+| PS 5.1（对照） | True | True | 0 圈 |
+
+**修法**：`@()` 包在**调用方**那一侧 —— `$busy = @(Test-PortsFree $specs)`。
+★ 在函数体里写 `return @($x)` **挡不住**，拆开发生在 `return` 的那一刻
+（实测 `function f { $a=@('only'); return @($a) }` 到调用方是 `String`）。
+同作用域内的 `$x = @(...)` 赋值一直是对的，不受影响。
+改了 5 处：`launch.ps1` 的 `Assert-PortsFree` 和两处 `$tail`、
+`server-package/serverctl.ps1` 的 `$busy` 和 `$tail`。
+
+### ★★ 为什么以前没发现：`POPSHOT_FORCE_LEGACY` 验不出这一类
+
+那个开关只把 `HasNetTcpCmdlet` 等**能力位**按下去，模拟的是「没有 NetTCPIP 模块」，
+跑的**仍然是本机 PowerShell 5.1 引擎** —— `.Count`、`foreach $null` 照新语义走，
+这个误报在开关开着的时候**复现不出来**。
+wincompat.ps1 原来那句「这是唯一能真跑一遍兼容分支的办法」是错的，已改。
+
+**真验语义要换引擎**（这台开发机上可用，需要 .NET 3.5）：
+
+```
+set POPSHOT_FORCE_LEGACY=1
+powershell -Version 2 -NoProfile -ExecutionPolicy Bypass -File tools\launch.ps1
+```
+
+两个一起上才是完整的 Win7：能力位 + 引擎语义。**以后动 `wincompat.ps1` 或任何
+启动脚本，必须用 `-Version 2` 再跑一遍**，光开 FORCE_LEGACY 不算验过。
+
+⚠ 和 V0.2 §135 / §116 是三个不同的病：§135 是 cmd.exe 按字节 seek 按字符计数，
+§116 是管道两端编码不一致，这条是**语言版本的语义差**，和编码、行尾都无关。
+
+---
+
+## §124 ★★★★ PowerShell 2.0 上 `-WindowStyle` 和 `-RedirectStandard*` **互斥** —— 退路是让 cmd 做重定向（✅ 换引擎实测，2026-09-16）
+
+**现象**：修掉 §123 之后，同一台 Win7 机器往下走一步又停：
+
+```
+[启动失败] 无法使用指定的命名参数解析参数集。
+位置 launch.ps1:392  Start-Process -FilePath $Python -WorkingDirectory $Root
+异常 ParameterBindingException
+```
+
+**结论**：`Start-Process` 在 PowerShell 2.0 上有两个**互斥**的参数集 ——
+`-WindowStyle` 要走 ShellExecute，`-RedirectStandardOutput/Error` 要走 CreateProcess，
+写在一起解析不出参数集。3.0 起才允许共存。实测（目标用 `ping -n 3`，
+**不要用 `cmd /c exit`**，它退得太快会另抛 `ArgumentException: Process with an Id of
+N is not running`，看着像参数问题其实不是）：
+
+| 组合 | PS 2.0 | PS 5.1 |
+|---|---|---|
+| `Redirect` + `WindowStyle Hidden`（原代码） | **FAIL** ParameterBindingException | OK |
+| `Redirect` + `NoNewWindow` | OK | OK |
+| `Redirect` 单独 | OK（但控制台程序会**弹黑窗**） | OK |
+| `WindowStyle Hidden` 单独 | OK | OK |
+
+**★ 不要用 `-NoNewWindow` 当退路**（它参数集上明明过得去）：那样子进程**共用调用方的
+控制台**，`start.bat` 那个窗口一关就把服务端一起带走。用户拍板要「保隐藏」，于是走
+**cmd 包一层**，自己只用 `-WindowStyle Hidden`：
+
+```
+cmd /c ""python.exe" "app.py" --flag 1>"out" 2>"err""
+```
+
+### ★★ 外面那层引号不能省 —— 这是唯一的坑
+
+PowerShell 的 `-ArgumentList` 是**原样空格拼接、不补引号**的；cmd 收到后按它那条老规矩
+「掐掉第一个和最后一个引号」。所以：
+
+| 拼法 | cmd 实际执行 | 结果 |
+|---|---|---|
+| `'"py" "app" 1>"o" 2>"e"'` | 掐掉的是 py 路径两边那对 → 路径断在中间 | **不产出任何文件**，连 .err 都没有 |
+| `'""py" "app" 1>"o" 2>"e""'` | 掐掉的正好是外面这层 | ✅ 正确 |
+
+玩家的目录名**又有空格又有中文**（`…\PopShot-portable-win64_V0-3-3_带服务器设置`），
+这层引号是刚需。实测拿真的中文+空格目录验过：`sys.argv`、`os.getcwd()`、
+`sys.stdout.encoding=utf-8`、中文写进 .out/.err 的字节全部正确。
+
+### 这条路的三个实测结论（都验过，别再推导）
+
+1. **不弹窗**：EnumWindows + IsWindowVisible 枚举，cmd/python/conhost 三个 pid 名下
+   **没有任何可见窗口**；
+2. **和父窗口无关**：进程树里 cmd 自带 `conhost.exe` 子进程 ⇒ 它分配了**自己的控制台**，
+   `start.bat` 关掉不影响它（这正是 `-NoNewWindow` 做不到的）；
+3. **不残留**：监听端口的是里层 python，`stop.bat` 照旧按端口找到它；里层一死，
+   外层 cmd 自己就退出了。
+
+封装在 `wincompat.ps1` 的 `Start-HiddenRedirected`，判据是 `$PsMajor -ge 3`
+（**语言版本**，不是 `POPSHOT_FORCE_LEGACY` 那个能力位 —— 两件事，见 §123）。
+改了 4 处调用：`launch.ps1` 的服务端 / 中继 / bsloader，`serverctl.ps1` 的服务端。
+
+**✅ 全链路验收**：`powershell -Version 2` + `POPSHOT_FORCE_LEGACY=1` 真跑
+`tools\launch.ps1 -NoGame`，服务端 + 中继都起来、端口全监听、无可见窗口、
+`stop.bat` 能停干净、无残留 cmd；换回 PS 5.1 跑同一份脚本，进程树里**没有** cmd
+包装层（走原分支），行为和改动前一致。
