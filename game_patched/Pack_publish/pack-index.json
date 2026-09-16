@@ -1,7 +1,7 @@
 {
  "format": 1,
  "packer": {"fill": 0, "key_prefix": "Pack/", "policy": "original-ext-v1", "sep": "~", "volume_cap": 16777216, "zlib_level": 9},
- "tree_hash": "c52b3a2c7c07f7f20701cd311867e7be244d1d115dba491d740d560675f0c558",
+ "tree_hash": "aa53de68c9a03a36ce9013f02ca514229ea6abf56b4d669cb98d0be33bbc2521",
  "volumes": {
   "Data~.pkn": {"group": "Data", "sha256": "57a9ab60502b87f90551487bd2bf8b9037b18d1efa2b46a0b8ee0d81659d16a6", "size": 535552, "source": "Data", "members": [
    ["Chinese.ini", 114250, "2ecfe16814a0d515430fdeea80c53eb7cbd5a9e0be69dcee469f360b8ba08d4e"],
@@ -12002,7 +12002,7 @@
    ["Characters/ch02/ch02^W0053.dds", 16512, "e54ea93533a6fbb897e208ef3d5c0eb4e00cdd29203fc6370c0a41ddcf387505"],
    ["Characters/ch02/ch02^W0053.msh", 7430, "65226f514196461dde49a259b3cc164372ffd0b4c3eb74717e505267a56e492d"]
   ]},
-  "Models~Characters~ch03.pkn": {"group": "Models", "sha256": "8738545cc49e0052cc21cf022efedf00b5bb4790362e3d9fd6393c08480a7b18", "size": 12624896, "source": "Models/Characters/ch03", "members": [
+  "Models~Characters~ch03.pkn": {"group": "Models", "sha256": "1b1ff6b92b4ffe9f3c46385030e5fce9729a4c5a1f7395b505e900f09956c768", "size": 12624896, "source": "Models/Characters/ch03", "members": [
    ["Characters/ch03/Ch03@Dash02.evn", 856, "f360f6b3e42c364ada7cff433447e4ae282898759b793ba3827e73b994d9e7d3"],
    ["Characters/ch03/Ch03@Dash02.mtn", 101878, "5dd08171b56a13ace037943e2c7a6b28f75932f86a2c8572371cc2f073df2d8a"],
    ["Characters/ch03/ch0300000.dds", 32896, "779bb704d7a2946ab2d5ce662e64a2eba1c3bf7a5c2c1846d93dffcb2f8d3e07"],
@@ -12162,7 +12162,7 @@
    ["Characters/ch03/ch03@Idle101.mtn", 159046, "7ff2c035a44f9941d8c7c4342a37f591724b398622c63be2e3a2ff6c9da2d195"],
    ["Characters/ch03/ch03@Idle102.mtn", 90230, "06e1c1bd2828eb46f4c6871ea5fba7f6050dbf89a3cc6cb4d77f8c30a1c91134"],
    ["Characters/ch03/ch03@Idle103.mtn", 100948, "b77cb75588015fc61995cc2c1a9e257afec967db8a23d773fc610a56298aed89"],
-   ["Characters/ch03/ch03@Jab00.evn", 685, "e1d8aa5ce0fcbcbfe9cf449fa58b2dd817e092fba72fd4cc9f3362c8f6129670"],
+   ["Characters/ch03/ch03@Jab00.evn", 693, "47cf45360d141409be997a9b67d3b937b1921d5a49a6219bb240b3b8f9f9cc6c"],
    ["Characters/ch03/ch03@Jab00.mtn", 72752, "4f9c509a817b6cca0bd7c7a66bc0bc7564ed4a14061050ab50451d125ef6c645"],
    ["Characters/ch03/ch03@Jump-End.mtn", 29700, "2f7a981b53b70ba43e3a42c7700171d0a24e9cbf09f09bba39fa3c0aea55ea55"],
    ["Characters/ch03/ch03@Jump.mtn", 46696, "b705ddb69a21a44dd9adc6417926124f923961ccb825e3c0ab28a8dc9cb82368"],

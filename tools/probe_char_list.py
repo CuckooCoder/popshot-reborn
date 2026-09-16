@@ -66,10 +66,6 @@ BASE_CHARACTER_IDS = (0, 1, 2, 3)
 PREMIUM_CHARACTER_IDS = tuple(range(100, 111))
 STRIDE = 1000000
 
-#: 爱琳的等级门槛（原版 `cmp [0x72e338], 4`，默认保留）。
-#: 只用来在输出里提醒一句，脚本读不到玩家等级。
-IRENE_MIN_LEVEL = 4
-
 #: `Data/ChrProps.ini` 的 ChrName（韩文原名，客户端 UI 里也是这些）
 CHARACTER_NAMES = {
     0: "타이", 1: "카실", 2: "프로코", 3: "아이린",
@@ -167,8 +163,8 @@ def main():
     for character_id in shown:
         note = "  （基础角色，白送）" if character_id in BASE_CHARACTER_IDS else ""
         if character_id == 3:
-            note += f"  ⚠ 原版 {IRENE_MIN_LEVEL} 级门还在：等级不够时大厅面板不建按钮、" \
-                    "房间面板建了但点不动（设 BSHOOK_IRENE_LEVEL_FREE=1 可解除）"
+            note += "  （X_Mod 加的第 4 个基础角色；原版那道 4 级门已由 bshook 无条件打掉，"\
+                    "1 级就能选）"
         print(f"    id={character_id:<4} {CHARACTER_NAMES.get(character_id, '?')}{note}")
     print(f"  合计 {len(shown)} 个"
           f"（★ 这是**本脚本按常量算的**，不是从内存读的按钮数）")

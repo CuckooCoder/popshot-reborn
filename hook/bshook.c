@@ -7177,14 +7177,15 @@ static int try_patch_region_lock(void)
 /*   ⚠ 少打一道**不会崩**（`0x4f58dc` 的 `cmp ecx,-1 / je` 兜住越界下标），    */
 /*   症状是「某个面板里就是没有她」—— 所以要么六道全打上，要么一道都别打。     */
 /*                                                                            */
-/*   ── 4 级门原样保留 ──                                                     */
+/*   ── 4 级门一并解除（★ 2026-09-17 起，无条件；D2 改口径）──                */
 /*                                                                            */
 /*   `0x44c954` / `0x44cc07` / `0x467eb1` 三处 `cmp [0x72e338], 4` 是原版      */
-/*   「4 级起可用爱琳」的判据，**默认不动**（D2：「白送」指不用买角色卡，      */
-/*   不等于取消等级解锁）。要放开设 BSHOOK_IRENE_LEVEL_FREE=1。               */
-/*   ⚠ 因此测试账号等级必须 >= 4，否则「面板里没有爱琳」会被误判成补丁失效。   */
+/*   「4 级起可用爱琳」的判据，现在**和上面六处一起、默认就打掉** ——          */
+/*   爱琳从 1 级起就能选。★ **没有开关**：用户 2026-09-17 明确「去掉就是      */
+/*   固定去掉，不要搞选项」，所以别再给它加环境变量。                          */
 /*                                                                            */
-/*   设 BSHOOK_KEEP_IRENE_LOCK=1 保留原版（爱琳在三个面板里都不出现）。       */
+/*   设 BSHOOK_KEEP_IRENE_LOCK=1 保留原版（爱琳在三个面板里都不出现）——       */
+/*   那是「整个角色回到原版」的总开关，九处一起不打，不是 4 级门的选项。      */
 /* -------------------------------------------------------------------------- */
 #define IRENE_PATCH_COUNT 6
 /* 字段含义和 REGION_SITES 一样：特征串起始 VA / 长度 / 要改的字节在串里的偏移
@@ -7233,7 +7234,7 @@ static const struct {
 };
 static volatile LONG g_irene_patched = 0;
 
-/* 三处 4 级门。**默认不打**，BSHOOK_IRENE_LEVEL_FREE=1 才放开。 */
+/* 三处 4 级门。★ 和上面六处一样**默认就打**，没有开关（D2，2026-09-17 改口径）。 */
 #define IRENE_LVL_SITE_COUNT 3
 static const struct {
     unsigned int va;
@@ -7266,13 +7267,6 @@ static int irene_lock_kept(void)
 {
     char buf[8];
     DWORD n = GetEnvironmentVariableA("BSHOOK_KEEP_IRENE_LOCK", buf, sizeof(buf));
-    return (n > 0 && n < sizeof(buf) && buf[0] != '0');
-}
-
-static int irene_level_free(void)
-{
-    char buf[8];
-    DWORD n = GetEnvironmentVariableA("BSHOOK_IRENE_LEVEL_FREE", buf, sizeof(buf));
     return (n > 0 && n < sizeof(buf) && buf[0] != '0');
 }
 
@@ -7312,7 +7306,7 @@ static int try_patch_irene_unlock(void)
     return 0;
 }
 
-/* 三处 4 级门，只在 BSHOOK_IRENE_LEVEL_FREE=1 时才调。 */
+/* 三处 4 级门，和 try_patch_irene_unlock() 一样**无条件调**。 */
 static int try_patch_irene_level(void)
 {
     int i, done = 0;
@@ -8140,16 +8134,14 @@ static DWORD WINAPI patch_thread(LPVOID param)
             bslog("PATCH   !! 超时未能 patch 爱琳解锁"
                   "（0x55853c / 0x44caaf / 0x407383 / 0x40724f / 0x407160 / "
                   "0x4f58f4 的特征串一直对不上）");
-        /* 4 级门默认保留（D2）。 */
-        if (irene_level_free()) {
-            for (ticks = 0; !g_stop && !g_irene_lvl_patched && ticks < 2000; ticks++) {
-                if (try_patch_irene_level()) break;
-                Sleep(2);
-            }
-            if (!g_irene_lvl_patched)
-                bslog("PATCH   !! 超时未能解除爱琳 4 级门"
-                      "（0x44c954 / 0x44cc07 / 0x467eb1 的特征串一直对不上）");
+        /* 4 级门：★ 无条件解除，爱琳从 1 级起就能选（D2，2026-09-17 改口径）。 */
+        for (ticks = 0; !g_stop && !g_irene_lvl_patched && ticks < 2000; ticks++) {
+            if (try_patch_irene_level()) break;
+            Sleep(2);
         }
+        if (!g_irene_lvl_patched)
+            bslog("PATCH   !! 超时未能解除爱琳 4 级门"
+                  "（0x44c954 / 0x44cc07 / 0x467eb1 的特征串一直对不上）");
     }
 
     /* 登录公告：**这一轮是次要的**，打不上也没关系 —— 真正的保证在

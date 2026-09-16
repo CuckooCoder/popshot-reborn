@@ -168,6 +168,17 @@ EVN_RES_REMAP = {
     "CH01/WP00/Efx/CH01_MutuStand-P01.efx": "CH03/WP00/Efx/CH03_MutuStand-P01.efx",
     "CH01/WP00/Efx/CH01_MutuStand-P02.efx": "CH03/WP00/Efx/CH03_MutuStand-P02.efx",
     "CH01/WP00/Efx/CH01_MutuStand-P03.efx": "CH03/WP00/Efx/CH03_MutuStand-P03.efx",
+    # ★ 格斗普通拳 `Jab00`：**没有同名的 CH03 版**，但也不能留着卡希尔那份 ——
+    #   `CH01_Jab00.efx` 挂的是 `Bone_Wp00_11`，而 `Bone_Wp00_*` 是**挂在右手上的武器骨链**
+    #   （`Bip01_R_Hand → Dummy01 → Bone_Rweapon01 → Wp00_01 … _11`，静态偏移累计 79.7），
+    #   卡希尔那只泰迪熊就蒙在这条链上。爱琳 `[ch03-dash]` 写的是 `WMeshIdx=-1`（不拿东西）⇒
+    #   同一份特效在她身上会从**离拳头约 69 的空气里**冒出来（她骨盆到头才 24）。
+    #   顶上来的是 `CH03_MutuStand-P00.efx`：**结构同级**（2 个发射器，和 `CH01_Jab00` 的
+    #   9306 字节 / 2 发射器对得上；而 `CH03_DashAttack00` 是 6 个发射器的大招特效），
+    #   挂 `Bip01_R_Hand`，用的是她自己的 `CH03_MutuAttack00.dds` 拳击命中贴图。
+    #   ★ 证据：`CH01_Jab00.efx`(9306) 和 `CH01_DashAttack00.efx`(9314) 只差 8 字节、
+    #     同一对贴图 —— 卡希尔的「普通拳」本来就是拿冲刺特效改的，不是独立一份。
+    "CH01/WP00/Efx/CH01_Jab00.efx": "CH03/WP00/Efx/CH03_MutuStand-P00.efx",
     # 表情特效：原版同样发了 CH03 版（`Effects/Emotion/`），顺手一起改指
     "Emotion/Efx/CH01_Angry00.efx": "Emotion/Efx/CH03_Angry00.efx",
     "Emotion/Efx/CH01_Cry00.efx": "Emotion/Efx/CH03_Cry00.efx",
@@ -222,6 +233,19 @@ UNMATCHED = (
     "ch01@MutuStand-P03.ogg", "ch01@MutuJump-P01.ogg", "ch01@Martial04.ogg",
     "ch01@Dash03_01_frame_07.ogg", "ch01@Dash03_02_frame_11.ogg", "ch01@Dash03_03_frame_16.ogg",
     "ch01@dash05.ogg", "ch01@Dash04_01_frame_01.ogg", "ch01@Dash-B04_01_frame_01.ogg",
+)
+
+#: 同上，但这一张是**特效**。`audit_leftover_ch01("efx")` 每次跑都和它对账
+#: —— 音效那边一直有守卫，特效这边 2026-09-17 之前没有。
+#:
+#: ★ 这 6 条**一条都放不出来**，所以留着卡希尔的没有代价：它们全挂在
+#: `Dash01/02/03/05` / `Dash-B04` 上，而爱琳在 `ChrProps.ini` 里**只有 `Dash00-*` 一套参数**
+#: （16 个角色里 13 个都只有 Dash00），冲刺攻击 `[ch03-dash]` 又写死 `WAnimIdx=0`
+#: ⇒ 她永远只放 `Dash00`。真正会放出来的那一条是 `Jab00`，已经改指她自己的了（见 EVN_RES_REMAP）。
+UNMATCHED_EFX = (
+    "CH01/WP00/Efx/CH01_Dash-B04.efx", "CH01/WP00/Efx/CH01_Dash04.efx",
+    "CH01/WP00/Efx/CH01_DashAttack01.efx", "CH01/WP00/Efx/CH01_DashAttack02.efx",
+    "CH01/WP00/Efx/CH01_DashAttack03.efx", "CH01/WP00/Efx/CH01_DashAttack05.efx",
 )
 
 
@@ -401,20 +425,24 @@ def patch_static(m, patches):
     return changed
 
 
-def audit_leftover_ch01():
-    """扫 ch03 落盘后的 `.evn`，列出还指着卡希尔、**而且文件真的存在**的音。
+def audit_leftover_ch01(kind="sound"):
+    """扫 ch03 落盘后的 `.evn`，列出还指着卡希尔、**而且文件真的存在**的资源。
+
+    `kind="sound"` 查音（相对 `Sounds/`），`kind="efx"` 查特效（相对 `Effects/`）——
+    `.evn` 里两类走的是同一个 `<ResourcePath>` 标签，靠**文件落在哪个盘上**区分。
 
     死引用不算（`FX/char/KR/voice/ch01_Casil/…` 那批原版就没发过，本来就不响，§4）。
-    返回排序后的文件名列表，给 main() 和 `UNMATCHED` 对账。
+    返回排序后的列表，给 main() 和 `UNMATCHED` / `UNMATCHED_EFX` 对账。
     """
     import re
+    base = SOUNDS if kind == "sound" else EFFECTS
     left = set()
     for p in glob.glob(os.path.join(CH03, "*.evn")):
         text = open(p, "rb").read().decode("cp949", "replace")
         for res in re.findall(r"<ResourcePath>([^<]+)</ResourcePath>", text):
             if not re.search(r"(?i)ch01", res):
                 continue
-            if os.path.exists(os.path.join(SOUNDS, res.replace("/", os.sep))):
+            if os.path.exists(os.path.join(base, res.replace("/", os.sep))):
                 left.add(res)
     return sorted(left)
 
@@ -525,6 +553,12 @@ def main(argv=None):
         "ch03 的 .evn 里剩下的卡希尔音和 UNMATCHED 对不上，名单该更新了：\n  多出来 %s\n  少了 %s"
         % (sorted(set(left) - set(UNMATCHED)), sorted(set(UNMATCHED) - set(left))))
     print("           剩 %d 个卡希尔的音没换（全游戏只有 ch01 有对等件，见 UNMATCHED）" % len(left))
+    left_efx = audit_leftover_ch01("efx")
+    assert left_efx == sorted(UNMATCHED_EFX), (
+        "ch03 的 .evn 里剩下的卡希尔特效和 UNMATCHED_EFX 对不上，名单该更新了：\n  多出来 %s\n  少了 %s"
+        % (sorted(set(left_efx) - set(UNMATCHED_EFX)), sorted(set(UNMATCHED_EFX) - set(left_efx))))
+    print("           剩 %d 个卡希尔的特效没换（全挂在她放不出来的 Dash01/02/03/05 上，见 UNMATCHED_EFX）"
+          % len(left_efx))
     print("写出 %d 个文件%s" % (n_written, "（dry-run）" if args.dry_run else ""))
 
     # 自检：打完补丁的树里，FirePoint 在参考姿势下必须正好落在设计的枪口点上
@@ -649,4 +683,11 @@ def render_run(built, geometry, mshtool, Image, ImageDraw):
 
 
 if __name__ == "__main__":
+    # ★ 把 stdout / stderr 钉成 utf-8。调用方一**捕获**输出（管道 / 赋值给变量），
+    #   CPython 就发现 stdout 不是控制台、改用 `GetACP()` = cp936 —— 中文按 GBK 落进
+    #   管道而上游按 utf-8 解（满屏乱码），`✓` 这种 cp936 编不出来的字符更是直接
+    #   `UnicodeEncodeError` 把进程带崩。完整来龙去脉见 `tools/pkn.py` 的 main()。
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
     sys.exit(main())
