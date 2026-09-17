@@ -931,7 +931,7 @@ class ItemDescTests(unittest.TestCase):
         # 原来上限 4 行 + 字母序 ⇒ 满 5 项的铠甲「体力」被砍掉了。
         desc = shopcfg.item_desc_zh(shopdata.get(1010063))
         self.assertIn("体力", desc)
-        self.assertGreaterEqual(len(desc.split("\n")), 1)
+        self.assertLessEqual(len(desc.split("\n")), 4)
 
     def test_grenades_show_their_splash(self):
         # 榴弹真正的杀伤在溅射上，`weapon.ini` 有这两格但一直没画出来。
