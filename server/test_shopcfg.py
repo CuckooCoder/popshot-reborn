@@ -937,6 +937,7 @@ class ItemDescTests(unittest.TestCase):
         # 榴弹真正的杀伤在溅射上，`weapon.ini` 有这两格但一直没画出来。
         desc = shopcfg.item_desc_zh(shopdata.get(1120022))
         self.assertIn("溅射", desc)
+        self.assertIn("范围", desc)
 
     def test_cosmetics_say_so_instead_of_going_blank(self):
         # 用户 2026-09-09：留白分不清「真没有」和「漏写了」。
