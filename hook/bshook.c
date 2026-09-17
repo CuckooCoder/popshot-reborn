@@ -6390,8 +6390,16 @@ static void __cdecl proj_add_log(void *proj)
 /* ★ 只跟踪「`Add` 认出来是子弹」的那些对象 —— `ProjectileMgr` 那张 map 里
    还躺着角色和一堆地图物件（实测 vft 有十来种），全打就淹了。
    判据：`+0x304` 是个像样的武器 id、`+0x308` 是个像样的指针。
-   表是环形的，满了覆盖最老的一格。 */
-#define PROJ_TRACK_N 64
+   表是环形的，满了覆盖最老的一格。
+
+   ★★ 2026-09-17 从 64 加到 512：查「爱琳 2 号武器分裂出的蝴蝶炸完不消失」时
+   发现**这张表本身在骗人** —— 那一局登记了 180 颗弹体，64 格早被挤了三轮，
+   于是「某颗弹体的 `PROJ.` 行断了」既可能是它被销毁、也可能只是被挤出表，
+   **两种情况在日志里长得一模一样**，判不了。512 格够一整局（实测一局 ~180 颗）。
+   ⚠ 光加大还不够：被挤掉时如果那一格还在 tick，就打一行 `PROJ~`，
+   **让「表不够用」这件事自己说出来**，而不是留给下一个人再踩一次（铁律 10 的精神：
+   判据要么成立要么报警，不能静默失真）。 */
+#define PROJ_TRACK_N 512
 static struct { void *obj; int handle, ticks; } g_proj_track[PROJ_TRACK_N];
 static int g_proj_track_next = 0;
 
@@ -6405,6 +6413,12 @@ static void proj_track_add(void *proj, int handle)
 {
     int i = g_proj_track_next;
     g_proj_track_next = (g_proj_track_next + 1) % PROJ_TRACK_N;
+    /* ★ 挤掉一格之前先喊一声：被挤掉的那颗从此不再出现在日志里，
+       看日志的人会把它误当成「被销毁了」。表够不够用不能靠感觉。 */
+    if (g_proj_track[i].obj && g_proj_track[i].ticks > 0)
+        bslog("PROJ~   追踪表满，句柄 %d 被挤出（已 tick %d 次）"
+              "—— 它之后的轨迹不再有日志，**别当成它被销毁了**",
+              g_proj_track[i].handle, g_proj_track[i].ticks);
     g_proj_track[i].obj = proj;
     g_proj_track[i].handle = handle;
     g_proj_track[i].ticks = 0;
@@ -6425,13 +6439,16 @@ static void __cdecl proj_tick_log(void *proj)
         g_proj_track[i].ticks++;
         /* ★ 走 bsvlog 不走 bslog：这是**每帧 × 每弹体**的，占不起 flush +
            DebugView 那一档（用户 2026-09-01 的掉帧）。 */
+        /* ★ 寿命(+31c) 和碰撞型(+32c) 也逐帧打：登记时打过一次不够用 ——
+           查「炸完不消失」要看的正是「它到底还在不在倒计时」。 */
         bsvlog("PROJ.   弹体 %08X 句柄 %d owner %d 第%d帧 位置(+34,38)"
                " (%.2f, %.2f) 渲染(+2c,30) (%.2f, %.2f) 速度 (%.2f, %.2f)"
-               " 状态 %d 线 %08X",
+               " 状态 %d 寿命(+31c) %d 碰撞型(+32c) %d 追踪目标(+328) %d 线 %08X",
                (unsigned)(UINT_PTR)p, g_proj_track[i].handle,
                proj_owner_of(g_proj_track[i].handle), g_proj_track[i].ticks,
                PF(0x34), PF(0x38), PF(0x2C), PF(0x30),
-               PF(0x120), PF(0x124), PI(0x54), PU(0x30C));
+               PF(0x120), PF(0x124), PI(0x54), PI(0x31C), PI(0x32C), PI(0x328),
+               PU(0x30C));
         /* ★ 弹道线 / 拖尾**每帧的内容**：光看「指针非 0」证明不了它被画了
            —— 要看它有没有跟着弹体动。真人和 bot 并排比这几行就够了。 */
         if (PU(0x30C))
@@ -6700,10 +6717,15 @@ static int try_patch_proj_diag(void)
         if (!g_proj_fire_tramp) return 0;
     }
     InterlockedExchange(&g_proj_diag_patched, 1);
+    /* ★ 这句以前写的是「按整数位置翻转打轨迹」—— 早就改成每 tick 都打了，
+       文字没跟上。查弹体问题的人照着它去读日志会判错（「没有新行」被当成
+       「弹体不动」，其实那一版是「弹体没了」），所以订正。 */
     bslog("PATCH   ★弹体诊断已装 @ %08X / %08X / %08X：收到 rpFire 打一行"
-          "解析出来的参数，每颗弹体登记时打一份全字段快照，之后按整数位置"
-          "翻转打轨迹（BSHOOK_PROJ_DIAG=0 可关）",
-          (unsigned)PROJ_FIRE_VA, (unsigned)PROJ_ADD_VA, (unsigned)PROJ_TICK_VA);
+          "解析出来的参数，每颗弹体登记时打一份全字段快照，之后**每 tick 打一行**"
+          "轨迹（追踪表 %d 格，挤掉还在 tick 的会打 PROJ~ 警告）"
+          "（BSHOOK_PROJ_DIAG=0 可关）",
+          (unsigned)PROJ_FIRE_VA, (unsigned)PROJ_ADD_VA, (unsigned)PROJ_TICK_VA,
+          PROJ_TRACK_N);
     return 1;
 }
 
@@ -6988,27 +7010,31 @@ static int try_patch_ime_cand_layout_guard(void)
 /*   时机：两处都要**早于**启动时的 map.ini 加载。patch 线程在 +2.5s 打，      */
 /*   那时资源加载还没开始（见 patch_thread 里 SnowCipher 那段的说明）。       */
 /*                                                                            */
-/*   ── 第三处：시리아 마스（角色 110）的战斗内换人图标 ──                    */
+/*   ── 第三处：★ 已退役（X_Mod 2026-09-15，X1 / D4）──                      */
 /*                                                                            */
-/*   服务端把 11 个商城角色全放出来之后，**进关卡瞬间必崩**                   */
-/*   （C0000005 @ 0x430857，调用链 0x40bd40 -> 0x477bab -> 0x4f5970           */
-/*    -> 0x4f682a -> 0x430857）。战斗内的 `CharacterChanger` 给每个可选角色   */
-/*   建一个按钮，图标取自 `Images/NewUI2/BigChrIcons.smf`，                    */
-/*   下标由 `0x4f676e` 起的 switch 按角色 id 硬编码：                         */
+/*   原来这里有一条「角色 110 시리아 마스 的战斗内图标借用 106 的」补丁       */
+/*   （`0x004f67d1`，`6A 18 58 6A 19` -> `6A 10 58 6A 11`）。                 */
+/*                                                                            */
+/*   背景：换人条的图标下标由 `0x4f676e` 起的 switch 按角色 id 硬编码         */
 /*       0/1/2 -> (id*2, id*2+1)   100 -> (6,7)    101 -> (8,9)               */
 /*       103 -> (0x0a,0x0b)  102 -> (0x0c,0x0d)  104 -> (0x0c,0x0e)           */
 /*       105 -> (0x0c,0x0f)  106 -> (0x10,0x11)  107 -> (0x12,0x13)           */
 /*       108 -> (0x14,0x15)  109 -> (0x16,0x17)                               */
 /*       110 -> (0x18,0x19)  3 -> (0x1a,0x1b)                                 */
-/*   而这张图集是**按地区换的**（`0x558916` 把路径映射到                      */
-/*   `Images/Chinese/BigChrIcons_CN.smf`），中国版那份只有 **24** 帧          */
-/*   （0..23），韩国版 28 帧。下标 0x18/0x19 越界，`0x430854` 就从图集数组外  */
-/*   取到垃圾指针。—— 图是真没有，不是判定挡住的。                            */
+/*   而图集按地区换（`0x558916` 映射到 `Images/Chinese/BigChrIcons_CN.smf`），*/
+/*   中国版那份**只声明了 24 帧**（0..23）⇒ 0x18/0x19 越界，                  */
+/*   `0x430854` 从数组外取到垃圾指针，**进关卡必崩** C0000005 @ 0x430857。    */
 /*                                                                            */
-/*   改法：把 110 的图标对改成 106 시리아 的 (0x10,0x11)，5 字节换 5 字节。    */
-/*   战斗内换人条上它会显示成「시리아」的头像，模型/名字/数值都不受影响。      */
-/*   （角色 3 아이린 要的 0x1a/0x1b 同样越界，但它被 `0x4f58f1` 显式跳过，    */
-/*     根本不会建按钮，不用管。）                                             */
+/*   ★ 真相是：那几帧**早就画在 PNG 里了**（`Images/NewUI2/BigChrIcons.png`   */
+/*   有 30 格，`Chinese.ini` 只重定向 `.smf` 不换 `.png`），是 `.smf` 把帧数  */
+/*   截断了 —— 这是**数据 bug，不是设计**。X_Mod 把 CN 的 `.smf` 补成和韩版  */
+/*   一样的 28 帧（前 24 帧本来就逐字节相同），于是：                          */
+/*     · 110 拿回**它自己**的头像，不再顶着 106 시리아 的脸；                  */
+/*     · 角色 3 아이린 要的 0x1a/0x1b 也一并有了 —— 这是 X1 的前提。          */
+/*   ⇒ 本补丁从「救命」变成「劣化」，删掉。                                   */
+/*                                                                            */
+/*   ⚠ 依赖：新的 `bshook.dll` 必须和补过帧的 `Pack_publish` 一起发。         */
+/*   守卫在 `tools/mkchar.py --audit` 的第 ⑦ 条（smf 帧数 < 28 直接报错）。   */
 /*                                                                            */
 /*   ── 第四处：待机房间里「关卡 ◀ ▶」按钮的关卡环 ──                        */
 /*                                                                            */
@@ -7064,7 +7090,7 @@ static int try_patch_ime_cand_layout_guard(void)
 /*   等级门槛（MinLevel）后来也按用户要求一并解除了 —— 见下面独立的            */
 /*   「地图等级门槛 patch」（0x40b623，D142），不挂在本组、有单独的回退开关。   */
 /* -------------------------------------------------------------------------- */
-#define REGION_PATCH_COUNT 5
+#define REGION_PATCH_COUNT 4
 /* 每处都验一段上下文再动手：2 字节的特征太短，光比 `8B 08` 容易撞上密文。 */
 static const struct {
     unsigned int va;          /* 特征串起始 VA                    */
@@ -7085,11 +7111,6 @@ static const struct {
                              "\x48\x33\xD2\x42\xD3\xE2\x85\xD6\x74\x1A",
       (const unsigned char *)"\x33\xC9",          /* xor ecx,ecx */
       "建房「任务」下拉框（地区序号 2 中国 -> 0 韩国）" },
-    { 0x004f67d1u, 15, 8, 5,
-      (const unsigned char *)"\x8D\x04\x3F\x8D\x48\x01\xEB\x22"
-                             "\x6A\x18\x58\x6A\x19\xEB\x1A",
-      (const unsigned char *)"\x6A\x10\x58\x6A\x11", /* push 0x10 / pop eax / push 0x11 */
-      "角色 110 战斗内图标（0x18/0x19 越界 -> 借用 106 的 0x10/0x11）" },
     { 0x00466318u, 17, 5, 2,
       (const unsigned char *)"\x2B\xC1\x88\x5D\xFC\x74\x45\x48\x74\x42"
                              "\x48\x0F\x85\xC3\x00\x00\x00",
@@ -7111,7 +7132,7 @@ static int region_lock_disabled(void)
     return !(n > 0 && n < sizeof(buf) && buf[0] != '0');
 }
 
-/* 返回 1 表示三处都已就位（本轮打的或之前就打过）。 */
+/* 返回 1 表示 REGION_PATCH_COUNT 处全都已就位（本轮打的或之前就打过）。 */
 static int try_patch_region_lock(void)
 {
     int i, done = 0;
@@ -7143,6 +7164,201 @@ static int try_patch_region_lock(void)
     }
     if (done == REGION_PATCH_COUNT) {
         InterlockedExchange(&g_region_patched, 1);
+        return 1;
+    }
+    return 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 阶段5 —— 第 4 个基础角色「爱琳」（아이린 / ChrIndex=3）解锁                 */
+/*   X_Mod · X1，完整来龙去脉在                                                */
+/*   `develop_history/X_自定义游戏内容Mod开发/.claude/FINDINGS.md` §1 / §2。   */
+/*                                                                            */
+/*   她不是新角色，是**原版做好了、中国区没开**的第 4 个基础角色：属性表 131   */
+/*   个键、中文名（`아이린=爱琳`）、三把武器、花瓣蝴蝶特效、选人语音、战斗内   */
+/*   头像原画，311 客户端里全都有；连「您可以从4级开始使用爱琳」这句提示都翻   */
+/*   好了。**唯一缺的是 `Models/Characters/ch03/`**（X_Mod 用 ch01 卡希尔整套 */
+/*   克隆补上，见 `tools/mkchar.py`）。                                        */
+/*                                                                            */
+/*   ★ 前提：`Images/Chinese/BigChrIcons_CN.smf` 必须已经补到 **28 帧**。      */
+/*   她的图标下标是 `0x1a/0x1b`（`0x4f676e` 和 `0x44c964` 两处 switch 都写死   */
+/*   了），中国版原来只声明 24 帧 —— 不补就**一进大厅必崩**                    */
+/*   C0000005 @ 0x430857。守卫在 `tools/mkchar.py --audit` 第 ⑦ 条。          */
+/*                                                                            */
+/*   ── 六道闸，少打一道就少一个面板 ──                                       */
+/*                                                                            */
+/*   客户端有**三条互相独立**的「可选角色」代码路径，每条都自带一个 0..2 的    */
+/*   基础角色循环：                                                            */
+/*       大厅左侧「人物选择」面板   0x44c8xx  循环上界 0x44caaf               */
+/*       房间右下 6 格分页          0x4072c0  循环上界 0x407383               */
+/*       战斗内换人条               0x407168  循环上界 0x40724f               */
+/*   再加上「按钮总数」`0x40713a` 结尾的 `lea eax,[edi+3]`、战斗内那条循环里   */
+/*   **显式跳过 id 3** 的 `0x4f58f4`，以及持有判定 `0x55853c` 的               */
+/*   `cmp eax,3`（id<3 恒真 = 白送）。                                         */
+/*                                                                            */
+/*   ⚠ 少打一道**不会崩**（`0x4f58dc` 的 `cmp ecx,-1 / je` 兜住越界下标），    */
+/*   症状是「某个面板里就是没有她」—— 所以要么六道全打上，要么一道都别打。     */
+/*                                                                            */
+/*   ── 4 级门一并解除（★ 2026-09-17 起，无条件；D2 改口径）──                */
+/*                                                                            */
+/*   `0x44c954` / `0x44cc07` / `0x467eb1` 三处 `cmp [0x72e338], 4` 是原版      */
+/*   「4 级起可用爱琳」的判据，现在**和上面六处一起、默认就打掉** ——          */
+/*   爱琳从 1 级起就能选。★ **没有开关**：用户 2026-09-17 明确「去掉就是      */
+/*   固定去掉，不要搞选项」，所以别再给它加环境变量。                          */
+/*                                                                            */
+/*   设 BSHOOK_KEEP_IRENE_LOCK=1 保留原版（爱琳在三个面板里都不出现）——       */
+/*   那是「整个角色回到原版」的总开关，九处一起不打，不是 4 级门的选项。      */
+/* -------------------------------------------------------------------------- */
+#define IRENE_PATCH_COUNT 6
+/* 字段含义和 REGION_SITES 一样：特征串起始 VA / 长度 / 要改的字节在串里的偏移
+   / 改几个字节 / 原始字节 / 替换字节 / 说明。
+   ★ 六条特征串都在 `re/BigShot_22524.img` 上验过**各自唯一**（各命中 1 次）。*/
+static const struct {
+    unsigned int va;
+    unsigned int len;
+    unsigned int off;
+    unsigned int n;
+    const unsigned char *sig;
+    const unsigned char *fix;
+    const char *what;
+} IRENE_SITES[IRENE_PATCH_COUNT] = {
+    { 0x00558532u, 16, 10, 3,
+      (const unsigned char *)"\x33\xC0\x40\xEB\x02\x33\xC0\xC2\x04\x00"
+                             "\x83\xF8\x03\x7D\x03\xB0",
+      (const unsigned char *)"\x83\xF8\x04",
+      "持有判定 0x55853c：id<3 恒真 -> id<4（爱琳白送，不走角色卡）" },
+    { 0x0044CA9Eu, 24, 17, 4,
+      (const unsigned char *)"\x8D\x8B\xE0\x00\x00\x00\x8D\x45\xE4\xE8"
+                             "\x05\x03\x00\x00\xFF\x45\x10\x83\x7D\x10"
+                             "\x03\x0F\x8C\x71",
+      (const unsigned char *)"\x83\x7D\x10\x04",
+      "大厅「人物选择」面板的基础角色循环 0..2 -> 0..3" },
+    { 0x00407376u, 20, 13, 3,
+      (const unsigned char *)"\xE8\xC4\x18\x00\x00\x8B\xC8\xE8\xBD\x77"
+                             "\x1C\x00\x46\x83\xFE\x03\x7C\xC9\x83\x65",
+      (const unsigned char *)"\x83\xFE\x04",
+      "房间 6 格人物面板（枚举器 0x4072c0）的基础角色循环 0..2 -> 0..3" },
+    { 0x00407245u, 20, 10, 4,
+      (const unsigned char *)"\x8B\xC8\xE8\xF3\x78\x1C\x00\xFF\x45\x10"
+                             "\x83\x7D\x10\x03\x7C\xBC\x33\xDB\x39\x5D",
+      (const unsigned char *)"\x83\x7D\x10\x04",
+      "战斗内换人条（枚举器 0x407168）的基础角色循环 0..2 -> 0..3" },
+    { 0x00407153u, 16, 13, 3,
+      (const unsigned char *)"\x83\xFE\x0B\x7C\xE8\x80\x7C\x24\x10\x00"
+                             "\x74\x01\x47\x8D\x47\x03",
+      (const unsigned char *)"\x8D\x47\x04",
+      "按钮总数 0x40713a：持有的商城角色数 +3 -> +4" },
+    { 0x004F58E8u, 18, 12, 6,
+      (const unsigned char *)"\x83\xF9\x62\x0F\x84\xDA\x00\x00\x00"
+                             "\x83\xF9\x03\x0F\x84\xD1\x00\x00\x00",
+      (const unsigned char *)"\x90\x90\x90\x90\x90\x90",
+      "战斗内 CharacterChanger 不再显式跳过 id 3（同循环跳过 98 的那条保留）" },
+};
+static volatile LONG g_irene_patched = 0;
+
+/* 三处 4 级门。★ 和上面六处一样**默认就打**，没有开关（D2，2026-09-17 改口径）。 */
+#define IRENE_LVL_SITE_COUNT 3
+static const struct {
+    unsigned int va;
+    unsigned int len;
+    unsigned int off;
+    unsigned int n;
+    const unsigned char *sig;
+    const unsigned char *fix;
+    const char *what;
+} IRENE_LVL_SITES[IRENE_LVL_SITE_COUNT] = {
+    { 0x0044C94Du, 13, 7, 6,
+      (const unsigned char *)"\x83\x3D\x38\xE3\x72\x00\x04"
+                             "\x0F\x8C\x52\x01\x00\x00",
+      (const unsigned char *)"\x90\x90\x90\x90\x90\x90",
+      "大厅面板：等级 <4 就不给爱琳建按钮" },
+    { 0x0044CC00u, 13, 7, 6,
+      (const unsigned char *)"\x83\x3D\x38\xE3\x72\x00\x04"
+                             "\x0F\x8D\x85\x00\x00\x00",
+      (const unsigned char *)"\xE9\x86\x00\x00\x00\x90",
+      "大厅面板点击：等级 <4 弹提示并拒绝" },
+    { 0x00467EAAu, 13, 7, 6,
+      (const unsigned char *)"\x83\x3D\x38\xE3\x72\x00\x04"
+                             "\x0F\x8D\x08\x01\x00\x00",
+      (const unsigned char *)"\xE9\x09\x01\x00\x00\x90",
+      "房间面板点击：等级 <4 弹提示并拒绝" },
+};
+static volatile LONG g_irene_lvl_patched = 0;
+
+static int irene_lock_kept(void)
+{
+    char buf[8];
+    DWORD n = GetEnvironmentVariableA("BSHOOK_KEEP_IRENE_LOCK", buf, sizeof(buf));
+    return (n > 0 && n < sizeof(buf) && buf[0] != '0');
+}
+
+/* 返回 1 表示六处全都已就位（本轮打的或之前就打过）。 */
+static int try_patch_irene_unlock(void)
+{
+    int i, done = 0;
+
+    if (g_irene_patched) return 1;
+    for (i = 0; i < IRENE_PATCH_COUNT; i++) {
+        unsigned char *base = (unsigned char *)IRENE_SITES[i].va;
+        unsigned char *p = base + IRENE_SITES[i].off;
+        unsigned int n = IRENE_SITES[i].n;
+        DWORD oldp;
+
+        if (IsBadReadPtr(base, IRENE_SITES[i].len)) continue;
+        if (memcmp(p, IRENE_SITES[i].fix, n) == 0) { done++; continue; }
+        if (memcmp(base, IRENE_SITES[i].sig, IRENE_SITES[i].len) != 0)
+            continue;
+        if (!VirtualProtect(p, n, PAGE_EXECUTE_READWRITE, &oldp)) {
+            bslog("PATCH   爱琳解锁(%s): VirtualProtect 失败 err=%lu",
+                  IRENE_SITES[i].what, (unsigned long)GetLastError());
+            continue;
+        }
+        memcpy(p, IRENE_SITES[i].fix, n);
+        VirtualProtect(p, n, oldp, &oldp);
+        FlushInstructionCache(GetCurrentProcess(), p, n);
+        bslog("PATCH   ★爱琳解锁 @ %08X: %s",
+              (unsigned)(IRENE_SITES[i].va + IRENE_SITES[i].off),
+              IRENE_SITES[i].what);
+        done++;
+    }
+    if (done == IRENE_PATCH_COUNT) {
+        InterlockedExchange(&g_irene_patched, 1);
+        return 1;
+    }
+    return 0;
+}
+
+/* 三处 4 级门，和 try_patch_irene_unlock() 一样**无条件调**。 */
+static int try_patch_irene_level(void)
+{
+    int i, done = 0;
+
+    if (g_irene_lvl_patched) return 1;
+    for (i = 0; i < IRENE_LVL_SITE_COUNT; i++) {
+        unsigned char *base = (unsigned char *)IRENE_LVL_SITES[i].va;
+        unsigned char *p = base + IRENE_LVL_SITES[i].off;
+        unsigned int n = IRENE_LVL_SITES[i].n;
+        DWORD oldp;
+
+        if (IsBadReadPtr(base, IRENE_LVL_SITES[i].len)) continue;
+        if (memcmp(p, IRENE_LVL_SITES[i].fix, n) == 0) { done++; continue; }
+        if (memcmp(base, IRENE_LVL_SITES[i].sig, IRENE_LVL_SITES[i].len) != 0)
+            continue;
+        if (!VirtualProtect(p, n, PAGE_EXECUTE_READWRITE, &oldp)) {
+            bslog("PATCH   爱琳 4 级门(%s): VirtualProtect 失败 err=%lu",
+                  IRENE_LVL_SITES[i].what, (unsigned long)GetLastError());
+            continue;
+        }
+        memcpy(p, IRENE_LVL_SITES[i].fix, n);
+        VirtualProtect(p, n, oldp, &oldp);
+        FlushInstructionCache(GetCurrentProcess(), p, n);
+        bslog("PATCH   ★爱琳 4 级门解除 @ %08X: %s",
+              (unsigned)(IRENE_LVL_SITES[i].va + IRENE_LVL_SITES[i].off),
+              IRENE_LVL_SITES[i].what);
+        done++;
+    }
+    if (done == IRENE_LVL_SITE_COUNT) {
+        InterlockedExchange(&g_irene_lvl_patched, 1);
         return 1;
     }
     return 0;
@@ -7913,8 +8129,7 @@ static DWORD WINAPI patch_thread(LPVOID param)
        0x4082ae 那 4 秒，就可能刚好错过。挂机计时器反过来完全不急，
        它第一次被执行要等到进大厅。 */
     if (!region_lock_disabled()) {
-        bslog("PATCH   BSHOOK_KEEP_REGION_LOCK 已设，保留原版地区差异"
-              "（任务只剩 4 关；★ 这时服务端也必须把角色 110 关掉，否则进关卡会崩）");
+        bslog("PATCH   BSHOOK_KEEP_REGION_LOCK 已设，保留原版地区差异（任务只剩 4 关）");
     } else {
         for (ticks = 0; !g_stop && !g_region_patched && ticks < 2000; ticks++) {
             if (try_patch_region_lock()) break;
@@ -7922,8 +8137,33 @@ static DWORD WINAPI patch_thread(LPVOID param)
         }
         if (!g_region_patched)
             bslog("PATCH   !! 超时未能 patch 地区差异"
-                  "（0x40b419 / 0x4368cf / 0x4f67d1 / 0x46631d / 0x4653a8 "
+                  "（0x40b419 / 0x4368cf / 0x46631d / 0x4653a8 "
                   "的特征串一直对不上）");
+    }
+
+    /* 爱琳（ChrIndex=3）解锁 —— **时机完全不急**：六处全在 UI 代码里，
+       最早也要等玩家进大厅才第一次执行，远晚于解壳窗口。
+       不像 0x40b419 那样有「必须赶在 map.ini 加载之前」的时限。 */
+    if (irene_lock_kept()) {
+        bslog("PATCH   BSHOOK_KEEP_IRENE_LOCK 已设，保留原版："
+              "爱琳(id 3)在大厅 / 房间 / 战斗内三个面板里都不出现");
+    } else {
+        for (ticks = 0; !g_stop && !g_irene_patched && ticks < 2000; ticks++) {
+            if (try_patch_irene_unlock()) break;
+            Sleep(2);
+        }
+        if (!g_irene_patched)
+            bslog("PATCH   !! 超时未能 patch 爱琳解锁"
+                  "（0x55853c / 0x44caaf / 0x407383 / 0x40724f / 0x407160 / "
+                  "0x4f58f4 的特征串一直对不上）");
+        /* 4 级门：★ 无条件解除，爱琳从 1 级起就能选（D2，2026-09-17 改口径）。 */
+        for (ticks = 0; !g_stop && !g_irene_lvl_patched && ticks < 2000; ticks++) {
+            if (try_patch_irene_level()) break;
+            Sleep(2);
+        }
+        if (!g_irene_lvl_patched)
+            bslog("PATCH   !! 超时未能解除爱琳 4 级门"
+                  "（0x44c954 / 0x44cc07 / 0x467eb1 的特征串一直对不上）");
     }
 
     /* 登录公告：**这一轮是次要的**，打不上也没关系 —— 真正的保证在

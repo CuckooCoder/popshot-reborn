@@ -188,6 +188,30 @@ class SyntheticTests(_TableCase):
         # 材料不限角色
         self.assertTrue(shopdata.usable_by(30018, 2))
 
+    def test_there_are_exactly_three_equipment_slot_masks(self):
+        """★★ 装备槽位掩码**永远是 3 个**，别跟着基础角色数量改。
+
+        客户端 `0x5583d3 Equipment::Equip` 开头就是 `cmp ax,3 / jge` ——
+        下标 >= 3 的掩码**直接丢弃**，`0x558501 IsSlotUsed` 同理。
+        线格式 `0x030b` / `0x0604` 里那 12 字节也是按 3 个掰死的。
+
+        ⇒ X_Mod 给爱琳（id 3）开了第 4 个基础角色，但她**不会有第 4 个掩码**：
+        改大这个数只会凭空多发一段客户端读不到的字节。
+        她的装备槽位冲突是一个**独立课题**，不是把这个 3 改成 4 就完事。
+        """
+        self.assertEqual(3, shopdata.SLOT_MASK_COUNT)
+
+        class _Item(object):                 # slot_owners 只看这两个字段
+            def __init__(self, part_flag, character):
+                self.part_flag = part_flag
+                self.character = character
+
+        # 限定 0/1/2 各占一个掩码，不限的三个全点 —— 这是原版行为。
+        self.assertEqual((0,), shopdata.slot_owners(shopdata.STORE.get(1120041)))
+        self.assertEqual((0, 1, 2), shopdata.slot_owners(_Item(1, None)))
+        # ★ 限定到爱琳（3）的装备**一个掩码都点不亮**：客户端没有第 4 个槽。
+        self.assertEqual((), shopdata.slot_owners(_Item(1, 3)))
+
     def test_conflicts_uses_bitwise_and(self):
         self.assertTrue(shopdata.conflicts(1010001, 1010001))     # 同一件
         self.assertFalse(shopdata.conflicts(1010001, 1020001))    # 上衣 vs 下装

@@ -96,9 +96,11 @@ BOT_LEVEL = 4
 
 #: 「人物选择」面板上的角色顺序 —— `/c N M` 里的 M 就是这张表的 1-based 下标。
 #:
-#: 原始角色 id 是 `0/1/2` + `100..110`，中间断了一大截（id 3 아이린 和 98
-#: 쉐도우 타이 被客户端的按钮循环 `0x4f58e8` 显式跳过，99 랜덤 要另一个开关，
-#: 三个都放不出来，见 `account_store.PREMIUM_CHARACTER_IDS` 的注释）。
+#: 原始角色 id 是 `0/1/2/3` + `100..110`，中间断了一大截（id 98 쉐도우 타이 被
+#: 客户端的按钮循环 `0x4f58e8` 显式跳过，99 랜덤 要另一个开关，两个都放不出来，
+#: 见 `account_store.PREMIUM_CHARACTER_IDS` 的注释）。
+#: ★ id 3 아이린 爱琳是 X_Mod 加的第 4 个基础角色，**面板序号 4 起的商城角色
+#:   整体后移了一位**（原来 `/c N 4` 是 100 엘리어스，现在是 `/c N 5`）。
 #: 直接让玩家写原始 id 的话 `/c 3 5` 这种自然写法就是非法值 —— 所以命令里
 #: 用连续的面板序号，只在服务端换算一次（D6）。
 #:
@@ -118,13 +120,19 @@ CHARACTER_PANEL_IDS = tuple(BASE_CHARACTER_IDS) + tuple(PREMIUM_CHARACTER_IDS)
 #:     角色 0  手枪 / 分裂手雷 / 狙击枪
 #:     角色 1  双散弹 / 燃烧瓶 / 追踪火箭
 #:     角色 2  机枪 / 抛物线榴弹 / 火箭筒
-BOT_CHARACTER_PANEL_IDS = tuple(BASE_CHARACTER_IDS)
+#:
+#: ★★ **故意写成字面量，不跟着 `BASE_CHARACTER_IDS` 走**：X_Mod 把爱琳（id 3）
+#: 加进基础角色之后，跟着走就会让 bot 开始用她 —— 而她的 2/3 号武器是
+#: `SeedBomb` / `TotemLauncher`，服务端同样没有这两类的飞行模型，D54 的理由
+#: 原样适用。要给 bot 用爱琳是**另一件事**，得先把那两类武器的模型补上。
+BOT_CHARACTER_PANEL_IDS = (0, 1, 2)
 
 #: 新 bot 的默认角色：按座位号在三个基础角色之间轮换。
 #:
 #: 全给同一个角色的话，三个 bot 在房间里是三个一模一样的模型，谁也认不出谁。
 #: 轮换是**确定性**的（同一个座位号永远同一个角色），所以单测能钉住。
-BOT_DEFAULT_CHARACTERS = tuple(BASE_CHARACTER_IDS)
+#: ★ 和上面同理，**字面量**，不跟 `BASE_CHARACTER_IDS`。
+BOT_DEFAULT_CHARACTERS = (0, 1, 2)
 
 #: bot 命令的前缀。普通聊天不会以它开头，所以不会误吞玩家的话。
 COMMAND_PREFIX = "/"

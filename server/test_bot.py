@@ -21,6 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+import account_store                                           # noqa: E402
 import bot                                                     # noqa: E402
 import gameserver                                              # noqa: E402
 from gameserver import (                                       # noqa: E402
@@ -605,14 +606,16 @@ class BotSeatLifecycleTests(LobbyIsolated):
 class CharacterPanelTests(unittest.TestCase):
     """`/c N M` 的 M 是**面板序号**，不是原始角色 id（D6）。"""
 
-    def test_the_panel_has_exactly_fourteen_entries(self):
-        # 基础 0/1/2 + 商城 100..110。id 3 / 98 / 99 客户端放不出来。
-        self.assertEqual(14, len(bot.CHARACTER_PANEL_IDS))
-        self.assertEqual((0, 1, 2), bot.CHARACTER_PANEL_IDS[:3])
-        self.assertEqual(tuple(range(100, 111)), bot.CHARACTER_PANEL_IDS[3:])
+    def test_the_panel_has_exactly_fifteen_entries(self):
+        # 基础 0/1/2/3 + 商城 100..110。id 98 / 99 客户端放不出来。
+        # ★ 爱琳（id 3）是 X_Mod 加的第 4 个基础角色（X1 / D2），
+        #   所以商城角色的面板序号整体后移了一位：`/c N 4` 现在是她。
+        self.assertEqual(15, len(bot.CHARACTER_PANEL_IDS))
+        self.assertEqual((0, 1, 2, 3), bot.CHARACTER_PANEL_IDS[:4])
+        self.assertEqual(tuple(range(100, 111)), bot.CHARACTER_PANEL_IDS[4:])
 
     def test_panel_index_round_trips(self):
-        for panel in range(1, 15):
+        for panel in range(1, 16):
             character = bot.character_for_panel(
                 panel, bot.CHARACTER_PANEL_IDS)
             self.assertEqual(panel, bot.panel_for_character(character))
@@ -628,6 +631,18 @@ class CharacterPanelTests(unittest.TestCase):
             self.assertEqual(panel - 1, bot.character_for_panel(panel))
         for panel in (4, 8, 14):
             self.assertIsNone(bot.character_for_panel(panel), panel)
+
+    def test_the_bot_roster_does_not_follow_the_base_roster(self):
+        """★★ bot 的名单是**字面量**，故意不跟着 `BASE_CHARACTER_IDS` 走。
+
+        X_Mod 把爱琳（id 3）加成第 4 个基础角色之后，要是这两个常量还写成
+        `tuple(BASE_CHARACTER_IDS)`，bot 就会自动开始用她 —— 而她的 2/3 号
+        武器是 `SeedBomb` / `TotemLauncher`，服务端同样没有这两类的飞行模型，
+        D54 的理由原样适用。给 bot 用爱琳是**另一件事**，得先补武器模型。
+        """
+        self.assertIn(3, account_store.BASE_CHARACTER_IDS)
+        self.assertNotIn(3, bot.BOT_CHARACTER_PANEL_IDS)
+        self.assertNotIn(3, bot.BOT_DEFAULT_CHARACTERS)
 
     def test_out_of_range_and_junk_return_none(self):
         for value in (0, 4, -1, "x", None, ""):

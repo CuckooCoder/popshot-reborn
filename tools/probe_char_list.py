@@ -11,13 +11,23 @@ probe_char_list.py —— 读活着的客户端里「人物选择」的数据源
 
     0x40713a(LobbyStage, 0)  数按钮个数
         for id in 100..110: 0x4070c2(id) 为真就 +1
-        return 计数 + 3                       ★ 0/1/2 三个基础角色白送
+        return 计数 + 4                       ★ 0/1/2/3 四个基础角色白送
     0x4070c2(id) = `[LobbyStage+0x1cc]`(我的座位) 已占用
                    且 `[LobbyStage + 座位*4 + 0x250]`(物品清单) 非空
                    且 0x55853c(清单, id)
-    0x55853c(清单, id): id < 3 -> true；否则在 `清单+0x18` 的
+    0x55853c(清单, id): id < 4 -> true；否则在 `清单+0x18` 的
                         `vector<int32>` 里找落在
                         `[(id+1)*1e6, (id+2)*1e6)` 区间的物品
+
+★★ **这个脚本是用 Python 复刻判定链，不是从内存读按钮数** ——
+所以它只反映下面那几个常量，不反映客户端真实状态。
+X_Mod 的 `IRENE_SITES` 把 `+3`→`+4`、`cmp eax,3`→`cmp eax,4` 之后，
+这里的常量必须跟着改，否则它会一直报「3 个」骗人（2026-09-15 实测踩过）。
+
+⚠ 另外它**不模拟 4 级门**：`0x44c954` / `0x44cc07` / `0x467eb1` 三处
+`cmp [0x72e338], 4` 是原版对爱琳(id 3)的等级解锁，默认保留。
+等级 < 4 时大厅面板根本不建她的按钮、房间面板建了但点不动 ——
+这个脚本照样会把她列出来。
 
 用法：
     python tools/probe_char_list.py <pid>
@@ -50,7 +60,9 @@ LIST_VECTOR_END = 0x1C
 #: 清单开头那 3 个槽位掩码
 LIST_SLOT_MASKS = 0x0C
 
-BASE_CHARACTER_IDS = (0, 1, 2)
+#: ★ 和 `server/account_store.py` 的 `BASE_CHARACTER_IDS` 必须一致。
+#: 3 = 아이린 爱琳，X_Mod 打开的第 4 个基础角色（见 hook 的 `IRENE_SITES`）。
+BASE_CHARACTER_IDS = (0, 1, 2, 3)
 PREMIUM_CHARACTER_IDS = tuple(range(100, 111))
 STRIDE = 1000000
 
@@ -149,9 +161,13 @@ def main():
         if hit:
             shown.append(character_id)
     for character_id in shown:
-        print(f"    id={character_id:<4} {CHARACTER_NAMES.get(character_id, '?')}"
-              f"{'  （基础角色，白送）' if character_id in BASE_CHARACTER_IDS else ''}")
-    print(f"  合计 {len(shown)} 个（客户端 0x40713a 数出来的按钮个数）")
+        note = "  （基础角色，白送）" if character_id in BASE_CHARACTER_IDS else ""
+        if character_id == 3:
+            note += "  （X_Mod 加的第 4 个基础角色；原版那道 4 级门已由 bshook 无条件打掉，"\
+                    "1 级就能选）"
+        print(f"    id={character_id:<4} {CHARACTER_NAMES.get(character_id, '?')}{note}")
+    print(f"  合计 {len(shown)} 个"
+          f"（★ 这是**本脚本按常量算的**，不是从内存读的按钮数）")
 
 
 if __name__ == "__main__":
