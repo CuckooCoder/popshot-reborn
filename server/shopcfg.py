@@ -1172,7 +1172,8 @@ CARD_CRAFT_PREFIX = "可合成："
 #: 压行：数值加成一行最多摆几项。234 px / 字号 10 大约放得下 3 项
 #: （「攻击 +3%　防御 +2%　生命 +2」）。★ 这个数要实机核对。
 BONUS_PER_LINE = 2
-
+# 每一项字段固定宽度10
+BONUS_PER_WIDTH = 10
 
 def _weapon_lines(weapon):
     """武器数值那几行。`weapon` 是 `shop_items.json` 里那个 dict。"""
@@ -1199,11 +1200,11 @@ def _weapon_lines(weapon):
     if weapon.get("velocity"):
         lines.append("飞行速度 %d " % weapon["velocity"])
     aligned = []
-    COLUMN_WIDTH = 10  # 每一列固定字符宽度，根据你的UI调大小，中文一个字≈2字符
+
     for i in range(0, len(lines), BONUS_PER_LINE):
         chunk = lines[i:i + BONUS_PER_LINE]
         # 每一项左对齐，补空格到固定宽度
-        padded = [item.ljust(COLUMN_WIDTH) for item in chunk]
+        padded = [item.ljust(BONUS_PER_WIDTH) for item in chunk]
         aligned_line = "".join(padded)
         aligned.append(aligned_line)
     return aligned
